@@ -8,8 +8,11 @@ review), browser-rts `AGENTS.md`, and what the Recoil survey showed.
 
 - **C23**, portable. Develop and ship with clang; the code must also build
   with GCC (`gcc-15`) and never rely on extensions only one compiler has. Use
-  `static_assert`, `typeof`, `constexpr`, `nullptr`, `[[nodiscard]]`,
-  `<stdckdint.h>` for size arithmetic and `<stdbit.h>`.
+  `static_assert`, `typeof`, `constexpr`, `nullptr`, `[[nodiscard]]`, and
+  `<stdckdint.h>` for size arithmetic. Not `<stdbit.h>`: macOS libc lacks it,
+  so bit operations use compiler builtins.
+- Feature macros: `base.h` defines `_DEFAULT_SOURCE` before any system
+  header, because strict `-std=c23` hides POSIX in glibc and musl.
 - **Unity build**: one translation unit per executable; a full rebuild stays
   under a second. If it stops doing that, fix the build before the next
   feature.

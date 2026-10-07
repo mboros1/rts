@@ -1,0 +1,5 @@
+-std=c23
+-Wall
+-Wextra
+-Isrc
+-I/opt/homebrew/include

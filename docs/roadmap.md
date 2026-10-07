@@ -43,6 +43,24 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 5 | Zones, gates, and the pool | The world spans processes | 2–3 zone processes plus a coordinator holding the transfer log and the faction unit pool; gate transfer survives a zone process being killed mid-transfer; gate seed opens a new zone; the player can switch zones |
 | 6 | Persistence and soak test | It survives as a persistent world | Logout converts units to defenses or an AI doctrine; zones snapshot to disk and restart cleanly; bots on both sides run for hours without divergence, memory growth, or crashes |
 
+## Spike 1 results (2026-10-07)
+
+Done. `make bench`, `make determinism-x86`, `make cross` reproduce these.
+
+- **Scale**: 10k units (5k a side) at 1.2–1.5 ms mean per tick, worst 2.4 ms;
+  35k units at 4.3 ms mean, one 21 ms worst tick. Budget is 33.3 ms.
+  Single-threaded, no SIMD.
+- **Combat**: ballistic shells with lead; artillery lobs high arcs that stay
+  up long enough to dodge. Shells cross factions as launches and are flown
+  by the target faction, as in the spike 3 design.
+- **Determinism**: replays verify tick for tick; arm64 and x86-64 (Rosetta)
+  agree both ways over 1800 ticks of a 10k-unit battle; a Linux x86-64 musl
+  build in Docker produces the same hashes. The game's own recorded session
+  verifies headlessly.
+- **Not yet**: pathfinding (units steer straight with separation), fog of
+  war, the Windows build is compiled but never run, and the 21 ms spike at
+  35k is unexplained.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.
