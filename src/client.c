@@ -6,16 +6,21 @@
 //       [--headless] [--auto-orders]       no window; order idle units forward
 //       [--disconnect-at TICK] [--reconnect-after SECONDS] [--quit-at TICK]
 //
-// The client never simulates (that's spike 3). It keeps a Mirror (wire.h)
-// built from the server's snapshot and deltas, dead-reckons units between
-// updates, flies shells itself, and checks the server's digest every second.
-// It reconnects on its own and takes a fresh snapshot.
+// A player simulates its own faction (remote.h): from a faction snapshot and
+// each tick's commands and effects it runs the faction's phase itself and
+// checks the faction hash against the server's every second. It only ever
+// knows the enemies its faction can see, and draws the rest as fog.
+//
+// A spectator keeps a Mirror of everything instead (wire.h), dead-reckoned.
+//
+// Either way it reconnects on its own and starts again from a snapshot.
 
 #include <math.h>
 
 #include "net.h"
 #include "netlog.h"
 #include "platform.h"
+#include "remote.h"
 #include "render.h"
 #include "scene.h"
 #include "view.h"
@@ -43,8 +48,10 @@ typedef struct {
 	SimConfig config;
 	Terrain terrain;
 	V2 base[FACTION_COUNT];
-	Mirror mirror;
-	bool mirror_ready;
+	bool player;                // simulates its faction; else a spectator
+	Remote remote;              // players
+	Mirror mirror;              // spectators
+	bool ready;                 // has a snapshot
 	double last_delta_at;
 
 	Arena program, frame, out;
@@ -67,7 +74,13 @@ typedef struct {
 	Vector2 drag_start;
 } Client;
 
-static double client_now(const Client *c) { return platform_seconds() - c->t0; }
+// Monotonic seconds on this machine's clock, so netlogs from two clients on
+// one machine line up when replayed side by side.
+static double client_now(const Client *c)
+{
+	(void)c;
+	return platform_seconds();
+}
 
 static void client_log(Client *c, uint8_t kind, const void *data, ptrdiff_t len)
 {
@@ -90,7 +103,7 @@ static bool client_connect(Client *c)
 	conn_reopen(&c->conn, fd);
 	if (c->ever_connected) c->reconnects++;
 	c->ever_connected = true;
-	c->mirror_ready = false;
+	c->ready = false;
 	arena_reset(&c->out);
 	ByteBuf b = bytebuf_make(&c->out, 16);
 	put32(&b, WIRE_VERSION);
@@ -100,11 +113,21 @@ static bool client_connect(Client *c)
 	return true;
 }
 
+static int64_t client_tick(const Client *c)
+{
+	return c->player ? c->remote.sim.tick.v : c->mirror.tick;
+}
+
+static uint16_t client_dilation(const Client *c)
+{
+	return c->player ? c->remote.dilation : c->mirror.dilation;
+}
+
 static void client_lost(Client *c, const char *why)
 {
 	client_event(c, NETLOG_DISCONNECTED, why ? why : "closed");
 	c->disconnected_since = client_now(c);
-	c->mirror_ready = false;
+	c->ready = false;
 }
 
 static void client_welcome(Client *c, ByteReader *r)
@@ -127,7 +150,9 @@ static void client_welcome(Client *c, ByteReader *r)
 	c->config = config;
 	memcpy(c->base, base, sizeof base);
 	terrain_generate(&c->terrain, &c->program, config.seed);
-	mirror_init(&c->mirror, &c->program, config.max_units, config.max_projectiles);
+	c->player = faction < FACTION_COUNT;
+	if (c->player) remote_init(&c->remote, &config, (FactionId){faction}, &c->program);
+	else mirror_init(&c->mirror, &c->program, config.max_units, config.max_projectiles);
 	c->selection = PUSH(&c->program, UnitHandle, config.max_units);
 	c->have_world = true;
 }
@@ -140,9 +165,34 @@ static void client_frames(Client *c)
 		ByteReader r = byte_reader(f.data, f.len);
 		if (f.kind == MSG_WELCOME) {
 			client_welcome(c, &r);
-		} else if ((f.kind == MSG_SNAPSHOT || f.kind == MSG_DELTA) && c->have_world) {
+		} else if (f.kind == MSG_FACTION_SNAPSHOT && c->have_world && c->player) {
+			c->ready = remote_snapshot(&c->remote, &r);
+			if (!c->ready) {
+				c->malformed++;
+				conn_close(&c->conn, "bad faction snapshot");
+			}
+			c->last_delta_at = client_now(c);
+		} else if (f.kind == MSG_FACTION_TICK && c->have_world && c->player) {
+			if (!c->ready) continue;
+			bool had_hash;
+			RemoteResult res = remote_tick(&c->remote, &r, &had_hash);
+			c->digests += had_hash;
+			if (res == REMOTE_OK) {
+				c->deltas++;
+				c->last_delta_at = client_now(c);
+			} else if (res == REMOTE_DIVERGED) {
+				c->digest_mismatches++;
+				conn_close(&c->conn, "faction hash mismatch: resyncing");
+			} else if (res == REMOTE_GAP) {
+				c->gaps++;
+				conn_close(&c->conn, "missed a tick: resyncing");
+			} else {
+				c->malformed++;
+				conn_close(&c->conn, "malformed faction tick");
+			}
+		} else if ((f.kind == MSG_SNAPSHOT || f.kind == MSG_DELTA) && c->have_world && !c->player) {
 			bool snapshot = f.kind == MSG_SNAPSHOT;
-			if (!snapshot && !c->mirror_ready) continue;
+			if (!snapshot && !c->ready) continue;
 			ApplyInfo info;
 			ApplyResult res = wire_apply(&c->mirror, &r, snapshot, &info);
 			if (res == APPLY_GAP) {
@@ -152,7 +202,7 @@ static void client_frames(Client *c)
 				c->malformed++;
 				conn_close(&c->conn, "malformed update");
 			} else {
-				c->mirror_ready = true;
+				c->ready = true;
 				c->deltas += !snapshot;
 				c->last_delta_at = client_now(c);
 				if (info.had_digest) {
@@ -184,42 +234,42 @@ static void client_send_command(Client *c, CommandKind kind, V2 target, const Un
 	if (conn_send(&c->conn, MSG_COMMAND, b.data, b.len, client_now(c))) c->commands_sent++;
 }
 
-// A stand-in player for tests and demos: every three seconds, own units
-// standing still are sent toward the enemy base, in groups.
+// A stand-in player for tests and demos: every three seconds, own units with
+// nothing to do are sent toward the enemy base, in groups.
 static void client_auto_orders(Client *c)
 {
-	if (!c->mirror_ready || c->opt.faction >= FACTION_COUNT || c->mirror.tick < c->next_orders) return;
-	c->next_orders = c->mirror.tick + 90;
-	const MirrorUnits *u = &c->mirror.units[c->opt.faction];
+	if (!c->ready || !c->player || client_tick(c) < c->next_orders) return;
+	c->next_orders = client_tick(c) + 90;
+	const Units *u = &c->remote.sim.factions[c->opt.faction].units;
 	V2 enemy = c->base[1 - c->opt.faction];
 	UnitHandle group[128];
 	ptrdiff_t n = 0;
-	for (ptrdiff_t s = 0; s <= u->cap; s++) {
-		bool flush = n == countof(group) || (s == u->cap && n > 0);
+	for (ptrdiff_t i = 0; i <= u->count; i++) {
+		bool flush = n == countof(group) || (i == u->count && n > 0);
 		if (flush) {
 			V2 at = v2(enemy.x + rng_range(&c->rng, -30.0f, 30.0f), enemy.z + rng_range(&c->rng, -100.0f, 100.0f));
 			client_send_command(c, COMMAND_ATTACK_MOVE, at, group, n);
 			n = 0;
 		}
-		if (s == u->cap) break;
-		if (!u->live[s] || abs(u->qvx[s]) > 64 || abs(u->qvz[s]) > 64) continue;
-		group[n++] = (UnitHandle){(uint32_t)s, u->gen[s]};
+		if (i == u->count) break;
+		if (u->order[i] != ORDER_IDLE || u->engaged[i]) continue;
+		group[n++] = units_handle(u, i);
 	}
 }
 
 // ---------------------------------------------------------------- window
 
+// Players select from their own simulated units; spectators can't order.
 static void client_select(Client *c, const Scene *scene, Rectangle box, bool add, bool click)
 {
-	if (c->opt.faction >= FACTION_COUNT) return;
-	const SceneUnits *u = &scene->units[c->opt.faction];
-	const MirrorUnits *m = &c->mirror.units[c->opt.faction];
+	if (!c->player) return;
+	const SceneUnits *su = &scene->units[c->opt.faction];
+	const Units *u = &c->remote.sim.factions[c->opt.faction].units;
 	if (!add) c->selection_count = 0;
 	ptrdiff_t best = -1;
 	float best_d2 = 14.0f * 14.0f;
-	for (ptrdiff_t i = 0; i < u->count; i++) {
-		Vector2 s = GetWorldToScreen((Vector3){u->px[i], u->py[i] + 0.5f, u->pz[i]}, c->view.camera);
-		UnitHandle h = {(uint32_t)u->slot[i], m->gen[u->slot[i]]};
+	for (ptrdiff_t i = 0; i < su->count; i++) {
+		Vector2 s = GetWorldToScreen((Vector3){su->px[i], su->py[i] + 0.5f, su->pz[i]}, c->view.camera);
 		if (click) {
 			float dx = s.x - box.x, dy = s.y - box.y;
 			if (dx * dx + dy * dy < best_d2) {
@@ -227,29 +277,24 @@ static void client_select(Client *c, const Scene *scene, Rectangle box, bool add
 				best_d2 = dx * dx + dy * dy;
 			}
 		} else if (CheckCollisionPointRec(s, box) && c->selection_count < c->config.max_units) {
-			c->selection[c->selection_count++] = h;
+			c->selection[c->selection_count++] = units_handle(u, i);
 		}
 	}
-	if (click && best >= 0) c->selection[c->selection_count++] = (UnitHandle){(uint32_t)u->slot[best], m->gen[u->slot[best]]};
+	if (click && best >= 0) c->selection[c->selection_count++] = units_handle(u, best);
 }
 
 // Marks selected units by scene index and drops dead ones from the selection.
-static uint8_t *client_selected(Client *c, const Scene *scene)
+static uint8_t *client_selected(Client *c)
 {
-	if (c->opt.faction >= FACTION_COUNT) return nullptr;
-	const SceneUnits *u = &scene->units[c->opt.faction];
-	const MirrorUnits *m = &c->mirror.units[c->opt.faction];
-	int32_t *index_of_slot = PUSH(&c->frame, int32_t, m->cap);
-	for (ptrdiff_t s = 0; s < m->cap; s++) index_of_slot[s] = -1;
-	for (ptrdiff_t i = 0; i < u->count; i++) index_of_slot[u->slot[i]] = (int32_t)i;
+	if (!c->player) return nullptr;
+	const Units *u = &c->remote.sim.factions[c->opt.faction].units;
 	uint8_t *marked = PUSH(&c->frame, uint8_t, u->count);
 	ptrdiff_t kept = 0;
 	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
-		UnitHandle h = c->selection[k];
-		int32_t i = h.index < (uint32_t)m->cap ? index_of_slot[h.index] : -1;
-		if (i < 0 || m->gen[h.index] != h.generation || marked[i]) continue;
+		ptrdiff_t i = units_find(u, c->selection[k]);
+		if (i < 0 || marked[i]) continue;
 		marked[i] = 1;
-		c->selection[kept++] = h;
+		c->selection[kept++] = c->selection[k];
 	}
 	c->selection_count = kept;
 	return marked;
@@ -284,13 +329,13 @@ static void client_overlay(const Client *c, bool connected)
 	int y = 10, line = 20;
 	DrawRectangle(5, 5, 520, 7 * line + 10, (Color){0, 0, 0, 150});
 	const char *side = c->opt.faction == 0 ? "blue" : c->opt.faction == 1 ? "red" : "spectator";
-	DrawText(TextFormat("%d fps   %s at %s:%d   tick %lld", GetFPS(), side, c->opt.host, c->opt.port,
-	                    (long long)c->mirror.tick), 12, y, 18, RAYWHITE);
+	DrawText(TextFormat("%d fps   %s at %s:%d   tick %lld%s", GetFPS(), side, c->opt.host, c->opt.port,
+	                    (long long)client_tick(c), c->player ? "   simulating locally" : ""), 12, y, 18, RAYWHITE);
 	y += line;
 	DrawText(TextFormat("down %.1f KB/s   rtt %.0f ms   time %.0f%%", c->down_rate / 1024.0, c->rtt * 1e3,
-	                    c->mirror.dilation / 10.0), 12, y, 18, RAYWHITE);
+	                    client_dilation(c) / 10.0), 12, y, 18, RAYWHITE);
 	y += line;
-	DrawText(TextFormat("digests %lld ok, %lld mismatched   reconnects %lld", (long long)(c->digests - c->digest_mismatches),
+	DrawText(TextFormat("%s %lld ok, %lld mismatched   reconnects %lld", c->player ? "faction hashes" : "digests", (long long)(c->digests - c->digest_mismatches),
 	                    (long long)c->digest_mismatches, (long long)c->reconnects),
 	         12, y, 18, c->digest_mismatches ? RED : RAYWHITE);
 	y += line;
@@ -390,7 +435,7 @@ static int client_main(int argc, char **argv)
 		} else if (now - c.disconnected_since >= c.opt.reconnect_after) {
 			if (!client_connect(&c)) c.disconnected_since = now; // try again later
 		}
-		if (c.opt.disconnect_at >= 0 && !c.forced_done && c.mirror_ready && c.mirror.tick >= c.opt.disconnect_at) {
+		if (c.opt.disconnect_at >= 0 && !c.forced_done && c.ready && client_tick(&c) >= c.opt.disconnect_at) {
 			c.forced_done = true;
 			conn_close(&c.conn, "test disconnect");
 			client_lost(&c, "test disconnect");
@@ -405,7 +450,7 @@ static int client_main(int argc, char **argv)
 			c.rate_bytes = c.conn.bytes_received;
 			c.rate_since = now;
 		}
-		if (c.opt.quit_at >= 0 && c.mirror.tick >= c.opt.quit_at) break;
+		if (c.opt.quit_at >= 0 && client_tick(&c) >= c.opt.quit_at) break;
 		if (!c.conn.open && now - c.disconnected_since > 15.0 && c.opt.headless) {
 			fprintf(stderr, "client: server gone for 15 s, giving up\n");
 			status = 1;
@@ -424,14 +469,21 @@ static int client_main(int argc, char **argv)
 		}
 		BeginDrawing();
 		ClearBackground((Color){24, 28, 34, 255});
-		if (c.renderer_ready && c.mirror.tick > 0) {
+		if (c.renderer_ready && c.ready) {
 			view_update(&c.view, &c.terrain);
-			Scene scene = scene_from_mirror(&c.mirror, &c.terrain, c.base, &c.frame);
+			Scene scene = c.player ? remote_scene(&c.remote, c.base, &c.frame)
+			                       : scene_from_mirror(&c.mirror, &c.terrain, c.base, &c.frame);
+			if (c.player) {
+				uint8_t *visible = PUSH(&c.frame, uint8_t, (ptrdiff_t)(c.terrain.cells_x + 1) * (c.terrain.cells_z + 1));
+				remote_fog(&c.remote, visible);
+				renderer_set_fog(&c.renderer, visible);
+			}
 			client_input(&c, &scene);
-			uint8_t *selected = client_selected(&c, &scene);
+			uint8_t *selected = client_selected(&c);
 			// Extrapolate along velocity since the last update, a little past
 			// one tick at most so a late packet doesn't fling units.
-			float tick_s = SIM_DT * 1000.0f / (float)(c.mirror.dilation ? c.mirror.dilation : 1000);
+			uint16_t dil = client_dilation(&c);
+			float tick_s = SIM_DT * 1000.0f / (float)(dil ? dil : 1000);
 			float alpha = f_clamp((float)(now - c.last_delta_at) / tick_s, 0.0f, 1.5f);
 			BeginMode3D(c.view.camera);
 			renderer_draw_scene(&c.renderer, &scene, c.conn.open ? alpha : 0.0f, &c.frame, selected,
@@ -453,7 +505,7 @@ static int client_main(int argc, char **argv)
 	printf("client: %lld deltas, %lld digests (%lld mismatched), %lld reconnects, %lld gaps, "
 	       "%lld malformed, %lld commands sent, final tick %lld\n",
 	       (long long)c.deltas, (long long)c.digests, (long long)c.digest_mismatches, (long long)c.reconnects,
-	       (long long)c.gaps, (long long)c.malformed, (long long)c.commands_sent, (long long)c.mirror.tick);
+	       (long long)c.gaps, (long long)c.malformed, (long long)c.commands_sent, (long long)client_tick(&c));
 	if (c.opt.stats_path) {
 		FILE *f = fopen(c.opt.stats_path, "w");
 		if (!f) fatal("cannot write %s", c.opt.stats_path);
@@ -461,7 +513,7 @@ static int client_main(int argc, char **argv)
 		           "malformed %lld\ncommands_sent %lld\nfinal_tick %lld\nbytes_received %lld\n",
 		        (long long)c.deltas, (long long)c.digests, (long long)c.digest_mismatches,
 		        (long long)c.reconnects, (long long)c.gaps, (long long)c.malformed,
-		        (long long)c.commands_sent, (long long)c.mirror.tick, (long long)c.conn.bytes_received);
+		        (long long)c.commands_sent, (long long)client_tick(&c), (long long)c.conn.bytes_received);
 		fclose(f);
 	}
 	if (c.renderer_ready) renderer_unload(&c.renderer);

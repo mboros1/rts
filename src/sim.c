@@ -2,30 +2,30 @@
 
 const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 	[UNIT_RAIDER] = {
-		.name = "raider", .speed = 9.0f, .accel = 30.0f, .radius = 0.8f,
+		.name = "raider", .speed = 9.0f, .accel = 30.0f, .radius = 0.8f, .sight = 48.0f,
 		.height = 1.2f, .hp = 60.0f, .range = 24.0f, .reload = 15,
 		.shell_speed = 45.0f, .damage = 12.0f, .splash = 0.0f,
 		.spread = 0.6f, .high_arc = false, .weight = 6,
 	},
 	[UNIT_TANK] = {
-		.name = "tank", .speed = 5.0f, .accel = 12.0f, .radius = 1.4f,
+		.name = "tank", .speed = 5.0f, .accel = 12.0f, .radius = 1.4f, .sight = 32.0f,
 		.height = 1.8f, .hp = 240.0f, .range = 32.0f, .reload = 36,
 		.shell_speed = 42.0f, .damage = 48.0f, .splash = 1.5f,
 		.spread = 0.8f, .high_arc = false, .weight = 3,
 	},
 	[UNIT_ARTILLERY] = {
-		.name = "artillery", .speed = 3.5f, .accel = 8.0f, .radius = 1.1f,
+		// Outranges its own sight: artillery needs spotters.
+		.name = "artillery", .speed = 3.5f, .accel = 8.0f, .radius = 1.1f, .sight = 26.0f,
 		.height = 1.4f, .hp = 90.0f, .range = 78.0f, .reload = 90,
 		.shell_speed = 40.0f, .damage = 60.0f, .splash = 4.0f,
 		.spread = 2.0f, .high_arc = true, .weight = 2,
 	},
 };
 
-static constexpr float MAX_UNIT_RADIUS = 1.4f;
+static constexpr float MAX_SIGHT = 48.0f;
 static constexpr float GRID_CELL = 8.0f;
 static constexpr int32_t RETARGET_PERIOD = 8;
 static constexpr float ARRIVE_RADIUS = 3.0f;
-static constexpr int32_t PROJECTILE_TTL = 10 * 30;
 static constexpr float SEPARATION_MAX = 0.5f;   // per-tick push, units
 static constexpr uint32_t NO_SLOT = UINT32_MAX;
 
@@ -138,12 +138,6 @@ static void units_kill(Units *u, ptrdiff_t d)
 
 // ---------------------------------------------------------------- grid
 
-static int32_t grid_coord(float v, float cell, int32_t n)
-{
-	int32_t c = (int32_t)(v / cell);
-	return c < 0 ? 0 : c >= n ? n - 1 : c;
-}
-
 static void grid_build(Grid *g, Arena *a, const Terrain *t,
                        const float *px, const float *pz, ptrdiff_t n)
 {
@@ -163,25 +157,6 @@ static void grid_build(Grid *g, Arena *a, const Terrain *t,
 	int32_t *cursor = arena_copy(a, g->start, cells * (ptrdiff_t)sizeof(int32_t), alignof(int32_t));
 	for (ptrdiff_t i = 0; i < n; i++) g->items[cursor[cell_of[i]]++] = (int32_t)i;
 }
-
-typedef struct {
-	int32_t i0, i1, j0, j1;
-} CellRange;
-
-static CellRange grid_range(const Grid *g, float x0, float z0, float x1, float z1)
-{
-	return (CellRange){
-		grid_coord(x0, g->cell, g->w), grid_coord(x1, g->cell, g->w),
-		grid_coord(z0, g->cell, g->h), grid_coord(z1, g->cell, g->h),
-	};
-}
-
-#define GRID_FOR(g, r, k)                                                   \
-	for (int32_t gj_ = (r).j0; gj_ <= (r).j1; gj_++)                        \
-		for (int32_t gi_ = (r).i0; gi_ <= (r).i1; gi_++)                    \
-			for (int32_t gk_ = (g)->start[gj_ * (g)->w + gi_],              \
-			             ge_ = (g)->start[gj_ * (g)->w + gi_ + 1];          \
-			     gk_ < ge_ && ((k) = (g)->items[gk_], true); gk_++)
 
 // ---------------------------------------------------------------- ballistics
 
@@ -207,69 +182,97 @@ bool ballistic_solve(V3 from, V3 to, float speed, bool lob, V3 *vel, float *time
 
 // ---------------------------------------------------------------- interaction phase
 
-static void deliver_launches(Sim *sim)
+static void perception_init(Perception *p, Arena *a, ptrdiff_t cap)
 {
-	for (int f = 0; f < FACTION_COUNT; f++) {
-		Faction *from = &sim->factions[f];
-		for (ptrdiff_t k = 0; k < from->outbox_count; k++) {
-			const Launch *l = &from->outbox[k];
-			Projectiles *p = &sim->factions[l->target.v].incoming;
-			if (p->count == p->cap) {
-				from->stats.launches_dropped++;
-				continue;
-			}
-			ptrdiff_t i = p->count++;
-			p->px[i] = l->pos.x;
-			p->py[i] = l->pos.y;
-			p->pz[i] = l->pos.z;
-			p->vx[i] = l->vel.x;
-			p->vy[i] = l->vel.y;
-			p->vz[i] = l->vel.z;
-			p->weapon[i] = l->weapon;
-			p->ttl[i] = PROJECTILE_TTL;
-			p->id[i] = p->next_id++;
+	*p = (Perception){.cap = cap};
+	p->live = PUSH(a, uint8_t, cap);
+	p->gen = PUSH(a, uint32_t, cap);
+	p->type = PUSH(a, UnitType, cap);
+	p->qx = PUSH(a, uint16_t, cap);
+	p->qz = PUSH(a, uint16_t, cap);
+	p->qvx = PUSH(a, int16_t, cap);
+	p->qvz = PUSH(a, int16_t, cap);
+	p->sent = PUSH(a, int64_t, cap);
+}
+
+
+// Is (x, z) within sight of any of these units? `grid` covers them.
+static bool in_sight(const Units *own, const Grid *grid, float x, float z)
+{
+	CellRange r = grid_range(grid, x - MAX_SIGHT, z - MAX_SIGHT, x + MAX_SIGHT, z + MAX_SIGHT);
+	int32_t j;
+	GRID_FOR(grid, r, j) {
+		float sight = unit_defs[own->type[j]].sight;
+		if (v2_len2(v2_sub(v2(own->px[j], own->pz[j]), v2(x, z))) < sight * sight) return true;
+	}
+	return false;
+}
+
+// What faction `f` perceives of its enemy this tick, as entries against its
+// current perception: units entering sight, drifting from their dead
+// reckoning, or leaving sight. Reads both factions; writes neither.
+static void sense(Sim *sim, FactionId f, FactionEffects *fx)
+{
+	const Faction *me = &sim->factions[f.v];
+	const Units *enemy = &sim->factions[faction_enemy(f).v].units;
+	const Perception *p = &me->seen;
+	Grid grid;
+	grid_build(&grid, &sim->interaction, &sim->terrain, me->units.px, me->units.pz, me->units.count);
+	fx->seen = PUSH(&sim->interaction, SeenEntry, enemy->cap);
+	fx->seen_count = 0;
+	for (ptrdiff_t s = 0; s < enemy->cap; s++) {
+		int32_t d = enemy->slot_dense[s];
+		bool visible = d >= 0 && in_sight(&me->units, &grid, enemy->px[d], enemy->pz[d]);
+		if (!visible) {
+			if (p->live[s]) fx->seen[fx->seen_count++] = (SeenEntry){.tag = SEEN_LOST, .slot = (uint16_t)s};
+			continue;
 		}
-		from->outbox_count = 0;
+		SeenEntry e = {
+			.slot = (uint16_t)s,
+			.gen = enemy->slot_gen[s],
+			.type = enemy->type[d],
+			.qx = q_pos(enemy->px[d]),
+			.qz = q_pos(enemy->pz[d]),
+			.qvx = q_vel(enemy->vx[d]),
+			.qvz = q_vel(enemy->vz[d]),
+		};
+		if (!p->live[s] || p->gen[s] != e.gen) {
+			e.tag = SEEN_ENTER;
+			fx->seen[fx->seen_count++] = e;
+			continue;
+		}
+		V2 guess = perception_at(p, s, sim->tick);
+		float dx = guess.x - enemy->px[d], dz = guess.z - enemy->pz[d];
+		bool drifted = dx * dx + dz * dz > RESEND_DISTANCE * RESEND_DISTANCE;
+		bool turned = abs(e.qvx - p->qvx[s]) > RESEND_VELOCITY || abs(e.qvz - p->qvz[s]) > RESEND_VELOCITY;
+		bool stale = sim->tick.v - p->sent[s] > RESEND_AGE;
+		if (drifted || turned || stale) {
+			e.tag = SEEN_MOVE;
+			fx->seen[fx->seen_count++] = e;
+		}
 	}
 }
 
-static void build_view(EnemyView *v, Arena *a, const Faction *enemy, const Terrain *t)
-{
-	const Units *u = &enemy->units;
-	ptrdiff_t n = u->count;
-	*v = (EnemyView){.count = n, .slot_cap = u->cap};
-	v->px = arena_copy(a, u->px, n * (ptrdiff_t)sizeof(float), alignof(float));
-	v->py = arena_copy(a, u->py, n * (ptrdiff_t)sizeof(float), alignof(float));
-	v->pz = arena_copy(a, u->pz, n * (ptrdiff_t)sizeof(float), alignof(float));
-	v->vx = arena_copy(a, u->vx, n * (ptrdiff_t)sizeof(float), alignof(float));
-	v->vz = arena_copy(a, u->vz, n * (ptrdiff_t)sizeof(float), alignof(float));
-	v->handle = PUSH(a, UnitHandle, n);
-	v->radius = PUSH(a, float, n);
-	v->slot_index = PUSH(a, int32_t, u->cap);
-	v->slot_gen = arena_copy(a, u->slot_gen, u->cap * (ptrdiff_t)sizeof(uint32_t), alignof(uint32_t));
-	for (ptrdiff_t s = 0; s < u->cap; s++) v->slot_index[s] = -1;
-	for (ptrdiff_t i = 0; i < n; i++) {
-		v->handle[i] = units_handle(u, i);
-		v->radius[i] = unit_defs[u->type[i]].radius;
-		v->slot_index[u->dense_slot[i]] = (int32_t)i;
-	}
-	grid_build(&v->grid, a, t, v->px, v->pz, n);
-}
-
+// A target handle's index in the view, or -1 if it isn't perceived (any more).
 static ptrdiff_t view_find(const EnemyView *v, UnitHandle h)
 {
 	if (h.index >= (uint32_t)v->slot_cap) return -1;
-	if (v->slot_gen[h.index] != h.generation) return -1;
-	return v->slot_index[h.index];
+	int32_t i = v->slot_index[h.index];
+	if (i < 0 || v->slot_gen[h.index] != h.generation) return -1;
+	return i;
 }
 
 static void interaction_phase(Sim *sim)
 {
 	arena_reset(&sim->interaction);
-	deliver_launches(sim);
-	for (int f = 0; f < FACTION_COUNT; f++) {
-		const Faction *enemy = &sim->factions[faction_enemy((FactionId){(uint32_t)f}).v];
-		build_view(&sim->views[f], &sim->interaction, enemy, &sim->terrain);
+	for (int t = 0; t < FACTION_COUNT; t++) {
+		// Shells fired at t last tick arrive now, in firing order.
+		const Faction *from = &sim->factions[faction_enemy((FactionId){(uint32_t)t}).v];
+		FactionEffects *fx = &sim->effects[t];
+		fx->arrived_count = from->outbox_count;
+		fx->arrived = arena_copy(&sim->interaction, from->outbox,
+		                         from->outbox_count * (ptrdiff_t)sizeof(Launch), alignof(Launch));
+		sense(sim, (FactionId){(uint32_t)t}, fx);
 	}
 }
 
@@ -607,15 +610,98 @@ static void remove_dead(Faction *f)
 	}
 }
 
-static void faction_phase(Sim *sim, Faction *f, const Command *commands, ptrdiff_t count)
+// The start of a faction's phase: its effects, applied. The outbox was
+// delivered by the interaction phase, so it starts the tick empty.
+static void apply_effects(Faction *f, const FactionEffects *fx, Tick tick)
+{
+	f->outbox_count = 0;
+	Projectiles *p = &f->incoming;
+	for (ptrdiff_t k = 0; k < fx->arrived_count; k++) {
+		const Launch *l = &fx->arrived[k];
+		if (p->count == p->cap) {
+			f->stats.launches_dropped++;
+			continue;
+		}
+		ptrdiff_t i = p->count++;
+		p->px[i] = l->pos.x;
+		p->py[i] = l->pos.y;
+		p->pz[i] = l->pos.z;
+		p->vx[i] = l->vel.x;
+		p->vy[i] = l->vel.y;
+		p->vz[i] = l->vel.z;
+		p->weapon[i] = l->weapon;
+		p->ttl[i] = PROJECTILE_TTL;
+		p->id[i] = p->next_id++;
+	}
+	Perception *seen = &f->seen;
+	for (ptrdiff_t k = 0; k < fx->seen_count; k++) {
+		const SeenEntry *e = &fx->seen[k];
+		ptrdiff_t s = e->slot;
+		if (e->tag == SEEN_LOST) {
+			seen->live[s] = 0;
+			continue;
+		}
+		if (e->tag == SEEN_ENTER) {
+			seen->live[s] = 1;
+			seen->gen[s] = e->gen;
+			seen->type[s] = e->type;
+		}
+		seen->qx[s] = e->qx;
+		seen->qz[s] = e->qz;
+		seen->qvx[s] = e->qvx;
+		seen->qvz[s] = e->qvz;
+		seen->sent[s] = tick.v;
+	}
+}
+
+// The enemies a faction can target this tick: its perception, dead-reckoned
+// to now. Everything here is reproducible from the faction's effects.
+static void build_view(Faction *f, const Terrain *t, Tick tick)
+{
+	const Perception *p = &f->seen;
+	EnemyView *v = &f->view;
+	Arena *a = &f->scratch;
+	*v = (EnemyView){.slot_cap = p->cap};
+	v->px = PUSH(a, float, p->cap);
+	v->py = PUSH(a, float, p->cap);
+	v->pz = PUSH(a, float, p->cap);
+	v->vx = PUSH(a, float, p->cap);
+	v->vz = PUSH(a, float, p->cap);
+	v->handle = PUSH(a, UnitHandle, p->cap);
+	v->radius = PUSH(a, float, p->cap);
+	v->slot_index = PUSH(a, int32_t, p->cap);
+	v->slot_gen = p->gen;
+	ptrdiff_t n = 0;
+	for (ptrdiff_t s = 0; s < p->cap; s++) {
+		v->slot_index[s] = -1;
+		if (!p->live[s]) continue;
+		V2 at = perception_at(p, s, tick);
+		v->px[n] = at.x;
+		v->pz[n] = at.z;
+		v->py[n] = terrain_height(t, at.x, at.z);
+		v->vx[n] = dq_vel(p->qvx[s]);
+		v->vz[n] = dq_vel(p->qvz[s]);
+		v->handle[n] = (UnitHandle){(uint32_t)s, p->gen[s]};
+		v->radius[n] = unit_defs[p->type[s]].radius;
+		v->slot_index[s] = (int32_t)n;
+		n++;
+	}
+	v->count = n;
+	grid_build(&v->grid, a, t, v->px, v->pz, n);
+}
+
+static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const Command *commands,
+                          ptrdiff_t count)
 {
 	arena_reset(&f->scratch);
+	apply_effects(f, fx, sim->tick);
+	build_view(f, &sim->terrain, sim->tick);
 	for (ptrdiff_t k = 0; k < count; k++)
 		if (commands[k].faction.v == f->id.v) apply_command(f, &sim->terrain, &commands[k]);
 	spawn(f, sim);
 	move_units(f, &sim->terrain);
 	fly_projectiles(f, &sim->terrain);
-	fire_weapons(f, &sim->views[f->id.v], &sim->terrain, sim->tick);
+	fire_weapons(f, &f->view, &sim->terrain, sim->tick);
 	remove_dead(f);
 }
 
@@ -657,6 +743,7 @@ void sim_init(Sim *sim, SimConfig config)
 		p->weapon = PUSH(&sim->zone, UnitType, p->cap);
 		p->ttl = PUSH(&sim->zone, int32_t, p->cap);
 		p->id = PUSH(&sim->zone, uint32_t, p->cap);
+		perception_init(&f->seen, &sim->zone, config.max_units);
 		f->outbox_cap = config.max_units;
 		f->outbox = PUSH(&sim->zone, Launch, f->outbox_cap);
 		f->scratch = arena_create(scratch_names[k], (ptrdiff_t)64 << 20);
@@ -677,7 +764,13 @@ void sim_step(Sim *sim, const Command *commands, ptrdiff_t count)
 {
 	interaction_phase(sim);
 	for (int k = 0; k < FACTION_COUNT; k++)
-		faction_phase(sim, &sim->factions[k], commands, count);
+		faction_phase(sim, &sim->factions[k], &sim->effects[k], commands, count);
+	sim->tick.v++;
+}
+
+void faction_tick(Sim *sim, FactionId f, const FactionEffects *fx, const Command *commands, ptrdiff_t count)
+{
+	faction_phase(sim, &sim->factions[f.v], fx, commands, count);
 	sim->tick.v++;
 }
 
@@ -727,31 +820,234 @@ static Hash hash_projectiles(Hash h, const Projectiles *p)
 	return h;
 }
 
-Hash sim_hash_now(const Sim *sim)
+static Hash hash_perception(Hash h, const Perception *p)
 {
-	Hash h = hash_begin();
-	h = hash_u64(h, (uint64_t)sim->tick.v);
-	for (int k = 0; k < FACTION_COUNT; k++) {
-		const Faction *f = &sim->factions[k];
-		h = hash_u64(h, f->rng.state);
-		h = hash_units(h, &f->units);
-		h = hash_projectiles(h, &f->incoming);
-		h = hash_u64(h, (uint64_t)f->outbox_count);
-		for (ptrdiff_t i = 0; i < f->outbox_count; i++) {
-			const Launch *l = &f->outbox[i];
-			h = hash_f32(h, l->pos.x);
-			h = hash_f32(h, l->pos.y);
-			h = hash_f32(h, l->pos.z);
-			h = hash_f32(h, l->vel.x);
-			h = hash_f32(h, l->vel.y);
-			h = hash_f32(h, l->vel.z);
-			h = hash_u32(h, l->weapon);
-			h = hash_u32(h, l->target.v);
-		}
-		h = hash_u64(h, (uint64_t)f->stats.shots_fired);
-		h = hash_u64(h, (uint64_t)f->stats.units_spawned);
-		h = hash_u64(h, (uint64_t)f->stats.units_lost);
-		h = hash_u64(h, (uint64_t)f->stats.launches_dropped);
+	for (ptrdiff_t s = 0; s < p->cap; s++) {
+		if (!p->live[s]) continue;
+		h = hash_u32(h, (uint32_t)s);
+		h = hash_u32(h, p->gen[s]);
+		h = hash_u32(h, p->type[s]);
+		h = hash_u32(h, (uint32_t)p->qx[s] << 16 | p->qz[s]);
+		h = hash_u32(h, (uint32_t)(uint16_t)p->qvx[s] << 16 | (uint16_t)p->qvz[s]);
+		h = hash_u64(h, (uint64_t)p->sent[s]);
 	}
 	return h;
+}
+
+Hash faction_hash(const Faction *f)
+{
+	Hash h = hash_u32(hash_begin(), f->id.v);
+	h = hash_u64(h, f->rng.state);
+	h = hash_units(h, &f->units);
+	h = hash_projectiles(h, &f->incoming);
+	h = hash_u64(h, (uint64_t)f->outbox_count);
+	for (ptrdiff_t i = 0; i < f->outbox_count; i++) {
+		const Launch *l = &f->outbox[i];
+		h = hash_f32(h, l->pos.x);
+		h = hash_f32(h, l->pos.y);
+		h = hash_f32(h, l->pos.z);
+		h = hash_f32(h, l->vel.x);
+		h = hash_f32(h, l->vel.y);
+		h = hash_f32(h, l->vel.z);
+		h = hash_u32(h, l->weapon);
+		h = hash_u32(h, l->target.v);
+	}
+	h = hash_u64(h, (uint64_t)f->stats.shots_fired);
+	h = hash_u64(h, (uint64_t)f->stats.units_spawned);
+	h = hash_u64(h, (uint64_t)f->stats.units_lost);
+	h = hash_u64(h, (uint64_t)f->stats.launches_dropped);
+	return hash_perception(h, &f->seen);
+}
+
+Hash sim_hash_now(const Sim *sim)
+{
+	Hash h = hash_u64(hash_begin(), (uint64_t)sim->tick.v);
+	for (int k = 0; k < FACTION_COUNT; k++) h = hash_u64(h, faction_hash(&sim->factions[k]).v);
+	return h;
+}
+
+// ---------------------------------------------------------------- faction snapshots
+
+#define PUT_ARRAY(b, arr, n, put)                                     \
+	for (ptrdiff_t i_ = 0; i_ < (n); i_++) put((b), (arr)[i_])
+
+void faction_write(const Faction *f, ByteBuf *b)
+{
+	const Units *u = &f->units;
+	put64(b, f->rng.state);
+	put32(b, (uint32_t)u->cap);
+	put32(b, (uint32_t)u->count);
+	put32(b, (uint32_t)u->free_count);
+	PUT_ARRAY(b, u->slot_gen, u->cap, put32);
+	for (ptrdiff_t i = 0; i < u->free_count; i++) put32(b, (uint32_t)u->free_slots[i]);
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		put32(b, (uint32_t)u->dense_slot[i]);
+		putf(b, u->px[i]);
+		putf(b, u->py[i]);
+		putf(b, u->pz[i]);
+		putf(b, u->vx[i]);
+		putf(b, u->vz[i]);
+		putf(b, u->hp[i]);
+		put8(b, u->type[i]);
+		put8(b, u->order[i]);
+		putf(b, u->tx[i]);
+		putf(b, u->tz[i]);
+		put32(b, (uint32_t)u->cooldown[i]);
+		put32(b, u->target[i].index);
+		put32(b, u->target[i].generation);
+		put8(b, u->engaged[i]);
+	}
+	const Projectiles *p = &f->incoming;
+	put32(b, (uint32_t)p->count);
+	put32(b, p->next_id);
+	for (ptrdiff_t i = 0; i < p->count; i++) {
+		putf(b, p->px[i]);
+		putf(b, p->py[i]);
+		putf(b, p->pz[i]);
+		putf(b, p->vx[i]);
+		putf(b, p->vy[i]);
+		putf(b, p->vz[i]);
+		put8(b, p->weapon[i]);
+		put32(b, (uint32_t)p->ttl[i]);
+		put32(b, p->id[i]);
+	}
+	put32(b, (uint32_t)f->outbox_count);
+	for (ptrdiff_t i = 0; i < f->outbox_count; i++) {
+		const Launch *l = &f->outbox[i];
+		putf(b, l->pos.x);
+		putf(b, l->pos.y);
+		putf(b, l->pos.z);
+		putf(b, l->vel.x);
+		putf(b, l->vel.y);
+		putf(b, l->vel.z);
+		put8(b, l->weapon);
+	}
+	put64(b, (uint64_t)f->stats.shots_fired);
+	put64(b, (uint64_t)f->stats.units_spawned);
+	put64(b, (uint64_t)f->stats.units_lost);
+	put64(b, (uint64_t)f->stats.launches_dropped);
+	const Perception *seen = &f->seen;
+	uint32_t live = 0;
+	for (ptrdiff_t s = 0; s < seen->cap; s++) live += seen->live[s];
+	put32(b, live);
+	for (ptrdiff_t s = 0; s < seen->cap; s++) {
+		if (!seen->live[s]) continue;
+		put32(b, (uint32_t)s);
+		put32(b, seen->gen[s]);
+		put8(b, seen->type[s]);
+		put16(b, seen->qx[s]);
+		put16(b, seen->qz[s]);
+		put16(b, (uint16_t)seen->qvx[s]);
+		put16(b, (uint16_t)seen->qvz[s]);
+		put64(b, (uint64_t)seen->sent[s]);
+	}
+}
+
+static bool ok_float(float x) { return x == x && x - x == 0.0f; }
+
+// Reads into f, which must have been set up by sim_init with the same config.
+// Every invariant of Units, Projectiles and Perception is checked, because a
+// snapshot arrives over the network.
+bool faction_read(Faction *f, ByteReader *r)
+{
+	Units *u = &f->units;
+	f->rng.state = get64(r);
+	uint32_t cap = get32(r), count = get32(r), free_count = get32(r);
+	if (r->bad || cap != (uint32_t)u->cap || count > cap || free_count != cap - count) return false;
+	u->count = count;
+	u->free_count = free_count;
+	for (ptrdiff_t s = 0; s < u->cap; s++) {
+		u->slot_gen[s] = get32(r);
+		u->slot_dense[s] = -1;
+	}
+	for (ptrdiff_t i = 0; i < u->free_count; i++) {
+		uint32_t s = get32(r);
+		if (s >= cap || u->slot_dense[s] != -1) return false;
+		u->slot_dense[s] = -2; // marks free while checking for duplicates
+		u->free_slots[i] = (int32_t)s;
+	}
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		uint32_t s = get32(r);
+		if (r->bad || s >= cap || u->slot_dense[s] != -1) return false;
+		u->slot_dense[s] = (int32_t)i;
+		u->dense_slot[i] = (int32_t)s;
+		u->px[i] = getf(r);
+		u->py[i] = getf(r);
+		u->pz[i] = getf(r);
+		u->vx[i] = getf(r);
+		u->vz[i] = getf(r);
+		u->hp[i] = getf(r);
+		uint8_t type = get8(r), order = get8(r);
+		u->tx[i] = getf(r);
+		u->tz[i] = getf(r);
+		u->cooldown[i] = (int32_t)get32(r);
+		u->target[i] = (UnitHandle){get32(r), get32(r)};
+		u->engaged[i] = get8(r);
+		if (type >= UNIT_TYPE_COUNT || order >= ORDER_KIND_COUNT || u->engaged[i] > 1 || u->cooldown[i] < 0) return false;
+		u->type[i] = (UnitType)type;
+		u->order[i] = (OrderKind)order;
+		float fs[] = {u->px[i], u->py[i], u->pz[i], u->vx[i], u->vz[i], u->hp[i], u->tx[i], u->tz[i]};
+		for (int k = 0; k < (int)countof(fs); k++)
+			if (!ok_float(fs[k])) return false;
+	}
+	for (ptrdiff_t s = 0; s < u->cap; s++) {
+		if (u->slot_dense[s] == -2) u->slot_dense[s] = -1;
+		else if (u->slot_dense[s] == -1) return false; // neither live nor free
+	}
+	Projectiles *p = &f->incoming;
+	uint32_t shells = get32(r);
+	p->next_id = get32(r);
+	if (r->bad || shells > (uint32_t)p->cap) return false;
+	p->count = shells;
+	for (ptrdiff_t i = 0; i < p->count; i++) {
+		p->px[i] = getf(r);
+		p->py[i] = getf(r);
+		p->pz[i] = getf(r);
+		p->vx[i] = getf(r);
+		p->vy[i] = getf(r);
+		p->vz[i] = getf(r);
+		uint8_t weapon = get8(r);
+		p->ttl[i] = (int32_t)get32(r);
+		p->id[i] = get32(r);
+		if (weapon >= UNIT_TYPE_COUNT || p->ttl[i] <= 0) return false;
+		p->weapon[i] = (UnitType)weapon;
+		float fs[] = {p->px[i], p->py[i], p->pz[i], p->vx[i], p->vy[i], p->vz[i]};
+		for (int k = 0; k < (int)countof(fs); k++)
+			if (!ok_float(fs[k])) return false;
+	}
+	uint32_t out = get32(r);
+	if (r->bad || out > (uint32_t)f->outbox_cap) return false;
+	f->outbox_count = out;
+	for (ptrdiff_t i = 0; i < f->outbox_count; i++) {
+		Launch *l = &f->outbox[i];
+		l->pos = v3(getf(r), getf(r), getf(r));
+		l->vel = v3(getf(r), getf(r), getf(r));
+		uint8_t weapon = get8(r);
+		if (weapon >= UNIT_TYPE_COUNT) return false;
+		l->weapon = (UnitType)weapon;
+		l->target = faction_enemy(f->id);
+	}
+	f->stats.shots_fired = (int64_t)get64(r);
+	f->stats.units_spawned = (int64_t)get64(r);
+	f->stats.units_lost = (int64_t)get64(r);
+	f->stats.launches_dropped = (int64_t)get64(r);
+	Perception *seen = &f->seen;
+	memset(seen->live, 0, (size_t)seen->cap);
+	uint32_t live = get32(r);
+	if (r->bad || live > (uint32_t)seen->cap) return false;
+	for (uint32_t k = 0; k < live; k++) {
+		uint32_t s = get32(r);
+		if (r->bad || s >= (uint32_t)seen->cap || seen->live[s]) return false;
+		seen->gen[s] = get32(r);
+		uint8_t type = get8(r);
+		seen->qx[s] = get16(r);
+		seen->qz[s] = get16(r);
+		seen->qvx[s] = (int16_t)get16(r);
+		seen->qvz[s] = (int16_t)get16(r);
+		seen->sent[s] = (int64_t)get64(r);
+		if (type >= UNIT_TYPE_COUNT) return false;
+		seen->type[s] = (UnitType)type;
+		seen->live[s] = 1;
+	}
+	return !r->bad;
 }

@@ -4,8 +4,10 @@
 //              [--record PATH] [--stats PATH] [--bot blue|red on|off]
 //              [--latency MS] [--jitter MS] [--dilation F] [--speed X]
 //
-// The server owns the tick. Clients send commands and receive a snapshot,
-// then a delta per tick (wire.h). Bots and scripts run inside the tick, and
+// The server owns the tick. Players get their faction's snapshot, then each
+// tick that faction's commands and effects, and simulate it themselves;
+// nothing about an enemy they can't see is sent. Spectators get the full
+// mirror instead (wire.h). Bots and scripts run inside the tick, and
 // every admitted command, theirs and clients', is recorded, so a run can be
 // verified with `rts-headless verify`.
 //
@@ -67,6 +69,7 @@ typedef struct {
 	double speed;             // clock multiplier; 1 is real time
 	double dilation;
 	WireStats wire;
+	int64_t faction_bytes[FACTION_COUNT];   // each faction's stream, encoded
 	int64_t bytes_out, bytes_out_last;
 	int64_t joins, commands_admitted, commands_refused;
 } Server;
@@ -113,8 +116,10 @@ static void handle_hello(Server *s, Client *c, ByteReader *r, double now)
 	}
 	send_or_drop(s, c, MSG_WELCOME, &b, now);
 	ByteBuf snap = bytebuf_make(&s->encode, FRAME_MAX);
-	wire_encode_snapshot(&s->mirror, &snap);
-	send_or_drop(s, c, MSG_SNAPSHOT, &snap, now);
+	bool player = faction < FACTION_COUNT;
+	if (player) wire_encode_faction_snapshot(&s->sim, (FactionId){faction}, &snap);
+	else wire_encode_snapshot(&s->mirror, &snap);
+	send_or_drop(s, c, player ? MSG_FACTION_SNAPSHOT : MSG_SNAPSHOT, &snap, now);
 	arena_rewind(m);
 	printf("server: client joined as %s at tick %lld (snapshot %td bytes)\n",
 	       faction == SPECTATOR ? "spectator" : faction == 0 ? "blue" : "red",
@@ -201,11 +206,23 @@ static void step(Server *s, double now)
 	s->dilation = s->forced_dilation > 0.0 ? s->forced_dilation : automatic;
 
 	arena_reset(&s->encode);
+	uint16_t dilation = (uint16_t)(s->dilation * 1000.0 + 0.5);
 	ByteBuf delta = bytebuf_make(&s->encode, FRAME_MAX);
 	bool digest = s->sim.tick.v % DIGEST_EVERY == 0;
-	wire_encode_tick(&s->mirror, &s->sim, &delta, digest, (uint16_t)(s->dilation * 1000.0 + 0.5), &s->wire);
-	for (int k = 0; k < MAX_CLIENTS; k++)
-		if (s->clients[k].state == CLIENT_READY) send_or_drop(s, &s->clients[k], MSG_DELTA, &delta, now);
+	wire_encode_tick(&s->mirror, &s->sim, &delta, digest, dilation, &s->wire);
+	// Each faction's stream is encoded once, whoever is listening.
+	ByteBuf stream[FACTION_COUNT];
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		stream[f] = bytebuf_make(&s->encode, FRAME_MAX / 2);
+		wire_encode_faction_tick(&s->sim, (FactionId){(uint32_t)f}, s->queued, n, digest, dilation, &stream[f]);
+		s->faction_bytes[f] += stream[f].len;
+	}
+	for (int k = 0; k < MAX_CLIENTS; k++) {
+		Client *c = &s->clients[k];
+		if (c->state != CLIENT_READY) continue;
+		if (c->faction < FACTION_COUNT) send_or_drop(s, c, MSG_FACTION_TICK, &stream[c->faction], now);
+		else send_or_drop(s, c, MSG_DELTA, &delta, now);
+	}
 
 	s->queued_count = 0;
 	arena_reset(&s->tick);
@@ -342,11 +359,12 @@ int main(int argc, char **argv)
 		if (!f) fatal("cannot write %s", stats);
 		fprintf(f, "ticks %lld\njoins %lld\ncommands_admitted %lld\ncommands_refused %lld\n"
 		           "bytes_sent %lld\nunit_entries %lld\nshells_started %lld\nshells_ended %lld\n"
-		           "final_hash %016llx\n",
+		           "final_hash %016llx\nfaction_stream_bytes %lld %lld\n",
 		        (long long)s.sim.tick.v, (long long)s.joins, (long long)s.commands_admitted,
 		        (long long)s.commands_refused, (long long)sent, (long long)s.wire.units_sent,
 		        (long long)s.wire.shells_started, (long long)s.wire.shells_ended,
-		        (unsigned long long)sim_hash_now(&s.sim).v);
+		        (unsigned long long)sim_hash_now(&s.sim).v, (long long)s.faction_bytes[0],
+		        (long long)s.faction_bytes[1]);
 		fclose(f);
 	}
 	return 0;

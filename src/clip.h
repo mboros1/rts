@@ -19,6 +19,7 @@
 
 #include "arena.h"
 #include "netlog.h"
+#include "remote.h"
 #include "render.h"
 #include "scenario.h"
 #include "script.h"
@@ -54,6 +55,7 @@ typedef struct {
 	const Scenario *scenario;   // ... or play this scenario with bots ...
 	const char *script;         // ... or run this script (with its bots) ...
 	const char *netlog;         // ... or show what a network client saw
+	const char *compare;        // with --netlog: a second client, side by side
 	const char *title, *about;  // title card, when there's no script to say
 	const char *label;          // shown on the title card, e.g. the commit
 	int64_t from, to;           // tick window; to < 0 means the end

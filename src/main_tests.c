@@ -426,16 +426,156 @@ static void test_wire(void)
 	arena_destroy(&a);
 }
 
-int main(void)
+// What each faction could see, from current positions: the set its
+// perception must equal after the next step's sensing.
+static void visible_set(Sim *sim, FactionId f, Arena *a, uint8_t *out)
 {
-	test_arena();
-	test_units();
-	test_ballistics();
-	test_determinism();
-	test_replay();
-	test_shell_hits();
-	test_script();
-	test_wire();
+	const Faction *me = &sim->factions[f.v];
+	const Units *enemy = &sim->factions[faction_enemy(f).v].units;
+	Grid grid;
+	grid_build(&grid, a, &sim->terrain, me->units.px, me->units.pz, me->units.count);
+	for (ptrdiff_t s = 0; s < enemy->cap; s++) {
+		int32_t d = enemy->slot_dense[s];
+		out[s] = d >= 0 && in_sight(&me->units, &grid, enemy->px[d], enemy->pz[d]);
+	}
+}
+
+// Spike 3's claim: a client fed only its faction's commands and effects
+// reproduces that faction exactly, from the start or from a mid-game
+// snapshot, and perceives exactly the enemies in sight, no more.
+static void test_split(void)
+{
+	Arena a = arena_create("split", (ptrdiff_t)256 << 20);
+	Arena tick = arena_create("split tick", 64 << 20);
+	SimConfig config = small_config(13);
+	Sim server, clients[FACTION_COUNT], late;
+	sim_init(&server, config);
+	Bot bots[FACTION_COUNT];
+	for (int k = 0; k < FACTION_COUNT; k++) bots[k] = bot_create((FactionId){(uint32_t)k}, 13);
+
+	ByteBuf buf = bytebuf_make(&a, 8 << 20);
+	for (int k = 0; k < FACTION_COUNT; k++) {
+		sim_init(&clients[k], config);
+		buf.len = 0;
+		wire_encode_faction_snapshot(&server, (FactionId){(uint32_t)k}, &buf);
+		ByteReader r = byte_reader(buf.data, buf.len);
+		clients[k].tick.v = (int64_t)get64(&r);
+		CHECK(faction_read(&clients[k].factions[k], &r) && r.pos == r.len);
+	}
+	CHECK(faction_hash(&clients[0].factions[0]).v == faction_hash(&server.factions[0]).v);
+
+	bool decoded = true, matched = true, exact_fog = true, late_ok = true, joined = false;
+	int64_t seen_max = 0, arrivals = 0, bytes = 0;
+	Command cmds[64];
+	for (int t = 0; t < 800; t++) {
+		arena_reset(&tick);
+		ptrdiff_t n = 0;
+		for (int k = 0; k < FACTION_COUNT; k++) bot_think(&bots[k], &server, &tick, cmds, &n, countof(cmds));
+		sim_step(&server, cmds, n);
+		for (int k = 0; k < FACTION_COUNT; k++) {
+			FactionId f = {(uint32_t)k};
+			buf.len = 0;
+			wire_encode_faction_tick(&server, f, cmds, n, true, 1000, &buf);
+			bytes += buf.len;
+			for (int who = 0; who < (k == 1 && joined ? 2 : 1); who++) {
+				Sim *c = who ? &late : &clients[k];
+				ByteReader r = byte_reader(buf.data, buf.len);
+				FactionTick ft;
+				bool ok = wire_read_faction_tick(&r, &tick, &config, f, &ft) && ft.tick == c->tick.v;
+				decoded = decoded && ok;
+				if (!ok) continue;
+				faction_tick(c, f, &ft.effects, ft.commands, ft.command_count);
+				bool same = faction_hash(&c->factions[k]).v == ft.hash.v;
+				if (who) late_ok = late_ok && same;
+				else matched = matched && same;
+			}
+			seen_max = server.effects[k].seen_count > seen_max ? server.effects[k].seen_count : seen_max;
+			arrivals += server.effects[k].arrived_count;
+		}
+		if (t == 400) {
+			sim_init(&late, config);
+			buf.len = 0;
+			wire_encode_faction_snapshot(&server, (FactionId){1}, &buf);
+			ByteReader r = byte_reader(buf.data, buf.len);
+			late.tick.v = (int64_t)get64(&r);
+			CHECK(faction_read(&late.factions[1], &r));
+			joined = true;
+		}
+	}
+	CHECK(decoded);
+	CHECK(matched);
+	CHECK(late_ok);
+	CHECK(seen_max > 0 && arrivals > 0); // enemies were seen and shells arrived
+
+	// Exact fog, checked directly: sense from the current positions and
+	// compare the perception the step produces with what was visible.
+	for (int round = 0; round < 3; round++) {
+		uint8_t *vis[FACTION_COUNT];
+		for (int k = 0; k < FACTION_COUNT; k++) {
+			vis[k] = PUSH(&a, uint8_t, config.max_units);
+			visible_set(&server, (FactionId){(uint32_t)k}, &tick, vis[k]);
+		}
+		sim_step(&server, nullptr, 0);
+		for (int k = 0; k < FACTION_COUNT; k++)
+			for (ptrdiff_t sl = 0; sl < config.max_units; sl++)
+				exact_fog = exact_fog && server.factions[k].seen.live[sl] == vis[k][sl];
+	}
+	CHECK(exact_fog);
+	CHECK(bytes < 800 * 2 * 4096); // the faction stream stays small at 600 units
+
+	// Corrupted snapshots are rejected or loaded, never crash.
+	buf.len = 0;
+	wire_encode_faction_snapshot(&server, (FactionId){0}, &buf);
+	uint8_t *copy = PUSH(&a, uint8_t, buf.len);
+	Rng rng = rng_seed(7);
+	int rejected = 0;
+	for (int k = 0; k < 200; k++) {
+		memcpy(copy, buf.data, (size_t)buf.len);
+		for (int flips = 0; flips < 3; flips++) copy[8 + rng_below(&rng, (uint32_t)(buf.len - 8))] ^= 0x5a;
+		ByteReader r = byte_reader(copy + 8, k % 4 == 0 ? (ptrdiff_t)rng_below(&rng, (uint32_t)(buf.len - 8)) : buf.len - 8);
+		rejected += !faction_read(&late.factions[0], &r);
+	}
+	CHECK(rejected > 0);
+
+	for (int k = 0; k < FACTION_COUNT; k++) sim_destroy(&clients[k]);
+	sim_destroy(&late);
+	sim_destroy(&server);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+}
+
+typedef struct {
+	const char *name;
+	void (*run)(void);
+} Test;
+
+static const Test tests[] = {
+	{"arena", test_arena},
+	{"units", test_units},
+	{"ballistics", test_ballistics},
+	{"determinism", test_determinism},
+	{"replay", test_replay},
+	{"shell_hits", test_shell_hits},
+	{"script", test_script},
+	{"wire", test_wire},
+	{"split", test_split},
+};
+
+// tests            run all, in order
+// tests --list     names, one per line (make check runs them in parallel)
+// tests NAME...    run those
+int main(int argc, char **argv)
+{
+	if (argc > 1 && !strcmp(argv[1], "--list")) {
+		for (ptrdiff_t i = 0; i < countof(tests); i++) printf("%s\n", tests[i].name);
+		return 0;
+	}
+	for (ptrdiff_t i = 0; i < countof(tests); i++) {
+		bool wanted = argc == 1;
+		for (int k = 1; k < argc; k++) wanted = wanted || !strcmp(argv[k], tests[i].name);
+		if (wanted) tests[i].run();
+	}
+	if (argc == 2) printf("%-12s ", argv[1]);
 	printf("%d checks, %d failed\n", checks, failures);
 	return failures ? 1 : 0;
 }

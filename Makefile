@@ -31,7 +31,7 @@ RAYLIB_LIBS   := $(shell pkg-config --libs raylib)
 SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
 
-.PHONY: demos-rerender all setup check check-tests check-replay check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 cross clips demos demos-restore share clean
+.PHONY: demos-rerender all setup check check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 cross clips demos demos-restore share clean
 
 all: $(B)/rts $(B)/rts-headless $(B)/rts-server
 
@@ -65,7 +65,7 @@ bench: $(B)/rts-headless
 # (history in build/timings.log), so check costs about its slowest stage.
 CHECK := $(B)/check
 S := tools/stage
-CHECK_STAGES := check-tests check-replay check-game check-server check-gcc check-net
+CHECK_STAGES := check-tests check-replay check-split check-demo-scripts check-game check-server check-gcc check-net
 check:
 	@rm -rf $(CHECK) && mkdir -p $(CHECK)
 	@$(S) "check (total)" $(MAKE) --no-print-directory -j8 $(CHECK_STAGES)
@@ -73,7 +73,7 @@ check:
 
 check-tests:
 	@$(S) "build tests (clang -O1, ASan+UBSan)" $(CC) $(BASE) -Werror $(SAN) src/main_tests.c -o $(CHECK)/tests
-	@$(S) "run tests" sh -c '$(CHECK)/tests > $(CHECK)/tests.log 2>&1 || { cat $(CHECK)/tests.log; exit 1; }'
+	@$(S) "run tests (in parallel)" sh -c '$(CHECK)/tests --list | xargs -P 8 -n 1 $(CHECK)/tests > $(CHECK)/tests.log 2>&1 || { cat $(CHECK)/tests.log; exit 1; }'
 
 $(CHECK)/headless:
 	@$(S) "build headless (clang -O2)" $(CC) $(BASE) -Werror $(RELEASE) src/main_headless.c -o $@
@@ -81,7 +81,13 @@ $(CHECK)/headless:
 check-replay: $(CHECK)/headless
 	@$(S) "replay: record 900 ticks, 2000 units" $(CHECK)/headless record $(CHECK)/run.replay 900 2000 > /dev/null
 	@$(S) "replay: verify" $(CHECK)/headless verify $(CHECK)/run.replay > /dev/null
-	@$(S) "demo scripts: expectations" sh -c '$(CHECK)/headless script demos/*.script > $(CHECK)/demos.log 2>&1 || { cat $(CHECK)/demos.log; exit 1; }'
+
+check-split: $(CHECK)/headless
+	@$(S) "split: both factions rebuilt from their streams" $(CHECK)/headless split 600 1500 > /dev/null
+
+# One process per demo script, side by side.
+check-demo-scripts: $(CHECK)/headless
+	@$(S) "demo scripts: expectations (in parallel)" sh -c 'ls demos/*.script | xargs -P 8 -n 1 $(CHECK)/headless script > $(CHECK)/demos.log 2>&1 || { cat $(CHECK)/demos.log; exit 1; }'
 
 $(CHECK)/rts:
 	@$(S) "build game (clang -O2)" $(CC) $(BASE) -Werror $(RELEASE) $(RAYLIB_CFLAGS) src/main_game.c -o $@ $(RAYLIB_LIBS)

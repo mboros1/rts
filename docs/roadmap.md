@@ -84,6 +84,36 @@ exercise it end to end over real sockets.
 - **Not yet**: per-faction visibility (spike 3 filters what a client gets),
   windowed client play has not been exercised by a person, Windows sockets.
 
+## Spike 3 results (2026-10-07)
+
+Done, in one spike. The faction split holds at full scale.
+
+- **Each faction's phase depends only on its own state, commands and
+  effects.** Effects are the shells arriving at it and what it perceives of
+  its enemies. `faction_tick` runs a faction from exactly those, and
+  `faction_hash` must match the server's.
+- **Units perceive enemies through the wire's own encoding.** Visible enemies
+  arrive as quantized, dead-reckoned entries (resent on 0.5 units of drift),
+  and the server's units aim through that same perception. Server and client
+  build identical views from identical bytes; aim is at most half a unit off.
+- **Fog of war**: sight per type (raider 48, tank 32, artillery 26).
+  Artillery outranges its sight (78) and needs spotters. A faction's
+  perception equals exactly the enemies in sight, checked in tests.
+- **Evidence**: `rts-headless split` rebuilds both factions of the 10k battle
+  from their encoded streams: 3600 hash checks, 0 mismatches (`make check`
+  runs a shorter one). Mid-game joins load a faction snapshot and match.
+  Corrupted snapshots are rejected.
+- **Cost**: a faction's stream averages 69 KB/s in the 10k battle (spectator
+  stream: 305 KB/s), with a 40 KB burst when armies first see each other.
+  Faction snapshot 290 KB. Client faction step 0.6 ms; server step rose from
+  1.5 to 2.0 ms for sensing.
+- **Clients**: players simulate their faction and draw fog; spectators keep
+  the full mirror. `rts clip --netlog A --compare B` shows two clients side by
+  side (demo 05: blue's view beside the spectator's).
+- **Not yet**: a player's own orders wait a round trip before their units
+  react (no local prediction); own shells are drawn approximately after they
+  leave the outbox; the raider sight change rebalanced fights slightly.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

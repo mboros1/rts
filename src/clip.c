@@ -464,148 +464,282 @@ typedef struct {
 	ptrdiff_t bytes;
 } Arrival;
 
-int clip_netlog(const ClipRequest *req)
-{
-	Arena work = arena_create("clip netlog", (ptrdiff_t)2 << 30);
-	Arena frame = arena_create("clip frame", (ptrdiff_t)256 << 20);
-	Str file;
-	if (!platform_read_file(&work, req->netlog, &file)) return fail("cannot read", req->netlog);
+// One client's netlog, replayable to any moment: what that client knew then.
+typedef struct {
+	const char *path;
 	NetlogReader nr;
-	if (!netlog_open(&nr, file)) return fail("not a netlog", req->netlog);
+	SimConfig config;
+	V2 base[FACTION_COUNT];
+	bool player;                 // a faction stream (simulated); else a mirror
+	char info[256];
+	double t_start, t_end;       // first snapshot, last record
+	Terrain terrain;
+	Mirror mirror;
+	Remote remote;
+	bool have_state, connected;
+	double last_delta_t, rtt, status_since;
+	char status[160];
+	int64_t digests, mismatches, rejoins;
+	Arrival *arrivals;
+	ptrdiff_t arrived, window_start;
+} Playback;
 
-	// The world comes from the first WELCOME; the window runs from the first
-	// snapshot to the last record.
-	SimConfig config = {0};
-	V2 base[FACTION_COUNT] = {0};
+static bool playback_open(Playback *p, const char *path, Arena *work)
+{
+	*p = (Playback){.path = path, .connected = true, .t_start = -1.0};
+	Str file;
+	if (!platform_read_file(work, path, &file) || !netlog_open(&p->nr, file)) return false;
 	bool welcomed = false;
-	double t_start = -1.0, t_end = 0.0;
-	char info[256] = "";
 	ptrdiff_t records = 0;
-	for (NetlogReader scan = nr;;) {
+	for (NetlogReader scan = p->nr;;) {
 		NetlogRecord rec;
 		if (!netlog_next(&scan, &rec)) break;
 		records++;
-		t_end = rec.t;
+		p->t_end = rec.t;
 		if (rec.kind == MSG_WELCOME && !welcomed) {
 			ByteReader r = byte_reader(rec.data, rec.len);
 			get32(&r);
 			get8(&r);
-			if (!wire_get_config(&r, &config)) return fail("bad welcome in", req->netlog);
-			for (int f = 0; f < FACTION_COUNT; f++) base[f] = v2(getf(&r), getf(&r));
+			if (!wire_get_config(&r, &p->config)) return false;
+			for (int f = 0; f < FACTION_COUNT; f++) p->base[f] = v2(getf(&r), getf(&r));
 			welcomed = !r.bad;
-		} else if (rec.kind == MSG_SNAPSHOT && t_start < 0.0) {
-			t_start = rec.t;
-		} else if (rec.kind == NETLOG_INFO && !info[0]) {
-			snprintf(info, sizeof info, "%.*s", (int)rec.len, (const char *)rec.data);
+		} else if ((rec.kind == MSG_SNAPSHOT || rec.kind == MSG_FACTION_SNAPSHOT) && p->t_start < 0.0) {
+			// What the log holds decides how to replay it, not the faction it
+			// asked for: spike 2 logs are mirrors whoever recorded them.
+			p->t_start = rec.t;
+			p->player = rec.kind == MSG_FACTION_SNAPSHOT;
+		} else if (rec.kind == NETLOG_INFO && !p->info[0]) {
+			snprintf(p->info, sizeof p->info, "%.*s", (int)rec.len, (const char *)rec.data);
 		}
 	}
-	if (!welcomed || t_start < 0.0) return fail("netlog has no welcome and snapshot", req->netlog);
+	if (!welcomed || p->t_start < 0.0) return false;
+	terrain_generate(&p->terrain, work, p->config.seed);
+	if (p->player) {
+		// The faction is whichever the snapshot is for: read from WELCOME again.
+		NetlogReader scan = p->nr;
+		NetlogRecord rec;
+		uint8_t faction = 0;
+		while (netlog_next(&scan, &rec))
+			if (rec.kind == MSG_WELCOME && rec.len > 4) {
+				faction = rec.data[4];
+				break;
+			}
+		if (faction >= FACTION_COUNT) return false;
+		remote_init(&p->remote, &p->config, (FactionId){faction}, work);
+	} else {
+		mirror_init(&p->mirror, work, p->config.max_units, p->config.max_projectiles);
+	}
+	p->arrivals = PUSH(work, Arrival, records);
+	return true;
+}
 
-	Terrain terrain;
-	terrain_generate(&terrain, &work, config.seed);
-	Mirror mirror;
-	mirror_init(&mirror, &work, config.max_units, config.max_projectiles);
+static int64_t playback_tick(const Playback *p) { return p->player ? p->remote.sim.tick.v : p->mirror.tick; }
+static uint16_t playback_dilation(const Playback *p) { return p->player ? p->remote.dilation : p->mirror.dilation; }
+
+// Apply every record up to time t.
+static void playback_advance(Playback *p, double t)
+{
+	NetlogRecord rec;
+	for (NetlogReader peek = p->nr; netlog_next(&peek, &rec) && rec.t <= t; p->nr = peek) {
+		p->arrivals[p->arrived++] = (Arrival){rec.t, rec.len};
+		ByteReader r = byte_reader(rec.data, rec.len);
+		bool snapshot = rec.kind == MSG_SNAPSHOT || rec.kind == MSG_FACTION_SNAPSHOT;
+		bool update = snapshot || rec.kind == MSG_DELTA || rec.kind == MSG_FACTION_TICK;
+		if (update && p->player == (rec.kind == MSG_FACTION_SNAPSHOT || rec.kind == MSG_FACTION_TICK)) {
+			bool ok, had_digest = false, matched = true;
+			if (p->player) {
+				RemoteResult res = snapshot ? (remote_snapshot(&p->remote, &r) ? REMOTE_OK : REMOTE_BAD)
+				                 : p->remote.ready ? remote_tick(&p->remote, &r, &had_digest) : REMOTE_GAP;
+				ok = res == REMOTE_OK || res == REMOTE_DIVERGED;
+				matched = res != REMOTE_DIVERGED;
+			} else {
+				ApplyInfo ai;
+				ok = wire_apply(&p->mirror, &r, snapshot, &ai) == APPLY_OK;
+				had_digest = ai.had_digest;
+				matched = !ai.had_digest || ai.digest_matched;
+			}
+			if (!ok) continue;
+			p->have_state = true;
+			p->last_delta_t = rec.t;
+			p->digests += had_digest;
+			p->mismatches += !matched;
+			if (snapshot && rec.t > p->t_start) {
+				snprintf(p->status, sizeof p->status, "rejoined: %ssnapshot of %.1f KB at tick %lld",
+				         p->player ? "faction " : "", (double)rec.len / 1024.0, (long long)playback_tick(p));
+				p->status_since = rec.t;
+			}
+		} else if (rec.kind == MSG_PONG && rec.len == 8) {
+			double sent;
+			memcpy(&sent, rec.data, sizeof sent);
+			p->rtt = rec.t - sent;
+		} else if (rec.kind == NETLOG_DISCONNECTED) {
+			p->connected = false;
+			snprintf(p->status, sizeof p->status, "connection lost (%.*s)", (int)rec.len, (const char *)rec.data);
+			p->status_since = rec.t;
+		} else if (rec.kind == NETLOG_CONNECTED) {
+			p->rejoins += !p->connected;
+			p->connected = true;
+		}
+	}
+	while (p->window_start < p->arrived && p->arrivals[p->window_start].t < t - 1.0) p->window_start++;
+}
+
+static double playback_rate(const Playback *p)
+{
+	ptrdiff_t bytes = 0;
+	for (ptrdiff_t i = p->window_start; i < p->arrived; i++) bytes += p->arrivals[i].bytes;
+	return (double)bytes;
+}
+
+static Scene playback_scene(const Playback *p, Arena *frame)
+{
+	return p->player ? remote_scene(&p->remote, p->base, frame) : scene_from_mirror(&p->mirror, &p->terrain, p->base, frame);
+}
+
+// Draws the view into the current render target, with its network panel:
+// what this client saw at time t.
+static void playback_draw(Playback *p, Renderer *renderer, const Scene *scene, Camera3D cam, double t,
+                          Arena *frame, int w, int h, const char *heading)
+{
+	const int s = SUPERSAMPLE;
+	uint16_t dilation = playback_dilation(p);
+	float tick_s = SIM_DT * 1000.0f / (float)(dilation ? dilation : 1000);
+	float alpha = p->connected ? f_clamp((float)(t - p->last_delta_t) / tick_s, 0.0f, 1.5f) : 0.0f;
+	if (p->player) {
+		uint8_t *visible = PUSH(frame, uint8_t, (ptrdiff_t)(p->terrain.cells_x + 1) * (p->terrain.cells_z + 1));
+		remote_fog(&p->remote, visible);
+		renderer_set_fog(renderer, visible);
+	} else {
+		renderer_set_fog(renderer, nullptr);
+	}
+	BeginMode3D(cam);
+	renderer_draw_scene(renderer, scene, alpha, frame, nullptr, -1);
+	EndMode3D();
+	if (heading) {
+		int hw = MeasureText(heading, 22 * s);
+		DrawRectangle((w - hw) / 2 - 12 * s, 56 * s, hw + 24 * s, 34 * s, (Color){0, 0, 0, 160});
+		DrawText(heading, (w - hw) / 2, 62 * s, 22 * s, RAYWHITE);
+	}
+	// The panel is laid out for 600 px and scales down to fit a half frame.
+	float k = f_min(1.0f, (float)w / (float)(600 * s));
+	int u = (int)((float)s * k * 100.0f); // hundredths of a layout pixel
+#define P(x) ((x) * u / 100)
+	DrawRectangle(P(10), h - P(92), P(560), P(82), (Color){0, 0, 0, 150});
+	DrawText(TextFormat("client view: %s", p->info), P(20), h - P(84), P(18), RAYWHITE);
+	DrawText(TextFormat("tick %lld   down %.1f KB/s   rtt %.0f ms   time %.0f%%%s", (long long)playback_tick(p),
+	                    playback_rate(p) / 1024.0, p->rtt * 1e3, dilation / 10.0, p->player ? "   simulating locally" : ""),
+	         P(20), h - P(60), P(18), RAYWHITE);
+	DrawText(TextFormat("%s %lld matched, %lld mismatched   rejoins %lld", p->player ? "faction hashes" : "digests",
+	                    (long long)(p->digests - p->mismatches), (long long)p->mismatches, (long long)p->rejoins),
+	         P(20), h - P(36), P(18), p->mismatches ? RED : (Color){170, 230, 170, 255});
+#undef P
+	if (!p->connected) DrawRectangle(0, 0, w, h, (Color){0, 0, 0, 110});
+	if (p->status[0] && (!p->connected || t - p->status_since < 3.0)) {
+		int sw = MeasureText(p->status, 26 * s);
+		DrawRectangle((w - sw) / 2 - 16 * s, h / 2 - 24 * s, sw + 32 * s, 48 * s, (Color){0, 0, 0, 170});
+		DrawText(p->status, (w - sw) / 2, h / 2 - 13 * s, 26 * s, p->connected ? (Color){170, 230, 170, 255} : RAYWHITE);
+	}
+}
+
+static const char *playback_heading(const Playback *p)
+{
+	if (!p->player) return "everything (spectator)";
+	return p->remote.faction.v == 0 ? "what blue knows" : "what red knows";
+}
+
+// One netlog, or two side by side on a shared clock and camera (--compare):
+// say, a player's fogged view beside a spectator's full one.
+int clip_netlog(const ClipRequest *req)
+{
+	Arena work = arena_create("clip netlog", (ptrdiff_t)4 << 30);
+	Arena frame = arena_create("clip frame", (ptrdiff_t)256 << 20);
+	Playback views[2];
+	int count = req->compare ? 2 : 1;
+	const char *paths[2] = {req->netlog, req->compare};
+	for (int k = 0; k < count; k++)
+		if (!playback_open(&views[k], paths[k], &work)) return fail("cannot replay netlog", paths[k]);
+	if (count == 2 && memcmp(&views[0].config, &views[1].config, sizeof views[0].config) != 0)
+		return fail("netlogs are from different matches", req->compare);
+
+	double t_start = views[0].t_start, t_end = views[0].t_end;
+	for (int k = 1; k < count; k++) {
+		t_start = views[k].t_start > t_start ? views[k].t_start : t_start;
+		t_end = views[k].t_end < t_end ? views[k].t_end : t_end;
+	}
 	Renderer renderer;
-	renderer_init(&renderer, &terrain, config.max_units, &work);
+	renderer_init(&renderer, &views[0].terrain, views[0].config.max_units, &work);
 	ClipOut out;
 	if (!out_open(&out, req)) return fail("cannot start ffmpeg for", req->video);
-	int rw = out.w * SUPERSAMPLE, rh = out.h * SUPERSAMPLE, s = SUPERSAMPLE;
-	Arrival *arrivals = PUSH(&work, Arrival, records);
-	ptrdiff_t arrived = 0, window_start = 0;
+	int rw = out.w * SUPERSAMPLE, rh = out.h * SUPERSAMPLE;
+	// Each half renders to its own target, then both are placed in the frame.
+	RenderTexture2D half = count == 2 ? LoadRenderTexture(rw / 2, rh) : (RenderTexture2D){0};
+	if (count == 2) SetTextureFilter(half.texture, TEXTURE_FILTER_BILINEAR);
 	FILE *stats = open_stats(req);
-	if (stats) fprintf(stats, "source %s\nclient %s\n\n%7s %6s %6s %6s %7s %8s  %s\n", req->netlog, info,
-	                   "time", "tick", "blue", "red", "shells", "KB/s", "status");
+	if (stats) {
+		for (int k = 0; k < count; k++) fprintf(stats, "source %s: %s, %s\n", paths[k], views[k].info, playback_heading(&views[k]));
+		fprintf(stats, "\n%7s %6s %6s %6s %7s %8s  %s\n", "time", "tick", "blue", "red", "shells", "KB/s", "status");
+	}
 
-	bool connected = true, have_mirror = false;
-	double last_delta_t = 0.0, rtt = 0.0, status_since = t_start;
-	char status[160] = "";
-	int64_t digests = 0, mismatches = 0, rejoins = 0;
 	Director director = {0};
 	int64_t frames = (int64_t)((t_end - t_start) * CLIP_FPS) + 1;
 	for (int64_t k = 0; k < frames; k++) {
 		double t = t_start + (double)k / CLIP_FPS;
-		NetlogRecord rec;
-		for (NetlogReader peek = nr; netlog_next(&peek, &rec) && rec.t <= t; nr = peek) {
-			arrivals[arrived++] = (Arrival){rec.t, rec.len};
-			ByteReader r = byte_reader(rec.data, rec.len);
-			if (rec.kind == MSG_SNAPSHOT || rec.kind == MSG_DELTA) {
-				ApplyInfo ai;
-				ApplyResult res = wire_apply(&mirror, &r, rec.kind == MSG_SNAPSHOT, &ai);
-				if (res != APPLY_OK) {
-					snprintf(status, sizeof status, "the client dropped a bad update");
-					continue;
-				}
-				have_mirror = true;
-				last_delta_t = rec.t;
-				digests += ai.had_digest;
-				mismatches += ai.had_digest && !ai.digest_matched;
-				if (rec.kind == MSG_SNAPSHOT && rec.t > t_start) {
-					snprintf(status, sizeof status, "rejoined: snapshot of %.1f KB at tick %lld",
-					         (double)rec.len / 1024.0, (long long)mirror.tick);
-					status_since = rec.t;
-				}
-			} else if (rec.kind == MSG_PONG && rec.len == 8) {
-				double sent;
-				memcpy(&sent, rec.data, sizeof sent);
-				rtt = rec.t - sent;
-			} else if (rec.kind == NETLOG_DISCONNECTED) {
-				connected = false;
-				snprintf(status, sizeof status, "connection lost (%.*s)", (int)rec.len, (const char *)rec.data);
-				status_since = rec.t;
-			} else if (rec.kind == NETLOG_CONNECTED) {
-				rejoins += !connected;
-				connected = true;
-			}
-		}
-		while (window_start < arrived && arrivals[window_start].t < t - 1.0) window_start++;
-		ptrdiff_t bytes = 0;
-		for (ptrdiff_t i = window_start; i < arrived; i++) bytes += arrivals[i].bytes;
-		if (!have_mirror) continue;
-
+		for (int v = 0; v < count; v++) playback_advance(&views[v], t);
+		if (!views[0].have_state || (count == 2 && !views[1].have_state)) continue;
 		arena_reset(&frame);
-		Scene scene = scene_from_mirror(&mirror, &terrain, base, &frame);
-		director_update(&director, &scene);
-		float tick_s = SIM_DT * 1000.0f / (float)(mirror.dilation ? mirror.dilation : 1000);
-		float alpha = connected ? f_clamp((float)(t - last_delta_t) / tick_s, 0.0f, 1.5f) : 0.0f;
+		Scene scenes[2];
+		for (int v = 0; v < count; v++) scenes[v] = playback_scene(&views[v], &frame);
+		// Frame the whole picture when there is one to compare against.
+		director_update(&director, &scenes[count - 1]);
 		bool sample = out_wants_sample(&out, k, frames);
 		if (!out.video && !sample) continue;
+		Camera3D cam = render_camera(&views[0].terrain, director.focus, director.distance);
 
-		out_begin(&out);
-		BeginMode3D(render_camera(&terrain, director.focus, director.distance));
-		renderer_draw_scene(&renderer, &scene, alpha, &frame, nullptr, -1);
-		EndMode3D();
-		// The client's network panel, as it saw it.
-		DrawRectangle(10 * s, rh - 92 * s, 560 * s, 82 * s, (Color){0, 0, 0, 150});
-		DrawText(TextFormat("client view: %s", info), 20 * s, rh - 84 * s, 18 * s, RAYWHITE);
-		DrawText(TextFormat("tick %lld   down %.1f KB/s   rtt %.0f ms   time %.0f%%", (long long)mirror.tick,
-		                    (double)bytes / 1024.0, rtt * 1e3, mirror.dilation / 10.0),
-		         20 * s, rh - 60 * s, 18 * s, RAYWHITE);
-		DrawText(TextFormat("digests %lld matched, %lld mismatched   rejoins %lld", (long long)(digests - mismatches),
-		                    (long long)mismatches, (long long)rejoins),
-		         20 * s, rh - 36 * s, 18 * s, mismatches ? RED : (Color){170, 230, 170, 255});
-		if (!connected) DrawRectangle(0, 0, rw, rh, (Color){0, 0, 0, 110});
-		if (status[0] && (!connected || t - status_since < 3.0)) {
-			int w = MeasureText(status, 30 * s);
-			DrawRectangle((rw - w) / 2 - 16 * s, rh / 2 - 26 * s, w + 32 * s, 52 * s, (Color){0, 0, 0, 170});
-			DrawText(status, (rw - w) / 2, rh / 2 - 15 * s, 30 * s, connected ? (Color){170, 230, 170, 255} : RAYWHITE);
+		if (count == 1) {
+			out_begin(&out);
+			playback_draw(&views[0], &renderer, &scenes[0], cam, t, &frame, rw, rh, nullptr);
+		} else {
+			out_begin(&out);
+			EndTextureMode();
+			for (int v = 0; v < 2; v++) {
+				BeginTextureMode(half);
+				ClearBackground((Color){24, 28, 34, 255});
+				playback_draw(&views[v], &renderer, &scenes[v], cam, t, &frame, rw / 2, rh, playback_heading(&views[v]));
+				EndTextureMode();
+				BeginTextureMode(out.big);
+				DrawTexturePro(half.texture, (Rectangle){0, 0, (float)(rw / 2), (float)-rh},
+				               (Rectangle){(float)(v * rw / 2), 0, (float)(rw / 2), (float)rh}, (Vector2){0, 0}, 0.0f, WHITE);
+				EndTextureMode();
+			}
+			BeginTextureMode(out.big);
+			DrawRectangle(rw / 2 - SUPERSAMPLE, 0, 2 * SUPERSAMPLE, rh, (Color){12, 14, 18, 255});
 		}
 		if (req->title && req->title[0])
 			draw_title_card(req->title, req->about ? req->about : "", req->label, k, rw, rh);
+		const Playback *p = &views[0];
 		if (sample && stats)
-			fprintf(stats, "%6.1fs %6lld %6td %6td %7td %8.1f  %s\n", t - t_start, (long long)mirror.tick,
-			        scene.units[0].count, scene.units[1].count, scene.shells[0].count + scene.shells[1].count,
-			        (double)bytes / 1024.0, connected ? "connected" : "disconnected");
-		out_end(&out, sample, TextFormat("%.1fs  tick %lld  %s", t - t_start, (long long)mirror.tick,
-		                                 connected ? "" : "DISCONNECTED"));
+			fprintf(stats, "%6.1fs %6lld %6td %6td %7td %8.1f  %s\n", t - t_start, (long long)playback_tick(p),
+			        scenes[0].units[0].count, scenes[0].units[1].count,
+			        scenes[0].shells[0].count + scenes[0].shells[1].count, playback_rate(p) / 1024.0,
+			        p->connected ? "connected" : "disconnected");
+		out_end(&out, sample, TextFormat("%.1fs  tick %lld  %s", t - t_start, (long long)playback_tick(p),
+		                                 p->connected ? "" : "DISCONNECTED"));
 	}
+	int64_t mismatches = 0;
 	if (stats) {
-		fprintf(stats, "\ndigests %lld\ndigest_mismatches %lld\nrejoins %lld\n", (long long)digests,
-		        (long long)mismatches, (long long)rejoins);
+		for (int v = 0; v < count; v++)
+			fprintf(stats, "\n%s: digests %lld, mismatches %lld, rejoins %lld", paths[v], (long long)views[v].digests,
+			        (long long)views[v].mismatches, (long long)views[v].rejoins);
+		fprintf(stats, "\n");
 		fclose(stats);
 	}
-	int status_code = out_close(&out, mismatches ? fail("the client's digests mismatched", req->netlog) : 0);
+	for (int v = 0; v < count; v++) mismatches += views[v].mismatches;
+	if (count == 2) UnloadRenderTexture(half);
+	int status = out_close(&out, mismatches ? fail("a client's hashes mismatched", req->netlog) : 0);
 	renderer_unload(&renderer);
-	return status_code;
+	for (int v = 0; v < count; v++)
+		if (views[v].player) remote_destroy(&views[v].remote);
+	return status;
 }
 
 // ---------------------------------------------------------------- command line
@@ -627,6 +761,7 @@ static void usage(void)
 	        "  --done PATH              touch PATH when finished\n"
 	        "  --label TEXT             title card subtitle, e.g. the commit\n"
 	        "  --title TEXT --about TEXT  title card for --netlog clips\n"
+	        "  --compare NETLOG         a second netlog beside the first, same clock and camera\n"
 	        "  --crf N                  video quality, 0..51, lower is bigger (default 26)\n"
 	        "  --list                   list scenarios\n");
 }
@@ -653,6 +788,7 @@ int clip_main(int argc, char **argv)
 		} else if (!strcmp(a, "--replay")) req.replay = v;
 		else if (!strcmp(a, "--script")) req.script = v;
 		else if (!strcmp(a, "--netlog")) req.netlog = v;
+		else if (!strcmp(a, "--compare")) req.compare = v;
 		else if (!strcmp(a, "--title")) req.title = v;
 		else if (!strcmp(a, "--about")) req.about = v;
 		else if (!strcmp(a, "--label")) req.label = v;

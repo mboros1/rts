@@ -14,6 +14,16 @@
 // a client comparing it against its own proves the two agree, including
 // every shell's position.
 //
+// That mirror is for spectators, who see everything. A player gets the
+// faction stream instead and simulates its own faction (spike 3):
+//
+//   FACTION_SNAPSHOT  the faction's whole state (faction_write), to start from
+//   FACTION_TICK      one step's inputs for that faction: its commands, what
+//                     it perceives (SeenEntry), the shells arriving at it, and
+//                     every DIGEST_EVERY ticks its faction_hash after the step
+//
+// Nothing in the faction stream describes an enemy the faction can't see.
+//
 // Frames (net.h) carry: u32 length, u8 kind, payload. Payloads, little-endian:
 //   HELLO     u32 version, u8 faction (0, 1, or SPECTATOR)
 //   WELCOME   u32 version, u8 faction, config: u64 seed, 5 x i32, 3 x i32 weights,
@@ -21,6 +31,13 @@
 //   SNAPSHOT  body; replaces the client's mirror
 //   DELTA     body for exactly the next tick
 //   COMMAND   u8 kind, f32 x, f32 z, u32 n, n x (u32 slot, u32 generation)
+//   FACTION_SNAPSHOT  i64 tick, faction_write
+//   FACTION_TICK      i64 tick, u16 dilation, u8 has hash, [u64 hash],
+//             u32 n, n x command: u8 kind, f32 x, f32 z, u8 unit type,
+//                                 i32 amount, f32 radius, u32 m, m x handle
+//             u32 n, n x seen: u8 tag, u16 slot, then ENTER: u32 gen, u8 type,
+//                              u16 x, u16 z, i16 vx, i16 vz; MOVE: the last 4
+//             u32 n, n x arrival: f32 x, y, z, vx, vy, vz, u8 weapon
 //   PING/PONG f64 sender's clock, echoed
 //   body      i64 tick, u16 dilation (per mille), u8 has digest, [u64 digest],
 //             per faction: u32 n, n unit entries,
@@ -37,6 +54,7 @@
 #include "bytes.h"
 #include "hash.h"
 #include "idmap.h"
+#include "quant.h"
 #include "sim.h"
 
 enum { WIRE_VERSION = 1, DIGEST_EVERY = 30 };
@@ -50,20 +68,11 @@ typedef enum : uint8_t {
 	MSG_COMMAND,
 	MSG_PING,
 	MSG_PONG,
+	MSG_FACTION_SNAPSHOT,
+	MSG_FACTION_TICK,
 	MSG_KIND_COUNT,
 } MsgKind;
 
-// Quantization. Positions span the 512-unit map in 16 bits (1/128 unit);
-// velocities are 1/256 unit/s; hp is 1/16.
-static constexpr float WIRE_MAP = 512.0f;
-static inline uint16_t q_pos(float x) { return (uint16_t)(f_clamp(x, 0.0f, WIRE_MAP) * (65535.0f / WIRE_MAP) + 0.5f); }
-static inline float dq_pos(uint16_t q) { return (float)q * (WIRE_MAP / 65535.0f); }
-static inline int16_t q_vel(float v)
-{
-	float s = f_clamp(v * 256.0f, -32767.0f, 32767.0f);
-	return (int16_t)(s < 0.0f ? s - 0.5f : s + 0.5f);
-}
-static inline float dq_vel(int16_t q) { return (float)q * (1.0f / 256.0f); }
 static inline uint16_t q_hp(float hp) { return (uint16_t)(f_clamp(hp, 0.0f, 4095.0f) * 16.0f + 0.5f); }
 
 // One faction's units as the mirror knows them, indexed by slot.
@@ -102,9 +111,7 @@ Hash mirror_digest(const Mirror *m);
 // Dead-reckoned position of a unit at tick.
 static inline V2 mirror_predict(const MirrorUnits *u, ptrdiff_t slot, int64_t tick)
 {
-	float age = (float)(tick - u->sent[slot]) * SIM_DT;
-	return v2(dq_pos(u->qx[slot]) + dq_vel(u->qvx[slot]) * age,
-	          dq_pos(u->qz[slot]) + dq_vel(u->qvz[slot]) * age);
+	return q_predict(u->qx[slot], u->qz[slot], u->qvx[slot], u->qvz[slot], (float)(tick - u->sent[slot]) * SIM_DT);
 }
 
 typedef struct {
@@ -134,6 +141,25 @@ typedef struct {
 // Client: apply a snapshot or delta body. Untrusted input: every field is
 // range-checked, and a bad message leaves the mirror for a resync.
 ApplyResult wire_apply(Mirror *m, ByteReader *r, bool snapshot, ApplyInfo *info);
+
+// Server, after sim_step: faction f's inputs for the step just taken.
+void wire_encode_faction_tick(const Sim *sim, FactionId f, const Command *cmds, ptrdiff_t count,
+                              bool hash, uint16_t dilation, ByteBuf *out);
+void wire_encode_faction_snapshot(const Sim *sim, FactionId f, ByteBuf *out);
+
+typedef struct {
+	int64_t tick;
+	uint16_t dilation;
+	bool has_hash;
+	Hash hash;
+	Command *commands;
+	ptrdiff_t command_count;
+	FactionEffects effects;
+} FactionTick;
+
+// Client: decode one step's inputs, allocating from arena. Untrusted input:
+// false on anything malformed or out of range for this config.
+bool wire_read_faction_tick(ByteReader *r, Arena *a, const SimConfig *c, FactionId f, FactionTick *out);
 
 void wire_put_config(ByteBuf *b, const SimConfig *c);
 bool wire_get_config(ByteReader *r, SimConfig *c);   // false if out of range

@@ -110,9 +110,31 @@ void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Are
 	r->unit_mesh[UNIT_ARTILLERY] = GenMeshCone(0.5f, 1.0f, 8);
 	r->shell_mesh = GenMeshSphere(1.0f, 6, 8);
 	r->terrain = build_terrain(terrain);
+	r->terrain_vertices = r->terrain.meshes[0].vertexCount;
+	r->terrain_colors = arena_copy(program, r->terrain.meshes[0].colors, r->terrain_vertices * 4, 1);
+	r->fogged_colors = PUSH(program, unsigned char, r->terrain_vertices * 4);
 
 	r->heading_cap = max_units;
 	for (int k = 0; k < FACTION_COUNT; k++) r->heading[k] = PUSH(program, float, r->heading_cap);
+}
+
+void renderer_set_fog(Renderer *r, const uint8_t *visible)
+{
+	const unsigned char *src = r->terrain_colors;
+	if (visible) {
+		for (ptrdiff_t v = 0; v < r->terrain_vertices; v++) {
+			// Out of sight: darker and cooler, so it reads as unknown ground.
+			bool seen = visible[v];
+			unsigned char *c = r->fogged_colors + v * 4;
+			c[0] = seen ? src[v * 4 + 0] : (unsigned char)(src[v * 4 + 0] * 2 / 5);
+			c[1] = seen ? src[v * 4 + 1] : (unsigned char)(src[v * 4 + 1] * 2 / 5);
+			c[2] = seen ? src[v * 4 + 2] : (unsigned char)(src[v * 4 + 2] * 1 / 2 + 10);
+			c[3] = 255;
+		}
+		src = r->fogged_colors;
+	}
+	// Buffer 3 of a raylib mesh holds vertex colours.
+	UpdateMeshBuffer(r->terrain.meshes[0], 3, src, (int)(r->terrain_vertices * 4), 0);
 }
 
 void renderer_unload(Renderer *r)

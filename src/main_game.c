@@ -31,6 +31,7 @@
 #include "render.c"
 #include "view.c"
 #include "net.c"
+#include "remote.c"
 #include "client.c"
 #include "clip.c"
 

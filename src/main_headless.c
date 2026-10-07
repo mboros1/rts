@@ -4,7 +4,9 @@
 //   rts-headless record PATH [ticks] [units]  run bots and record a replay
 //   rts-headless verify PATH             replay and compare every tick's hash
 //   rts-headless script PATH...          run scripts and their expectations
-//   rts-headless wire [ticks] [units]    bytes a network client would receive
+//   rts-headless wire [ticks] [units]    bytes a spectator would receive
+//   rts-headless split [ticks] [units]   both factions simulated as clients from
+//                                         their streams, hashes checked every tick
 //
 // Unity build: this file is the whole program.
 #include "base.h"
@@ -227,6 +229,70 @@ static int cmd_wire(long ticks, long units)
 	return 0;
 }
 
+// Spike 3 at scale: the server's battle, and each faction rebuilt by a
+// client sim from nothing but its encoded stream, hash-checked every tick.
+static int cmd_split(long ticks, long units)
+{
+	SimConfig config = sim_config_default();
+	config.initial_units = config.population = (int32_t)units;
+	if (config.max_units < units) config.max_units = (int32_t)units;
+	Sim server, client[FACTION_COUNT];
+	sim_init(&server, config);
+	Driver d = driver_create(config.seed);
+	Arena a = arena_create("split", (ptrdiff_t)1 << 30), tick = arena_create("split tick", (ptrdiff_t)256 << 20);
+	ByteBuf buf = bytebuf_make(&a, (ptrdiff_t)64 << 20);
+	int64_t bytes[FACTION_COUNT] = {0}, worst[FACTION_COUNT] = {0}, seen[FACTION_COUNT] = {0};
+	ptrdiff_t snapshot = 0;
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		sim_init(&client[f], config);
+		buf.len = 0;
+		wire_encode_faction_snapshot(&server, (FactionId){(uint32_t)f}, &buf);
+		snapshot = buf.len;
+		ByteReader r = byte_reader(buf.data, buf.len);
+		client[f].tick.v = (int64_t)get64(&r);
+		if (!faction_read(&client[f].factions[f], &r)) fatal("snapshot didn't load");
+	}
+	Command cmds[MAX_COMMANDS_PER_TICK];
+	double server_s = 0.0, client_s = 0.0;
+	int64_t mismatches = 0;
+	for (long t = 0; t < ticks; t++) {
+		ptrdiff_t n = driver_think(&d, &server, cmds);
+		double t0 = platform_seconds();
+		sim_step(&server, cmds, n);
+		server_s += platform_seconds() - t0;
+		for (int f = 0; f < FACTION_COUNT; f++) {
+			FactionId fid = {(uint32_t)f};
+			arena_reset(&tick);
+			buf.len = 0;
+			wire_encode_faction_tick(&server, fid, cmds, n, true, 1000, &buf);
+			bytes[f] += buf.len;
+			if (buf.len > worst[f]) worst[f] = buf.len;
+			seen[f] += server.effects[f].seen_count;
+			ByteReader r = byte_reader(buf.data, buf.len);
+			FactionTick ft;
+			if (!wire_read_faction_tick(&r, &tick, &config, fid, &ft)) fatal("tick %ld didn't decode", t);
+			t0 = platform_seconds();
+			faction_tick(&client[f], fid, &ft.effects, ft.commands, ft.command_count);
+			client_s += platform_seconds() - t0;
+			mismatches += faction_hash(&client[f].factions[f]).v != ft.hash.v;
+		}
+		if ((t + 1) % 300 == 0)
+			printf("tick %5ld: %5td units   blue's stream %6.1f KB/s   red's %6.1f KB/s   mismatches %lld\n", t + 1,
+			       server.factions[0].units.count + server.factions[1].units.count,
+			       (double)bytes[0] / (double)(t + 1) * SIM_HZ / 1024.0,
+			       (double)bytes[1] / (double)(t + 1) * SIM_HZ / 1024.0, (long long)mismatches);
+	}
+	printf("%ld ticks, %ld units a side: faction hashes checked %ld times each, %lld mismatched\n", ticks, units,
+	       ticks, (long long)mismatches);
+	for (int f = 0; f < FACTION_COUNT; f++)
+		printf("  %s stream: mean %.1f KB/s, worst tick %.1f KB, %.0f perception entries a tick\n",
+		       f ? "red " : "blue", (double)bytes[f] / (double)ticks * SIM_HZ / 1024.0, (double)worst[f] / 1024.0,
+		       (double)seen[f] / (double)ticks);
+	printf("  faction snapshot %.1f KB; server step %.2f ms, client faction step %.2f ms\n",
+	       (double)snapshot / 1024.0, 1e3 * server_s / (double)ticks, 1e3 * client_s / (double)ticks / FACTION_COUNT);
+	return mismatches ? 1 : 0;
+}
+
 static int cmd_script(int count, char **paths)
 {
 	Arena work = arena_create("script", (ptrdiff_t)1 << 30);
@@ -270,8 +336,10 @@ int main(int argc, char **argv)
 		                  parse_long(argc > 4 ? argv[4] : nullptr, 5000));
 	if (!strcmp(cmd, "verify") && argc > 2) return cmd_verify(argv[2]);
 	if (!strcmp(cmd, "script") && argc > 2) return cmd_script(argc - 2, argv + 2);
+	if (!strcmp(cmd, "split")) return cmd_split(parse_long(argc > 2 ? argv[2] : nullptr, 1800),
+	                                           parse_long(argc > 3 ? argv[3] : nullptr, 5000));
 	if (!strcmp(cmd, "wire")) return cmd_wire(parse_long(argc > 2 ? argv[2] : nullptr, 1800),
 	                                         parse_long(argc > 3 ? argv[3] : nullptr, 5000));
-	fprintf(stderr, "usage: %s bench [ticks] [units] | record PATH [ticks] [units] | verify PATH | script PATH... | wire [ticks] [units]\n", argv[0]);
+	fprintf(stderr, "usage: %s bench [ticks] [units] | record PATH [ticks] [units] | verify PATH | script PATH... | wire|split [ticks] [units]\n", argv[0]);
 	return 2;
 }

@@ -1,5 +1,5 @@
 title Dodging artillery
-about Two tank columns under artillery fire: one holds still, one keeps changing direction.
+about Spotted for by raiders, artillery shells two tank columns: one holds still, one keeps turning.
 
 scenario skirmish
 units 0
@@ -9,9 +9,14 @@ bot red off
 clip 0..900
 camera 265,200 135
 
-# Two batteries, each nearest one column, out of the tanks' reach.
+# Two batteries, each nearest one column, out of the tanks' reach. Artillery
+# outranges its own sight (26), so each battery has a raider spotting for it,
+# 40 units from its column: every tank (the column is ~12 wide) is inside a
+# raider's sight (48) and none can see or reach the raider (32).
 at 0    spawn red artillery 15 at 220,150 radius 6
 at 0    spawn red artillery 15 at 310,150 radius 6
+at 0    spawn red raider 1 at 220,175 radius 0
+at 0    spawn red raider 1 at 312,175 radius 0
 at 0    spawn blue tank 20 at 220,215 radius 6
 at 0    spawn blue tank 20 at 310,215 radius 6
 
@@ -36,5 +41,5 @@ at 720  move dodging 335,215
 at 780  move dodging 290,215
 at 840  move dodging 335,215
 
-at 880  expect still alive <= 10     # observed 7 of 20
-at 880  expect dodging alive >= 13   # observed 15 of 20: about double
+at 880  expect still alive <= 10     # observed 6 of 20
+at 880  expect dodging alive >= 13   # observed 16 of 20: well over double

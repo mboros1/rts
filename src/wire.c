@@ -2,14 +2,6 @@
 
 enum : uint8_t { UNIT_SPAWN = 1, UNIT_MOVE, UNIT_HP, UNIT_DEATH };
 
-// Resend a unit's motion when the client's prediction is this far off, or
-// its velocity changed by more than this (in 1/256 unit/s). The trade at
-// 10k units (rts-headless wire): 0.35 and 0.125 u/s cost 492 KB/s; these,
-// half a raider's width and 0.5 u/s, cost 305 KB/s; 0.75 and 1 u/s would
-// be 186 KB/s but let units visibly overlap in tight formations.
-static constexpr float RESEND_DISTANCE = 0.5f;
-static constexpr int32_t RESEND_VELOCITY = 128;
-
 // ---------------------------------------------------------------- mirror
 
 void mirror_init(Mirror *m, Arena *a, ptrdiff_t max_units, ptrdiff_t max_shells)
@@ -219,7 +211,7 @@ void wire_encode_tick(Mirror *m, const Sim *sim, ByteBuf *out, bool digest, uint
 			bool drifted = dx * dx + dz * dz > RESEND_DISTANCE * RESEND_DISTANCE;
 			bool turned = abs(qvx - u->qvx[s]) > RESEND_VELOCITY || abs(qvz - u->qvz[s]) > RESEND_VELOCITY;
 			// Snapshots carry the age since sent in 16 bits: refresh before it wraps.
-			bool stale = tick - u->sent[s] > 60000;
+			bool stale = tick - u->sent[s] > RESEND_AGE;
 			if (drifted || turned || stale) {
 				u->qx[s] = q_pos(su->px[d]);
 				u->qz[s] = q_pos(su->pz[d]);
@@ -426,6 +418,147 @@ ApplyResult wire_apply(Mirror *m, ByteReader *r, bool snapshot, ApplyInfo *info)
 		info->digest_matched = mirror_digest(m).v == digest.v;
 	}
 	return APPLY_OK;
+}
+
+// ---------------------------------------------------------------- faction stream
+
+void wire_encode_faction_tick(const Sim *sim, FactionId f, const Command *cmds, ptrdiff_t count,
+                              bool hash, uint16_t dilation, ByteBuf *out)
+{
+	const Faction *fa = &sim->factions[f.v];
+	put64(out, (uint64_t)(sim->tick.v - 1));
+	put16(out, dilation);
+	put8(out, hash);
+	if (hash) put64(out, faction_hash(fa).v);
+
+	ptrdiff_t count_at = reserve32(out);
+	uint32_t n = 0;
+	for (ptrdiff_t k = 0; k < count; k++) {
+		const Command *c = &cmds[k];
+		if (c->faction.v != f.v) continue;
+		put8(out, c->kind);
+		putf(out, c->target.x);
+		putf(out, c->target.z);
+		put8(out, c->unit_type);
+		put32(out, (uint32_t)c->amount);
+		putf(out, c->radius);
+		put32(out, (uint32_t)c->count);
+		for (ptrdiff_t i = 0; i < c->count; i++) {
+			put32(out, c->units[i].index);
+			put32(out, c->units[i].generation);
+		}
+		n++;
+	}
+	patch32(out, count_at, n);
+
+	const FactionEffects *fx = &sim->effects[f.v];
+	put32(out, (uint32_t)fx->seen_count);
+	for (ptrdiff_t k = 0; k < fx->seen_count; k++) {
+		const SeenEntry *e = &fx->seen[k];
+		put8(out, e->tag);
+		put16(out, e->slot);
+		if (e->tag == SEEN_LOST) continue;
+		if (e->tag == SEEN_ENTER) {
+			put32(out, e->gen);
+			put8(out, e->type);
+		}
+		put16(out, e->qx);
+		put16(out, e->qz);
+		put16(out, (uint16_t)e->qvx);
+		put16(out, (uint16_t)e->qvz);
+	}
+	put32(out, (uint32_t)fx->arrived_count);
+	for (ptrdiff_t k = 0; k < fx->arrived_count; k++) {
+		const Launch *l = &fx->arrived[k];
+		putf(out, l->pos.x);
+		putf(out, l->pos.y);
+		putf(out, l->pos.z);
+		putf(out, l->vel.x);
+		putf(out, l->vel.y);
+		putf(out, l->vel.z);
+		put8(out, l->weapon);
+	}
+}
+
+void wire_encode_faction_snapshot(const Sim *sim, FactionId f, ByteBuf *out)
+{
+	put64(out, (uint64_t)sim->tick.v);
+	faction_write(&sim->factions[f.v], out);
+}
+
+bool wire_read_faction_tick(ByteReader *r, Arena *a, const SimConfig *c, FactionId f, FactionTick *out)
+{
+	*out = (FactionTick){0};
+	out->tick = (int64_t)get64(r);
+	out->dilation = get16(r);
+	uint8_t has_hash = get8(r);
+	if (r->bad || has_hash > 1 || out->dilation > 10000) return false;
+	out->has_hash = has_hash;
+	if (has_hash) out->hash = (Hash){get64(r)};
+
+	uint32_t n = get32(r);
+	if (r->bad || n > 4096) return false;
+	out->commands = PUSH(a, Command, n);
+	out->command_count = n;
+	for (uint32_t k = 0; k < n; k++) {
+		Command *cmd = &out->commands[k];
+		uint8_t kind = get8(r);
+		cmd->target = v2(getf(r), getf(r));
+		uint8_t type = get8(r);
+		cmd->amount = (int32_t)get32(r);
+		cmd->radius = getf(r);
+		uint32_t m = get32(r);
+		if (r->bad || kind >= COMMAND_KIND_COUNT || type >= UNIT_TYPE_COUNT || m > (uint32_t)c->max_units
+		    || (ptrdiff_t)m * 8 > r->len - r->pos)
+			return false;
+		cmd->faction = f;
+		cmd->kind = (CommandKind)kind;
+		cmd->unit_type = (UnitType)type;
+		UnitHandle *h = PUSH(a, UnitHandle, m);
+		for (uint32_t i = 0; i < m; i++) h[i] = (UnitHandle){get32(r), get32(r)};
+		cmd->units = h;
+		cmd->count = m;
+	}
+
+	FactionEffects *fx = &out->effects;
+	uint32_t seen = get32(r);
+	if (r->bad || seen > (uint32_t)c->max_units) return false;
+	fx->seen = PUSH(a, SeenEntry, seen);
+	fx->seen_count = seen;
+	for (uint32_t k = 0; k < seen; k++) {
+		SeenEntry *e = &fx->seen[k];
+		uint8_t tag = get8(r);
+		e->slot = get16(r);
+		if (r->bad || tag < SEEN_ENTER || tag > SEEN_LOST || e->slot >= c->max_units) return false;
+		e->tag = (SeenTag)tag;
+		if (e->tag == SEEN_LOST) continue;
+		if (e->tag == SEEN_ENTER) {
+			e->gen = get32(r);
+			uint8_t type = get8(r);
+			if (type >= UNIT_TYPE_COUNT) return false;
+			e->type = (UnitType)type;
+		}
+		e->qx = get16(r);
+		e->qz = get16(r);
+		e->qvx = (int16_t)get16(r);
+		e->qvz = (int16_t)get16(r);
+	}
+	uint32_t arrived = get32(r);
+	if (r->bad || arrived > (uint32_t)c->max_units) return false;
+	fx->arrived = PUSH(a, Launch, arrived);
+	fx->arrived_count = arrived;
+	for (uint32_t k = 0; k < arrived; k++) {
+		Launch *l = &fx->arrived[k];
+		float v[6];
+		for (int j = 0; j < 6; j++) {
+			v[j] = getf(r);
+			if (!finite(v[j])) return false;
+		}
+		uint8_t weapon = get8(r);
+		if (weapon >= UNIT_TYPE_COUNT) return false;
+		*l = (Launch){v3(v[0], v[1], v[2]), v3(v[3], v[4], v[5]), (UnitType)weapon, f};
+	}
+	return !r->bad && r->pos == r->len;
 }
 
 // ---------------------------------------------------------------- config
