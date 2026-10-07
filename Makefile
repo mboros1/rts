@@ -133,6 +133,9 @@ demos-restore: $(B)/rts
 			$(call DEMO_RENDER,$$d) || exit 1; \
 		fi; \
 	done
+	@# Rendering is deterministic down to the encoded bytes, so this only
+	@# refreshes git's stat cache; the videos match their pointers.
+	@git add --renormalize demos/ && git status --short demos/
 
 # For posting: 720p at the default quality, labelled with the commit.
 share: $(B)/rts
