@@ -32,6 +32,25 @@ review), browser-rts `AGENTS.md`, and what the Recoil survey showed.
 - **Sim flags, every build**: `-ffp-contract=off`, no `-ffast-math`. See
   Determinism.
 
+## Speed is a feature
+
+Fast iteration is the point of the C toolchain, so build and test time is
+tracked and defended like any other property.
+
+- **Every `make check` stage is timed** by `tools/stage`, printed, and
+  appended to `build/timings.log` (date, commit, stage, seconds). Look there
+  before and after anything that might slow a stage.
+- **Stages run in parallel.** `make check` costs about its slowest stage
+  (5 s today), not the sum. A new check goes in as its own stage.
+- **Measure, then optimize**, and record the trade in a comment where the
+  constant lives (see `RESEND_*` in `src/wire.c`).
+- Reference points (2026-10-07, M-series laptop): any one program builds in
+  0.5 to 1.5 s at -O2; tests with sanitizers run in 1.5 s at -O1 (5.4 s at
+  -O0, which is why CI uses -O1); a 9-frame contact sheet renders in under a
+  second; 30 s of 720p video in 6 s; `make demos-rerender` in 14 s.
+- Things that run in real time (network demos) stay out of `make check`;
+  the server's `--speed` keeps network tests short.
+
 ## Local CI
 
 There is no hosted CI. Local runs replace it, given three properties:
@@ -74,6 +93,11 @@ same commit.
   shows what the title claims.
 - **For posting**, `make share DEMO=NN-name` renders 720p with the commit on
   the title card and puts it on the clipboard.
+- **Rendering changed? Re-render every demo in the same commit**
+  (`make demos-rerender`), or `demos-restore` stops reproducing them exactly.
+- **Network demos** (`demos/*.sh`) are real runs over sockets, reproducible in
+  outcome (their checks) rather than byte for byte; their clips re-render from
+  the run's netlog.
 
 ## Modules and APIs
 

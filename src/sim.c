@@ -227,6 +227,7 @@ static void deliver_launches(Sim *sim)
 			p->vz[i] = l->vel.z;
 			p->weapon[i] = l->weapon;
 			p->ttl[i] = PROJECTILE_TTL;
+			p->id[i] = p->next_id++;
 		}
 		from->outbox_count = 0;
 	}
@@ -470,17 +471,14 @@ static void fly_projectiles(Faction *f, const Terrain *t)
 	Projectiles *p = &f->incoming;
 	Grid grid;
 	grid_build(&grid, &f->scratch, t, u->px, u->pz, u->count);
-	const float dt = SIM_DT;
-	const float drop = 0.5f * SIM_GRAVITY * dt * dt;
 
 	// Descending, so swap-remove only moves shells already flown this tick.
 	for (ptrdiff_t k = p->count - 1; k >= 0; k--) {
 		const UnitDef *weapon = &unit_defs[p->weapon[k]];
 		V3 p0 = v3(p->px[k], p->py[k], p->pz[k]);
 		V3 vel = v3(p->vx[k], p->vy[k], p->vz[k]);
-		// Exact for constant gravity, so shells land where the aim solved.
-		V3 p1 = v3(p0.x + vel.x * dt, p0.y + vel.y * dt - drop, p0.z + vel.z * dt);
-		vel.y -= SIM_GRAVITY * dt;
+		V3 p1 = p0;
+		shell_advance(&p1, &vel);
 		V3 seg = v3_sub(p1, p0);
 		float seg2 = v3_dot(seg, seg);
 
@@ -523,6 +521,7 @@ static void fly_projectiles(Faction *f, const Terrain *t)
 			p->vz[k] = p->vz[last];
 			p->weapon[k] = p->weapon[last];
 			p->ttl[k] = p->ttl[last];
+			p->id[k] = p->id[last];
 		} else {
 			p->px[k] = p1.x;
 			p->py[k] = p1.y;
@@ -657,6 +656,7 @@ void sim_init(Sim *sim, SimConfig config)
 		p->vz = PUSH(&sim->zone, float, p->cap);
 		p->weapon = PUSH(&sim->zone, UnitType, p->cap);
 		p->ttl = PUSH(&sim->zone, int32_t, p->cap);
+		p->id = PUSH(&sim->zone, uint32_t, p->cap);
 		f->outbox_cap = config.max_units;
 		f->outbox = PUSH(&sim->zone, Launch, f->outbox_cap);
 		f->scratch = arena_create(scratch_names[k], (ptrdiff_t)64 << 20);
@@ -712,6 +712,7 @@ static Hash hash_units(Hash h, const Units *u)
 static Hash hash_projectiles(Hash h, const Projectiles *p)
 {
 	h = hash_u64(h, (uint64_t)p->count);
+	h = hash_u32(h, p->next_id);
 	for (ptrdiff_t i = 0; i < p->count; i++) {
 		h = hash_f32(h, p->px[i]);
 		h = hash_f32(h, p->py[i]);
@@ -721,6 +722,7 @@ static Hash hash_projectiles(Hash h, const Projectiles *p)
 		h = hash_f32(h, p->vz[i]);
 		h = hash_u32(h, p->weapon[i]);
 		h = hash_u32(h, (uint32_t)p->ttl[i]);
+		h = hash_u32(h, p->id[i]);
 	}
 	return h;
 }

@@ -61,6 +61,29 @@ Done. `make bench`, `make determinism-x86`, `make cross` reproduce these.
   war, the Windows build is compiled but never run, and the 21 ms spike at
   35k is unexplained.
 
+## Spike 2 results (2026-10-07)
+
+Done. `rts-server` runs the sim in real time; `rts --connect` plays on it;
+`tools/net-smoke` (in `make check`) and `demos/04-server-and-client.sh`
+exercise it end to end over real sockets.
+
+- **Protocol** (`src/wire.h`): snapshot, then one delta per tick. Units are
+  dead-reckoned: resent only when the client's prediction drifts 0.5 units or
+  velocity changes 0.5 u/s. Shells are start and end events; clients fly them
+  with the sim's own `shell_advance` and match bit for bit.
+- **Digest**: every second the server sends the hash of what it has
+  broadcast; the client compares its own. Zero mismatches across every run
+  so far, including through rejoins and with 6000 shells in the air.
+- **Bandwidth** (`rts-headless wire`): 10k-unit battle averages 305 KB/s,
+  peak about 450 KB/s; a 400-a-side skirmish 8 to 30 KB/s. Snapshot of the
+  full battle: 105 to 210 KB. Encoding costs 0.12 ms a tick.
+- **Rejoin**: a dropped client reconnects and resumes from a fresh snapshot.
+- **Latency and jitter** are emulated in the real send path on both ends.
+- **Time dilation**: the tick rate slows when steps exceed 80% of the budget;
+  `--dilation` forces it, `--speed` runs tests faster than real time.
+- **Not yet**: per-faction visibility (spike 3 filters what a client gets),
+  windowed client play has not been exercised by a person, Windows sockets.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

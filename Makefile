@@ -21,17 +21,19 @@ WARN    := -Wall -Wextra -Wconversion -Wshadow -Wstrict-prototypes -Wno-unused-f
 SIMFP   := -ffp-contract=off -fno-fast-math
 BASE    := -std=c23 $(WARN) $(SIMFP) -Isrc
 DEBUG   := -O0 -g -fno-omit-frame-pointer -fsanitize=address,undefined
+# Same sanitizers, optimized: CI's test run is ~4x faster than at -O0.
+SAN     := -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
 RELEASE := -O2 -g
 
 RAYLIB_CFLAGS := $(shell pkg-config --cflags raylib)
 RAYLIB_LIBS   := $(shell pkg-config --libs raylib)
 
 SRC      := $(wildcard src/*.c src/*.h)
-SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h,$(SRC))
+SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
 
-.PHONY: all setup check bench determinism-x86 cross clips demos demos-restore share clean
+.PHONY: demos-rerender all setup check check-tests check-replay check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 cross clips demos demos-restore share clean
 
-all: $(B)/rts $(B)/rts-headless
+all: $(B)/rts $(B)/rts-headless $(B)/rts-server
 
 $(B):
 	@mkdir -p $(B)
@@ -52,33 +54,67 @@ $(B)/rts-debug: src/main_game.c $(SRC) | $(B)
 $(B)/rts-headless: src/main_headless.c $(SIM_SRC) | $(B)
 	$(CC) $(BASE) $(RELEASE) $< -o $@
 
+$(B)/rts-server: src/main_server.c $(SIM_SRC) | $(B)
+	$(CC) $(BASE) $(RELEASE) $< -o $@
+
 bench: $(B)/rts-headless
 	$(B)/rts-headless bench 1800 5000
 
 # Local CI. Builds from scratch in its own directory: nothing stale is reused.
+# Stages are independent and run in parallel, each timed by tools/stage
+# (history in build/timings.log), so check costs about its slowest stage.
 CHECK := $(B)/check
+S := tools/stage
+CHECK_STAGES := check-tests check-replay check-game check-server check-gcc check-net
 check:
 	@rm -rf $(CHECK) && mkdir -p $(CHECK)
-	@echo "== clang, ASan + UBSan: tests"
-	$(CC) $(BASE) -Werror $(DEBUG) src/main_tests.c -o $(CHECK)/tests
-	$(CHECK)/tests
-	@echo "== clang release: replay determinism"
-	$(CC) $(BASE) -Werror $(RELEASE) src/main_headless.c -o $(CHECK)/headless
-	$(CHECK)/headless record $(CHECK)/run.replay 900 2000
-	$(CHECK)/headless verify $(CHECK)/run.replay
-	@echo "== clang: game builds"
-	$(CC) $(BASE) -Werror $(RELEASE) $(RAYLIB_CFLAGS) src/main_game.c -o $(CHECK)/rts $(RAYLIB_LIBS)
-	@echo "== gcc-15 -Werror -fanalyzer"
-	$(GCC) $(BASE) -Werror -O1 -fanalyzer src/main_tests.c -o $(CHECK)/tests-gcc
-	$(GCC) $(BASE) -Werror -O1 -fanalyzer src/main_headless.c -o $(CHECK)/headless-gcc
-	$(GCC) $(BASE) -Werror -O1 $(RAYLIB_CFLAGS) -c src/main_game.c -o $(CHECK)/game-gcc.o
-	@echo "== clip smoke test: contact sheet, and a replay clip that must reproduce"
-	$(CHECK)/rts clip --scenario skirmish --to 600 --sheet $(CHECK)/skirmish.png --frames 4 \
-		--save-replay $(CHECK)/skirmish.replay
-	$(CHECK)/rts clip --replay $(CHECK)/skirmish.replay --last 3 --sheet $(CHECK)/replayed.png --frames 4
-	@echo "== demo scripts: every expectation must hold"
-	$(CHECK)/headless script demos/*.script
+	@$(S) "check (total)" $(MAKE) --no-print-directory -j8 $(CHECK_STAGES)
 	@echo "== check passed"
+
+check-tests:
+	@$(S) "build tests (clang -O1, ASan+UBSan)" $(CC) $(BASE) -Werror $(SAN) src/main_tests.c -o $(CHECK)/tests
+	@$(S) "run tests" sh -c '$(CHECK)/tests > $(CHECK)/tests.log 2>&1 || { cat $(CHECK)/tests.log; exit 1; }'
+
+$(CHECK)/headless:
+	@$(S) "build headless (clang -O2)" $(CC) $(BASE) -Werror $(RELEASE) src/main_headless.c -o $@
+
+check-replay: $(CHECK)/headless
+	@$(S) "replay: record 900 ticks, 2000 units" $(CHECK)/headless record $(CHECK)/run.replay 900 2000 > /dev/null
+	@$(S) "replay: verify" $(CHECK)/headless verify $(CHECK)/run.replay > /dev/null
+	@$(S) "demo scripts: expectations" sh -c '$(CHECK)/headless script demos/*.script > $(CHECK)/demos.log 2>&1 || { cat $(CHECK)/demos.log; exit 1; }'
+
+$(CHECK)/rts:
+	@$(S) "build game (clang -O2)" $(CC) $(BASE) -Werror $(RELEASE) $(RAYLIB_CFLAGS) src/main_game.c -o $@ $(RAYLIB_LIBS)
+
+check-game: $(CHECK)/rts
+	@$(S) "clip: scenario contact sheet" $(CHECK)/rts clip --scenario skirmish --to 600 \
+		--sheet $(CHECK)/skirmish.png --frames 4 --save-replay $(CHECK)/skirmish.replay > /dev/null
+	@$(S) "clip: replay must reproduce" $(CHECK)/rts clip --replay $(CHECK)/skirmish.replay --last 3 \
+		--sheet $(CHECK)/replayed.png --frames 4 > /dev/null
+
+$(CHECK)/rts-server:
+	@$(S) "build server (clang -O2)" $(CC) $(BASE) -Werror $(RELEASE) src/main_server.c -o $@
+
+check-server: $(CHECK)/rts-server
+
+# A server and a headless client over a real socket, with latency, jitter and
+# a forced rejoin: every digest must match and the server's run must verify.
+NET := $(CHECK)/net
+check-net: $(CHECK)/rts $(CHECK)/rts-server $(CHECK)/headless
+	@mkdir -p $(NET)
+	@$(S) "net: server + client, 10 s with a rejoin" tools/net-smoke $(CHECK) $(NET) 300
+	@$(S) "net: server replay verifies" $(CHECK)/headless verify $(NET)/server.replay > /dev/null
+
+# One stage per program: the analyzer is the slowest step, so run them side by side.
+check-gcc: check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game
+check-gcc-tests:
+	@$(S) "gcc -fanalyzer: tests" $(GCC) $(BASE) -Werror -O1 -fanalyzer src/main_tests.c -o $(CHECK)/tests-gcc
+check-gcc-headless:
+	@$(S) "gcc -fanalyzer: headless" $(GCC) $(BASE) -Werror -O1 -fanalyzer src/main_headless.c -o $(CHECK)/headless-gcc
+check-gcc-server:
+	@$(S) "gcc -fanalyzer: server" $(GCC) $(BASE) -Werror -O1 -fanalyzer src/main_server.c -o $(CHECK)/server-gcc
+check-gcc-game:
+	@$(S) "gcc: game compiles" $(GCC) $(BASE) -Werror -O1 $(RAYLIB_CFLAGS) -c src/main_game.c -o $(CHECK)/game-gcc.o
 
 # Same replay on both architectures, both directions. x86-64 runs under Rosetta.
 X86 := $(B)/x86
@@ -115,7 +151,8 @@ clips: $(B)/rts
 # git so history shows each change without building anything. Rendered only
 # when the script changes, never because the binary did.
 DEMO_SCRIPTS := $(wildcard demos/*.script)
-demos: $(DEMO_SCRIPTS:.script=.mp4)
+DEMO_RUNS := $(wildcard demos/*.sh)
+demos: $(DEMO_SCRIPTS:.script=.mp4) $(DEMO_RUNS:.sh=.mp4)
 
 DEMO_RENDER = $(B)/rts clip --script demos/$(1).script --out demos/$(1).mp4 \
 	--sheet $(B)/demo-$(1).png --size 960x540 --crf 30 --label "$(1)" && \
@@ -123,6 +160,11 @@ DEMO_RENDER = $(B)/rts clip --script demos/$(1).script --out demos/$(1).mp4 \
 
 demos/%.mp4: demos/%.script | $(B)/rts
 	$(call DEMO_RENDER,$*)
+
+# Network demos are real runs over sockets (see demos/04-*.sh).
+demos/%.mp4: demos/%.sh | $(B)/rts $(B)/rts-server $(B)/rts-headless
+	B=$(B) OUT=demos/$* SIZE=960x540 CRF=30 LABEL="$*" sh $<
+	ffmpeg -loglevel error -y -i $(B)/demo-$*.png -q:v 6 demos/$*.jpg
 
 # Videos are reproducible from their scripts, so a clone that only has LFS
 # pointers rebuilds them instead of downloading them.
@@ -138,11 +180,27 @@ demos-restore: $(B)/rts
 	@git add --renormalize demos/ && git status --short demos/
 
 # For posting: 720p at the default quality, labelled with the commit.
+# After any change to rendering or clip output: re-render every demo, in the
+# same commit, so demos-restore keeps reproducing them byte for byte.
+# Network demos re-render from their last netlog when there is one.
+demos-rerender: $(B)/rts $(B)/rts-server $(B)/rts-headless
+	@for s in demos/*.script; do d=$$(basename $$s .script); \
+		$(S) "rerender $$d" sh -c '$(call DEMO_RENDER,'"$$d"') > /dev/null' || exit 1; done
+	@for s in demos/*.sh; do d=$$(basename $$s .sh); \
+		$(S) "rerender $$d" sh -c "B=$(B) OUT=demos/$$d SIZE=960x540 CRF=30 LABEL=$$d RENDER_ONLY=1 sh $$s > /dev/null && \
+			ffmpeg -loglevel error -y -i $(B)/demo-$$d.png -q:v 6 demos/$$d.jpg" || exit 1; done
+
+# A network demo re-renders from its last netlog rather than re-running.
 share: $(B)/rts
 	@test -n "$(DEMO)" || { echo "usage: make share DEMO=02-scripted-flank"; exit 2; }
 	@mkdir -p $(B)/share
-	$(B)/rts clip --script demos/$(DEMO).script --out $(B)/share/$(DEMO).mp4 \
-		--label "$$(git describe --always --dirty)" --clipboard
+	@if [ -f demos/$(DEMO).sh ]; then \
+		B=$(B) OUT=$(B)/share/$(DEMO) SIZE=1280x720 CRF=26 RENDER_ONLY=1 CLIPBOARD=1 \
+			LABEL="$$(git describe --always --dirty)" sh demos/$(DEMO).sh; \
+	else \
+		$(B)/rts clip --script demos/$(DEMO).script --out $(B)/share/$(DEMO).mp4 \
+			--label "$$(git describe --always --dirty)" --clipboard; \
+	fi
 
 clean:
 	rm -rf $(B)

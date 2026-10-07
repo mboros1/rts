@@ -93,7 +93,7 @@ Camera3D render_camera(const Terrain *t, V2 focus, float distance)
 	};
 }
 
-void renderer_init(Renderer *r, const Sim *sim, Arena *program)
+void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Arena *program)
 {
 	*r = (Renderer){0};
 	r->shader = LoadShaderFromMemory(UNIT_VS, UNIT_FS);
@@ -109,9 +109,9 @@ void renderer_init(Renderer *r, const Sim *sim, Arena *program)
 	r->unit_mesh[UNIT_TANK] = GenMeshCube(1.0f, 1.0f, 1.0f);
 	r->unit_mesh[UNIT_ARTILLERY] = GenMeshCone(0.5f, 1.0f, 8);
 	r->shell_mesh = GenMeshSphere(1.0f, 6, 8);
-	r->terrain = build_terrain(&sim->terrain);
+	r->terrain = build_terrain(terrain);
 
-	r->heading_cap = sim->config.max_units;
+	r->heading_cap = max_units;
 	for (int k = 0; k < FACTION_COUNT; k++) r->heading[k] = PUSH(program, float, r->heading_cap);
 }
 
@@ -143,14 +143,15 @@ static void draw_bucket(Renderer *r, Mesh mesh, Color color, const Matrix *m, pt
 	DrawMeshInstanced(mesh, r->material, m, (int)n);
 }
 
-void renderer_draw_world(Renderer *r, const Sim *sim, float alpha, Arena *frame,
-                         const uint8_t *selected)
+void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *frame,
+                         const uint8_t *selected, int selected_faction)
 {
+	ASSERT(scene->max_units <= r->heading_cap);
 	DrawModel(r->terrain, (Vector3){0, 0, 0}, 1.0f, WHITE);
 	float ahead = alpha * SIM_DT;
 
 	for (int f = 0; f < FACTION_COUNT; f++) {
-		const Units *u = &sim->factions[f].units;
+		const SceneUnits *u = &scene->units[f];
 		float *heading = r->heading[f];
 		// Two buckets per type: normal and selected.
 		Matrix *bucket[UNIT_TYPE_COUNT][2];
@@ -160,12 +161,12 @@ void renderer_draw_world(Renderer *r, const Sim *sim, float alpha, Arena *frame,
 
 		for (ptrdiff_t i = 0; i < u->count; i++) {
 			const UnitDef *def = &unit_defs[u->type[i]];
-			int32_t slot = u->dense_slot[i];
+			int32_t slot = u->slot[i];
 			if (u->vx[i] * u->vx[i] + u->vz[i] * u->vz[i] > 0.09f)
 				heading[slot] = atan2f(u->vx[i], u->vz[i]);
 			float x = u->px[i] + u->vx[i] * ahead, z = u->pz[i] + u->vz[i] * ahead;
 			float d = 2.0f * def->radius;
-			int s = (f == 0 && selected && selected[i]) ? 1 : 0;
+			int s = (f == selected_faction && selected && selected[i]) ? 1 : 0;
 			int t = u->type[i];
 			float y = u->py[i] + (t == UNIT_ARTILLERY ? 0.0f : 0.5f * def->height);
 			bucket[t][s][count[t][s]++] = transform(x, y, z, d, def->height, d, heading[slot]);
@@ -177,11 +178,11 @@ void renderer_draw_world(Renderer *r, const Sim *sim, float alpha, Arena *frame,
 	}
 
 	ptrdiff_t shells = 0;
-	for (int f = 0; f < FACTION_COUNT; f++) shells += sim->factions[f].incoming.count;
+	for (int f = 0; f < FACTION_COUNT; f++) shells += scene->shells[f].count;
 	Matrix *m = PUSH(frame, Matrix, shells);
 	ptrdiff_t n = 0;
 	for (int f = 0; f < FACTION_COUNT; f++) {
-		const Projectiles *p = &sim->factions[f].incoming;
+		const SceneShells *p = &scene->shells[f];
 		for (ptrdiff_t i = 0; i < p->count; i++) {
 			float size = p->weapon[i] == UNIT_ARTILLERY ? 0.55f : p->weapon[i] == UNIT_TANK ? 0.35f : 0.2f;
 			m[n++] = transform(p->px[i] + p->vx[i] * ahead, p->py[i] + p->vy[i] * ahead,
@@ -191,8 +192,8 @@ void renderer_draw_world(Renderer *r, const Sim *sim, float alpha, Arena *frame,
 	draw_bucket(r, r->shell_mesh, SHELL_COLOR, m, n);
 
 	for (int f = 0; f < FACTION_COUNT; f++) {
-		V2 b = sim->factions[f].base;
-		Vector3 at = {b.x, terrain_height(&sim->terrain, b.x, b.z), b.z};
+		V2 b = scene->base[f];
+		Vector3 at = {b.x, terrain_height(scene->terrain, b.x, b.z), b.z};
 		DrawCylinderWires(at, 20.0f, 20.0f, 0.5f, 24, FACTION_COLOR[f]);
 	}
 }

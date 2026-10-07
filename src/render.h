@@ -15,6 +15,7 @@
 #include <raylib.h>
 
 #include "arena.h"
+#include "scene.h"
 #include "sim.h"
 
 typedef struct {
@@ -33,11 +34,12 @@ typedef struct {
 // Shared by the game, the clip director and recorded camera tracks.
 Camera3D render_camera(const Terrain *t, V2 focus, float distance);
 
-void renderer_init(Renderer *r, const Sim *sim, Arena *program);
+void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Arena *program);
 void renderer_unload(Renderer *r);
 
 // alpha in [0, 1): how far between the last tick and the next to draw,
 // extrapolated along velocity so 60 fps doesn't step at 30 Hz.
-// selected marks faction 0 units by dense index (may be nullptr).
-void renderer_draw_world(Renderer *r, const Sim *sim, float alpha, Arena *frame,
-                         const uint8_t *selected);
+// selected marks the units of selected_faction by their index in the scene
+// (may be nullptr).
+void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *frame,
+                         const uint8_t *selected, int selected_faction);

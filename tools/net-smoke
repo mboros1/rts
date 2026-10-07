@@ -1,0 +1,25 @@
+#!/bin/sh
+# tools/net-smoke BIN_DIR OUT_DIR TICKS: a server and a headless client over a
+# real socket, with latency, jitter and a forced rejoin halfway. Fails unless
+# the client rejoined, took the server's digests without a mismatch, and its
+# commands were admitted.
+set -eu
+bin=$1; out=$2; ticks=$3
+# A port derived from the process id, so parallel runs don't collide.
+port=$((20000 + $$ % 20000))
+# The server runs at 4x real time: the test is about the protocol, not the clock.
+"$bin/rts-server" --scenario skirmish --port "$port" --ticks "$((ticks + 30))" --bot blue off --speed 4 \
+	--latency 60 --jitter 20 --record "$out/server.replay" --stats "$out/server.txt" > "$out/server.log" 2>&1 &
+server=$!
+"$bin/rts" --connect "127.0.0.1:$port" --faction blue --headless --auto-orders \
+	--latency 60 --jitter 20 --disconnect-at "$((ticks / 2))" --reconnect-after 0.3 \
+	--quit-at "$ticks" --netlog "$out/client.netlog" --stats "$out/client.txt" > "$out/client.log" 2>&1 || {
+	kill "$server" 2>/dev/null; cat "$out/client.log"; exit 1; }
+wait "$server"
+fail() { echo "net-smoke: $1"; cat "$out/client.txt" "$out/server.log"; exit 1; }
+grep -q '^digest_mismatches 0$' "$out/client.txt" || fail "digests mismatched"
+grep -q '^reconnects 1$' "$out/client.txt" || fail "client didn't rejoin once"
+grep -q '^gaps 0$' "$out/client.txt" || fail "client missed ticks"
+grep -q '^malformed 0$' "$out/client.txt" || fail "client saw malformed messages"
+[ "$(sed -n 's/^digests //p' "$out/client.txt")" -ge 5 ] || fail "too few digests checked"
+[ "$(sed -n 's/^commands_admitted //p' "$out/server.txt")" -ge 1 ] || fail "no client command admitted"

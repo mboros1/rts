@@ -7,6 +7,7 @@
 //   C  clip the last 10 seconds, as you saw them, to the clipboard
 //
 //   rts [--scenario NAME]    play (default: battle)
+//   rts --connect HOST:PORT  play on a server (rts-server); see client.c
 //   rts clip ...             render clips offline; see clip.h, `rts clip`
 //
 // Every admitted command, yours and the bots', is recorded; on exit the run
@@ -25,7 +26,12 @@
 #include "replay.c"
 #include "scenario.c"
 #include "script.c"
+#include "wire.c"
+#include "scene.c"
 #include "render.c"
+#include "view.c"
+#include "net.c"
+#include "client.c"
 #include "clip.c"
 
 static constexpr ptrdiff_t MAX_COMMANDS_PER_TICK = 256;
@@ -33,11 +39,6 @@ static constexpr int TIMING_WINDOW = 64; // a power of two
 static constexpr int CAMERA_RING = 2048;  // a power of two; ~68 s of ticks
 static constexpr double CLIP_SECONDS = 10.0;
 
-typedef struct {
-	Camera3D camera;
-	V2 focus;
-	float distance;
-} View;
 
 typedef struct {
 	Sim sim;
@@ -78,53 +79,6 @@ typedef struct {
 } Game;
 
 static void start_clip(Game *g);
-
-// ---------------------------------------------------------------- camera
-
-static void view_update(View *v, const Terrain *t)
-{
-	float dt = GetFrameTime();
-	float pan = v->distance * 1.2f * dt;
-	if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) v->focus.z -= pan;
-	if (IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN)) v->focus.z += pan;
-	if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) v->focus.x -= pan;
-	if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) v->focus.x += pan;
-	if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) {
-		Vector2 d = GetMouseDelta();
-		float k = v->distance / (float)GetScreenHeight();
-		v->focus.x -= d.x * k;
-		v->focus.z -= d.y * k;
-	}
-	float wheel = GetMouseWheelMove();
-	if (wheel != 0.0f) v->distance = f_clamp(v->distance * powf(0.88f, wheel), 25.0f, 700.0f);
-	v->focus = v2(f_clamp(v->focus.x, 0.0f, t->size_x), f_clamp(v->focus.z, 0.0f, t->size_z));
-
-	v->camera = render_camera(t, v->focus, v->distance);
-}
-
-// March the mouse ray down to the sim's terrain, then bisect.
-static bool pick_ground(const View *v, const Terrain *t, Vector2 mouse, V2 *out)
-{
-	Ray ray = GetScreenToWorldRay(mouse, v->camera);
-	float step = 1.0f, prev = 0.0f;
-	for (float s = 0.0f; s < 3000.0f; s += step) {
-		Vector3 p = {ray.position.x + ray.direction.x * s, ray.position.y + ray.direction.y * s,
-		             ray.position.z + ray.direction.z * s};
-		if (p.y <= terrain_height(t, p.x, p.z)) {
-			float lo = prev, hi = s;
-			for (int k = 0; k < 12; k++) {
-				float mid = 0.5f * (lo + hi);
-				Vector3 q = {ray.position.x + ray.direction.x * mid, ray.position.y + ray.direction.y * mid,
-				             ray.position.z + ray.direction.z * mid};
-				if (q.y <= terrain_height(t, q.x, q.z)) hi = mid; else lo = mid;
-			}
-			*out = v2(ray.position.x + ray.direction.x * hi, ray.position.z + ray.direction.z * hi);
-			return true;
-		}
-		prev = s;
-	}
-	return false;
-}
 
 // ---------------------------------------------------------------- input
 
@@ -358,6 +312,8 @@ static void draw_overlay(const Game *g)
 int main(int argc, char **argv)
 {
 	if (argc > 1 && !strcmp(argv[1], "clip")) return clip_main(argc, argv);
+	for (int i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "--connect")) return client_main(argc, argv);
 	const Scenario *scenario = scenario_find("battle");
 	if (argc > 2 && !strcmp(argv[1], "--scenario") && !(scenario = scenario_find(argv[2]))) {
 		fprintf(stderr, "unknown scenario %s; `rts clip --list` lists them\n", argv[2]);
@@ -380,7 +336,7 @@ int main(int argc, char **argv)
 	SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
 	InitWindow(1600, 900, TextFormat("rts: %s", scenario->name));
 	SetTargetFPS(120);
-	renderer_init(&g.renderer, &g.sim, &g.program);
+	renderer_init(&g.renderer, &g.sim.terrain, config.max_units, &g.program);
 	g.view = (View){
 		.focus = v2(g.sim.terrain.size_x * 0.5f, g.sim.terrain.size_z * 0.5f),
 		.distance = 420.0f,
@@ -406,8 +362,9 @@ int main(int argc, char **argv)
 		BeginDrawing();
 		ClearBackground((Color){24, 28, 34, 255});
 		BeginMode3D(g.view.camera);
-		renderer_draw_world(&g.renderer, &g.sim, g.paused ? 0.0f : (float)(accumulator / SIM_DT),
-		                    &g.frame, selected);
+		Scene scene = scene_from_sim(&g.sim);
+		renderer_draw_scene(&g.renderer, &scene, g.paused ? 0.0f : (float)(accumulator / SIM_DT),
+		                    &g.frame, selected, 0);
 		EndMode3D();
 		if (g.dragging) {
 			Vector2 m = GetMousePosition();

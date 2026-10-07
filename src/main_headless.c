@@ -4,6 +4,7 @@
 //   rts-headless record PATH [ticks] [units]  run bots and record a replay
 //   rts-headless verify PATH             replay and compare every tick's hash
 //   rts-headless script PATH...          run scripts and their expectations
+//   rts-headless wire [ticks] [units]    bytes a network client would receive
 //
 // Unity build: this file is the whole program.
 #include "base.h"
@@ -16,6 +17,7 @@
 #include "replay.c"
 #include "scenario.c"
 #include "script.c"
+#include "wire.c"
 
 static constexpr ptrdiff_t MAX_COMMANDS_PER_TICK = 256;
 
@@ -180,6 +182,51 @@ static int cmd_verify(const char *path)
 	return 0;
 }
 
+// What the match stream costs, without sockets: encode every tick's delta
+// for a bot battle and report the bytes.
+static int cmd_wire(long ticks, long units)
+{
+	SimConfig config = sim_config_default();
+	config.initial_units = config.population = (int32_t)units;
+	if (config.max_units < units) config.max_units = (int32_t)units;
+	Sim sim;
+	sim_init(&sim, config);
+	Driver d = driver_create(config.seed);
+	Arena a = arena_create("wire", (ptrdiff_t)1 << 30);
+	Mirror m;
+	mirror_init(&m, &a, config.max_units, config.max_projectiles);
+	ByteBuf buf = bytebuf_make(&a, (ptrdiff_t)64 << 20);
+	wire_encode_tick(&m, &sim, &buf, false, 1000, nullptr);
+	Command cmds[MAX_COMMANDS_PER_TICK];
+	WireStats ws = {0};
+	int64_t total = 0, worst = 0, window = 0;
+	double encode = 0.0;
+	for (long t = 0; t < ticks; t++) {
+		sim_step(&sim, cmds, driver_think(&d, &sim, cmds));
+		buf.len = 0;
+		double t0 = platform_seconds();
+		wire_encode_tick(&m, &sim, &buf, sim.tick.v % DIGEST_EVERY == 0, 1000, &ws);
+		encode += platform_seconds() - t0;
+		total += buf.len;
+		window += buf.len;
+		if (buf.len > worst) worst = buf.len;
+		if ((t + 1) % 300 == 0) {
+			printf("tick %5ld: %5td units, %6.1f KB/s over the last 10 s\n", t + 1,
+			       sim.factions[0].units.count + sim.factions[1].units.count, (double)window / 10.0 / 1024.0);
+			window = 0;
+		}
+	}
+	buf.len = 0;
+	wire_encode_snapshot(&m, &buf);
+	printf("%ld ticks, %ld units a side: mean %.1f KB/s, worst tick %.1f KB, snapshot %.1f KB, "
+	       "encode %.3f ms/tick\n", ticks, units, (double)total / (double)ticks * SIM_HZ / 1024.0,
+	       (double)worst / 1024.0, (double)buf.len / 1024.0, 1e3 * encode / (double)ticks);
+	printf("unit entries %lld (%.1f a tick), shells started %lld\n", (long long)ws.units_sent,
+	       (double)ws.units_sent / (double)ticks, (long long)ws.shells_started);
+	sim_destroy(&sim);
+	return 0;
+}
+
 static int cmd_script(int count, char **paths)
 {
 	Arena work = arena_create("script", (ptrdiff_t)1 << 30);
@@ -223,6 +270,8 @@ int main(int argc, char **argv)
 		                  parse_long(argc > 4 ? argv[4] : nullptr, 5000));
 	if (!strcmp(cmd, "verify") && argc > 2) return cmd_verify(argv[2]);
 	if (!strcmp(cmd, "script") && argc > 2) return cmd_script(argc - 2, argv + 2);
-	fprintf(stderr, "usage: %s bench [ticks] [units] | record PATH [ticks] [units] | verify PATH | script PATH...\n", argv[0]);
+	if (!strcmp(cmd, "wire")) return cmd_wire(parse_long(argc > 2 ? argv[2] : nullptr, 1800),
+	                                         parse_long(argc > 3 ? argv[3] : nullptr, 5000));
+	fprintf(stderr, "usage: %s bench [ticks] [units] | record PATH [ticks] [units] | verify PATH | script PATH... | wire [ticks] [units]\n", argv[0]);
 	return 2;
 }

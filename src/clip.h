@@ -6,6 +6,10 @@
 // clip proves it shows exactly what happened, or refuses.
 //
 // Outputs, any combination:
+// A netlog (client.c) is different: it re-applies what a network client
+// received, on the client's own clock, so the clip shows its latency, the
+// freeze while it was disconnected and the snapshot it rejoined with.
+//
 //   video   .mp4 for people; can go straight onto the system clipboard
 //   sheet   one .png grid of labelled frames, for an agent to read at once
 //   stats   .txt beside the sheet: per sampled tick, units, shells, hash
@@ -14,6 +18,7 @@
 #pragma once
 
 #include "arena.h"
+#include "netlog.h"
 #include "render.h"
 #include "scenario.h"
 #include "script.h"
@@ -42,12 +47,14 @@ typedef struct {
 	bool primed;
 } Director;
 
-void director_update(Director *d, const Sim *sim);
+void director_update(Director *d, const Scene *scene);
 
 typedef struct {
 	const char *replay;         // run this replay ...
 	const Scenario *scenario;   // ... or play this scenario with bots ...
-	const char *script;         // ... or run this script (with its bots)
+	const char *script;         // ... or run this script (with its bots) ...
+	const char *netlog;         // ... or show what a network client saw
+	const char *title, *about;  // title card, when there's no script to say
 	const char *label;          // shown on the title card, e.g. the commit
 	int64_t from, to;           // tick window; to < 0 means the end
 	double last_seconds;        // if > 0, from = to - this many seconds
@@ -64,6 +71,7 @@ typedef struct {
 
 // Expects a window (hidden is fine) for the GL context. Returns an exit code.
 int clip_run(const ClipRequest *req);
+int clip_netlog(const ClipRequest *req);
 
 // `rts clip ...`: parse arguments, open a hidden window, run.
 int clip_main(int argc, char **argv);

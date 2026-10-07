@@ -326,6 +326,7 @@ bool script_parse(Script *s, Arena *arena, Str text, const char *path, char *err
 	ptrdiff_t lines = 1;
 	for (ptrdiff_t i = 0; i < text.len; i++) lines += text.ptr[i] == '\n';
 	const Scenario *def = scenario_find("skirmish");
+	ASSERT(def); // the default every script starts from
 	*s = (Script){
 		.path = path,
 		.title = "",

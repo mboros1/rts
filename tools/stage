@@ -1,0 +1,15 @@
+#!/bin/sh
+# Run one step of a make target, timed: tools/stage NAME COMMAND...
+# Prints "  1.23s  NAME" and appends "date commit NAME seconds" to
+# build/timings.log, so slow steps and regressions show up over time.
+name=$1; shift
+start=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+"$@"; status=$?
+end=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+secs=$(perl -e "printf '%.2f', $end - $start")
+mkdir -p build
+commit=$(git rev-parse --short HEAD 2>/dev/null || echo none)
+printf '%s %s %s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$commit" "$name" "$secs" \
+	"$([ $status -eq 0 ] || echo ' FAILED')" >> build/timings.log
+printf '  %6ss  %s\n' "$secs" "$name"
+exit $status

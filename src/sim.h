@@ -112,6 +112,8 @@ typedef struct {
 	float *vx, *vy, *vz;
 	UnitType *weapon;      // the firing unit's type: damage, splash
 	int32_t *ttl;          // ticks before it is discarded unexploded
+	uint32_t *id;          // unique per target faction, in delivery order
+	uint32_t next_id;
 } Projectiles;
 
 // A shot, crossing from the firing faction to the target faction.
@@ -217,6 +219,17 @@ ptrdiff_t units_find(const Units *u, UnitHandle h);
 UnitHandle units_handle(const Units *u, ptrdiff_t dense);
 
 static inline FactionId faction_enemy(FactionId f) { return (FactionId){1 - f.v}; }
+
+// One tick of shell flight: exact for constant gravity, so shells land where
+// the aim solved. Clients fly shells with this too, from the server's start
+// state, and get the server's positions bit for bit.
+static inline void shell_advance(V3 *pos, V3 *vel)
+{
+	const float dt = SIM_DT;
+	const float drop = 0.5f * SIM_GRAVITY * dt * dt;
+	*pos = v3(pos->x + vel->x * dt, pos->y + vel->y * dt - drop, pos->z + vel->z * dt);
+	vel->y -= SIM_GRAVITY * dt;
+}
 
 // Ballistic aim: the launch velocity that carries a shell from `from` to `to`
 // at `speed` under gravity. Lob picks the high arc. False if out of reach.

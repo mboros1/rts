@@ -9,6 +9,7 @@
 #include "replay.c"
 #include "scenario.c"
 #include "script.c"
+#include "wire.c"
 
 static int failures;
 static int checks;
@@ -339,6 +340,92 @@ static void test_script(void)
 	CHECK(parse_fails("scenario nope\n", "unknown scenario"));
 }
 
+
+// The server's mirror and clients' mirrors must agree tick for tick, from the
+// start or from a snapshot taken mid-game, and bad input must fail cleanly.
+static void test_wire(void)
+{
+	Arena a = arena_create("wire", (ptrdiff_t)256 << 20);
+	Arena tick = arena_create("wire tick", 16 << 20);
+	SimConfig config = small_config(11);
+	Sim sim;
+	sim_init(&sim, config);
+	Bot bots[FACTION_COUNT];
+	for (int k = 0; k < FACTION_COUNT; k++) bots[k] = bot_create((FactionId){(uint32_t)k}, 11);
+	Mirror server, early, late;
+	mirror_init(&server, &a, config.max_units, config.max_projectiles);
+	mirror_init(&early, &a, config.max_units, config.max_projectiles);
+	mirror_init(&late, &a, config.max_units, config.max_projectiles);
+
+	ByteBuf buf = bytebuf_make(&a, 8 << 20);
+	ApplyInfo info;
+	wire_encode_tick(&server, &sim, &buf, true, 1000, nullptr);
+	buf.len = 0;
+	wire_encode_snapshot(&server, &buf);
+	ByteReader r = byte_reader(buf.data, buf.len);
+	CHECK(wire_apply(&early, &r, true, &info) == APPLY_OK && info.digest_matched);
+
+	bool all_ok = true, all_matched = true, late_joined = false;
+	int64_t shells_seen = 0, bytes = 0;
+	Command cmds[64];
+	for (int t = 0; t < 800; t++) { // the armies meet around tick 600
+		arena_reset(&tick);
+		ptrdiff_t n = 0;
+		for (int k = 0; k < FACTION_COUNT; k++) bot_think(&bots[k], &sim, &tick, cmds, &n, countof(cmds));
+		sim_step(&sim, cmds, n);
+		buf.len = 0;
+		wire_encode_tick(&server, &sim, &buf, true, 1000, nullptr);
+		bytes += buf.len;
+		r = byte_reader(buf.data, buf.len);
+		all_ok = all_ok && wire_apply(&early, &r, false, &info) == APPLY_OK;
+		all_matched = all_matched && info.digest_matched;
+		if (late_joined) {
+			r = byte_reader(buf.data, buf.len);
+			all_ok = all_ok && wire_apply(&late, &r, false, &info) == APPLY_OK;
+			all_matched = all_matched && info.digest_matched;
+		}
+		if (t == 400) {
+			// A second client joins: snapshot, then the same deltas.
+			ByteBuf snap = bytebuf_make(&tick, 8 << 20);
+			wire_encode_snapshot(&server, &snap);
+			r = byte_reader(snap.data, snap.len);
+			CHECK(wire_apply(&late, &r, true, &info) == APPLY_OK && info.digest_matched);
+			late_joined = true;
+		}
+		shells_seen += server.shells[0].count + server.shells[1].count;
+
+		if (t == 450) {
+			// Replaying the same delta is a gap, not a silent double step.
+			r = byte_reader(buf.data, buf.len);
+			CHECK(wire_apply(&early, &r, false, &info) == APPLY_GAP);
+		}
+	}
+	CHECK(all_ok);
+	CHECK(all_matched);           // including every shell's position, bit for bit
+	CHECK(shells_seen > 0);       // shells were in flight, so that was tested
+	CHECK(bytes < 800 * 4096);    // dead reckoning keeps 600 units under 4 KB a tick
+
+	// Corrupted snapshots: every outcome is OK or BAD, never a crash.
+	buf.len = 0;
+	wire_encode_snapshot(&server, &buf);
+	uint8_t *copy = PUSH(&a, uint8_t, buf.len);
+	Rng rng = rng_seed(99);
+	int bad = 0;
+	for (int k = 0; k < 300; k++) {
+		memcpy(copy, buf.data, (size_t)buf.len);
+		for (int flips = 0; flips < 4; flips++) copy[rng_below(&rng, (uint32_t)buf.len)] ^= (uint8_t)(1 + rng_below(&rng, 255));
+		ptrdiff_t len = k % 3 == 0 ? (ptrdiff_t)rng_below(&rng, (uint32_t)buf.len) : buf.len;
+		r = byte_reader(copy, len);
+		ApplyResult res = wire_apply(&late, &r, true, &info);
+		bad += res == APPLY_BAD || (res == APPLY_OK && !info.digest_matched);
+	}
+	CHECK(bad > 250); // nearly every corruption is caught, by validation or the digest
+
+	sim_destroy(&sim);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+}
+
 int main(void)
 {
 	test_arena();
@@ -348,6 +435,7 @@ int main(void)
 	test_replay();
 	test_shell_hits();
 	test_script();
+	test_wire();
 	printf("%d checks, %d failed\n", checks, failures);
 	return failures ? 1 : 0;
 }

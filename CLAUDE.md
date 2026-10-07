@@ -11,6 +11,8 @@ persistent map. Read these before changing anything:
 
 - `make check` is CI (the pre-push hook runs it). Keep it under ~30 s.
 - Touched sim math? Also run `make determinism-x86`.
+- Keep iteration fast: `make check` prints a time per stage (history in
+  `build/timings.log`). Don't let a stage get slower without a reason.
 - **Look at what you changed.** The game renders clips offline from the
   deterministic sim, so you can see behaviour without anyone playing:
 
