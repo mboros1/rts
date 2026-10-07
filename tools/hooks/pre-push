@@ -1,0 +1,22 @@
+#!/bin/sh
+# Local CI: a push only goes out if `make check` passes.
+# Installed with: git config core.hooksPath tools/hooks
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+if [ ! -f Makefile ]; then
+	echo "pre-push: no Makefile yet, nothing to check" >&2
+	exit 0
+fi
+
+commit=$(git rev-parse --short HEAD)
+if make check; then
+	result=pass
+else
+	result=fail
+fi
+printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$commit" "$result" >> ci.log
+
+[ "$result" = pass ] || { echo "pre-push: make check failed; push blocked" >&2; exit 1; }

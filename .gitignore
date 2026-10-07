@@ -1,0 +1,8 @@
+# Third-party source cloned for reading, not part of this repo
+/reference/
+
+# Build output and the local CI log
+/build/
+/ci.log
+
+.DS_Store
