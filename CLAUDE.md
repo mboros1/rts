@@ -30,4 +30,5 @@ persistent map. Read these before changing anything:
 Every feature commit includes a demo: `demos/NN-name.script` (see
 `src/script.h` for the format), rendered with `make demos`, its contact sheet
 read to confirm it shows the feature, and its `expect` lines passing in
-`make check`. Details in `docs/conventions.md`, "Demos".
+`make check`. Details in `docs/conventions.md`, "Demos". Demo videos are in Git LFS and
+are never pushed: don't run `git lfs install` in this repo.

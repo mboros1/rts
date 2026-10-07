@@ -7,7 +7,9 @@
 #   make determinism-x86   arm64 record, x86-64 (Rosetta) verify, and back
 #   make cross      x86-64 Linux (run in Docker) and Windows builds
 #   make clips      every scenario as build/clips/NAME.mp4 + .png sheet + .txt
+#   make setup      once per clone: hooks, and LFS told not to fetch demo videos
 #   make demos      render demos/*.script whose clip is missing or stale
+#   make demos-restore   re-render demo videos that are only LFS pointers
 #   make share DEMO=NAME   full-quality copy of a demo, on the clipboard
 
 CC      := clang
@@ -27,12 +29,19 @@ RAYLIB_LIBS   := $(shell pkg-config --libs raylib)
 SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h,$(SRC))
 
-.PHONY: all check bench determinism-x86 cross clips demos share clean
+.PHONY: all setup check bench determinism-x86 cross clips demos demos-restore share clean
 
 all: $(B)/rts $(B)/rts-headless
 
 $(B):
 	@mkdir -p $(B)
+
+# Clone with GIT_LFS_SKIP_SMUDGE=1 (demo videos are never on the server),
+# then run this once.
+setup:
+	git config core.hooksPath tools/hooks
+	git config lfs.fetchexclude 'demos/*.mp4'
+	@echo "hooks and LFS configured; 'make demos-restore' rebuilds demo videos"
 
 $(B)/rts: src/main_game.c $(SRC) | $(B)
 	$(CC) $(BASE) $(RELEASE) $(RAYLIB_CFLAGS) $< -o $@ $(RAYLIB_LIBS)
@@ -108,10 +117,22 @@ clips: $(B)/rts
 DEMO_SCRIPTS := $(wildcard demos/*.script)
 demos: $(DEMO_SCRIPTS:.script=.mp4)
 
+DEMO_RENDER = $(B)/rts clip --script demos/$(1).script --out demos/$(1).mp4 \
+	--sheet $(B)/demo-$(1).png --size 960x540 --crf 30 --label "$(1)" && \
+	ffmpeg -loglevel error -y -i $(B)/demo-$(1).png -q:v 6 demos/$(1).jpg
+
 demos/%.mp4: demos/%.script | $(B)/rts
-	$(B)/rts clip --script $< --out $@ --sheet $(B)/demo-$*.png --size 960x540 --crf 30 \
-		--label "$*"
-	ffmpeg -loglevel error -y -i $(B)/demo-$*.png -q:v 6 demos/$*.jpg
+	$(call DEMO_RENDER,$*)
+
+# Videos are reproducible from their scripts, so a clone that only has LFS
+# pointers rebuilds them instead of downloading them.
+demos-restore: $(B)/rts
+	@for v in demos/*.mp4; do \
+		if head -c 40 "$$v" | grep -q '^version https://git-lfs'; then \
+			d=$$(basename "$$v" .mp4); echo "restoring $$d"; \
+			$(call DEMO_RENDER,$$d) || exit 1; \
+		fi; \
+	done
 
 # For posting: 720p at the default quality, labelled with the commit.
 share: $(B)/rts

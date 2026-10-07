@@ -1,1 +1,4 @@
+# Demo videos live in Git LFS locally and are never uploaded: this repo has
+# no LFS pre-push hook (see docs/conventions.md, "Demos"). Contact sheets
+# stay in plain git so the web view can show them.
 demos/*.mp4 filter=lfs diff=lfs merge=lfs -text

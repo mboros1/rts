@@ -57,9 +57,17 @@ renders its small `.mp4` and `.jpg` contact sheet, and all three go in the
 same commit.
 
 - **The script is the source of truth.** The sim is deterministic, so any
-  commit can re-render its demos exactly. The committed video exists so the
-  history can be browsed without building anything. Keep it small: 960x540,
+  commit can re-render its demos exactly. Keep videos small anyway: 960x540,
   CRF 30, and trim the window rather than lower the quality further.
+- **Videos are in Git LFS and never leave this machine.** `.gitattributes`
+  routes `demos/*.mp4` through LFS, and the repo deliberately has no LFS
+  pre-push hook (never run `git lfs install` here; it would add one to
+  `tools/hooks`). A push sends ~130-byte pointers, not videos, so a hosted
+  remote costs nothing. Contact sheets (`.jpg`) stay in plain git so the
+  web view shows them.
+- **A fresh clone** has pointers only: clone with
+  `GIT_LFS_SKIP_SMUDGE=1 git clone ...`, run `make setup`, then
+  `make demos-restore` re-renders the videos from their scripts.
 - **Its expectations are tests.** `make check` runs every demo script.
   Set thresholds from what you observed in the sheet, not from guesses.
 - **Look before committing.** Read the contact sheet and check that it
