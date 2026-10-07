@@ -81,6 +81,18 @@ static Model build_terrain(const Terrain *t)
 	return LoadModelFromMesh(m);
 }
 
+Camera3D render_camera(const Terrain *t, V2 focus, float distance)
+{
+	Vector3 target = {focus.x, terrain_height(t, focus.x, focus.z), focus.z};
+	return (Camera3D){
+		.target = target,
+		.position = {target.x, target.y + distance * 0.85f, target.z + distance * 0.55f},
+		.up = {0, 1, 0},
+		.fovy = 45.0f,
+		.projection = CAMERA_PERSPECTIVE,
+	};
+}
+
 void renderer_init(Renderer *r, const Sim *sim, Arena *program)
 {
 	*r = (Renderer){0};

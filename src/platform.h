@@ -23,3 +23,23 @@ typedef struct Arena Arena;
 bool platform_read_file(Arena *arena, const char *path, Str *out);
 
 bool platform_write_file(const char *path, const void *data, ptrdiff_t len);
+
+// Put a file on the system clipboard, so pasting into a chat or a folder
+// attaches the file. path must be absolute. False if the OS tool failed or
+// this platform has no implementation yet.
+bool platform_clipboard_copy_file(const char *path);
+
+// Start a program and don't wait for it. argv ends with nullptr.
+bool platform_spawn(const char *const argv[]);
+
+// Run a program and wait for it. Returns its exit status, or -1.
+int platform_run(const char *const argv[]);
+
+// Collect background children that have exited. Call once a frame.
+void platform_reap_children(void);
+
+bool platform_make_dir(const char *path);   // true if it exists afterwards
+bool platform_file_exists(const char *path);
+
+// Absolute form of a path to an existing file, into buf. False on failure.
+bool platform_absolute_path(const char *path, char *buf, ptrdiff_t size);

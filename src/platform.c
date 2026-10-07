@@ -6,9 +6,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#include <spawn.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+extern char **environ;
 #endif
 
 #include "arena.h"
@@ -125,3 +129,89 @@ bool platform_write_file(const char *path, const void *data, ptrdiff_t len)
 	ok = (fclose(f) == 0) && ok;
 	return ok;
 }
+
+bool platform_file_exists(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if (f) fclose(f);
+	return f != nullptr;
+}
+
+#ifdef _WIN32
+
+bool platform_absolute_path(const char *path, char *buf, ptrdiff_t size)
+{
+	DWORD n = GetFullPathNameA(path, (DWORD)size, buf, nullptr);
+	return n > 0 && n < (DWORD)size;
+}
+
+bool platform_make_dir(const char *path) { return CreateDirectoryA(path, nullptr) || GetLastError() == ERROR_ALREADY_EXISTS; }
+bool platform_clipboard_copy_file(const char *path) { (void)path; return false; }
+bool platform_spawn(const char *const argv[]) { (void)argv; return false; }
+int platform_run(const char *const argv[]) { (void)argv; return -1; }
+void platform_reap_children(void) {}
+
+#else
+
+static bool spawn_child(const char *const argv[], pid_t *pid)
+{
+	// posix_spawnp's argv isn't const-qualified, but it doesn't write to it.
+	return posix_spawnp(pid, argv[0], nullptr, nullptr, (char *const *)argv, environ) == 0;
+}
+
+bool platform_spawn(const char *const argv[])
+{
+	pid_t pid;
+	return spawn_child(argv, &pid);
+}
+
+int platform_run(const char *const argv[])
+{
+	pid_t pid;
+	if (!spawn_child(argv, &pid)) return -1;
+	int status;
+	if (waitpid(pid, &status, 0) != pid) return -1;
+	return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+bool platform_absolute_path(const char *path, char *buf, ptrdiff_t size)
+{
+	if (size < 4096) return false; // realpath writes up to PATH_MAX
+	return realpath(path, buf) != nullptr;
+}
+
+bool platform_make_dir(const char *path)
+{
+	struct stat st;
+	return mkdir(path, 0755) == 0 || (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+}
+
+void platform_reap_children(void)
+{
+	while (waitpid(-1, nullptr, WNOHANG) > 0) {}
+}
+
+#ifdef __APPLE__
+
+bool platform_clipboard_copy_file(const char *path)
+{
+	char script[4096];
+	int n = snprintf(script, sizeof script, "set the clipboard to (POSIX file \"%s\")", path);
+	if (n < 0 || n >= (int)sizeof script || strchr(path, '"')) return false;
+	const char *argv[] = {"osascript", "-e", script, nullptr};
+	return platform_run(argv) == 0;
+}
+
+#else
+
+// X11 via xclip, as a file URI list: what file managers and chat apps paste.
+bool platform_clipboard_copy_file(const char *path)
+{
+	FILE *p = popen("xclip -selection clipboard -t text/uri-list", "w");
+	if (!p) return false;
+	fprintf(p, "file://%s\n", path);
+	return pclose(p) == 0;
+}
+
+#endif
+#endif

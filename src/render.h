@@ -5,6 +5,13 @@
 // the frame arena each frame.
 #pragma once
 
+// raylib.h defines its allocator macros in terms of malloc, which base.h
+// poisons. Defining them first keeps raylib's out; our code never uses them.
+#define RL_MALLOC(sz) RL_MALLOC_is_banned_use_an_arena
+#define RL_CALLOC(n, sz) RL_CALLOC_is_banned_use_an_arena
+#define RL_REALLOC(p, sz) RL_REALLOC_is_banned_use_an_arena
+#define RL_FREE(p) RL_FREE_is_banned_use_an_arena
+
 #include <raylib.h>
 
 #include "arena.h"
@@ -21,6 +28,10 @@ typedef struct {
 	float *heading[FACTION_COUNT];
 	ptrdiff_t heading_cap;
 } Renderer;
+
+// The RTS camera: looking down at focus from a fixed pitch, distance away.
+// Shared by the game, the clip director and recorded camera tracks.
+Camera3D render_camera(const Terrain *t, V2 focus, float distance);
 
 void renderer_init(Renderer *r, const Sim *sim, Arena *program);
 void renderer_unload(Renderer *r);

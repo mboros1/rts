@@ -49,7 +49,7 @@ typedef struct {
 	float splash;       // splash radius, 0 for none
 	float spread;       // aim jitter at the target point, units
 	bool high_arc;      // lob shells (artillery) instead of firing flat
-	int32_t weight;     // relative chance the spawner picks this type
+	int32_t weight;     // default spawn weight; scenarios override it
 } UnitDef;
 
 extern const UnitDef unit_defs[UNIT_TYPE_COUNT];
@@ -68,6 +68,7 @@ typedef struct {
 	int32_t spawn_interval;   // ticks between spawns per faction
 	int32_t max_units;        // unit pool capacity per faction
 	int32_t max_projectiles;  // incoming projectile capacity per faction
+	int32_t type_weight[UNIT_TYPE_COUNT]; // relative spawn chance per type
 } SimConfig;
 
 SimConfig sim_config_default(void);

@@ -40,6 +40,11 @@ SimConfig sim_config_default(void)
 		.spawn_interval = 1,
 		.max_units = 8192,
 		.max_projectiles = 65536,
+		.type_weight = {
+			unit_defs[UNIT_RAIDER].weight,
+			unit_defs[UNIT_TANK].weight,
+			unit_defs[UNIT_ARTILLERY].weight,
+		},
 	};
 }
 
@@ -315,22 +320,22 @@ static void apply_command(Faction *f, const Terrain *t, const Command *c)
 	}
 }
 
-static UnitType pick_type(Rng *rng)
+static UnitType pick_type(Rng *rng, const int32_t weight[UNIT_TYPE_COUNT])
 {
 	int32_t total = 0;
-	for (int k = 0; k < UNIT_TYPE_COUNT; k++) total += unit_defs[k].weight;
+	for (int k = 0; k < UNIT_TYPE_COUNT; k++) total += weight[k];
 	int32_t roll = (int32_t)rng_below(rng, (uint32_t)total);
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
-		roll -= unit_defs[k].weight;
+		roll -= weight[k];
 		if (roll < 0) return (UnitType)k;
 	}
 	return UNIT_RAIDER;
 }
 
-static void spawn_near_base(Faction *f, const Terrain *t, float radius)
+static void spawn_near_base(Faction *f, const SimConfig *c, const Terrain *t, float radius)
 {
 	Units *u = &f->units;
-	UnitType type = pick_type(&f->rng);
+	UnitType type = pick_type(&f->rng, c->type_weight);
 	V2 p = v2(f->base.x + rng_range(&f->rng, -radius, radius),
 	          f->base.z + rng_range(&f->rng, -radius, radius));
 	p = clamp_to_map(t, p, 2.0f);
@@ -344,7 +349,7 @@ static void spawn(Faction *f, const Sim *sim)
 	if (sim->tick.v % c->spawn_interval != 0) return;
 	// The population limit is a game rule, checked before the pool is asked.
 	if (f->units.count >= c->population || f->units.count >= f->units.cap) return;
-	spawn_near_base(f, &sim->terrain, 20.0f);
+	spawn_near_base(f, c, &sim->terrain, 20.0f);
 }
 
 static void move_units(Faction *f, const Terrain *t)
@@ -600,6 +605,12 @@ void sim_init(Sim *sim, SimConfig config)
 	ASSERT(config.max_units > 0 && config.max_projectiles > 0);
 	ASSERT(config.population <= config.max_units && config.initial_units <= config.population);
 	ASSERT(config.spawn_interval > 0);
+	int32_t weights = 0;
+	for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
+		ASSERT(config.type_weight[k] >= 0 && config.type_weight[k] <= 1000);
+		weights += config.type_weight[k];
+	}
+	ASSERT(weights > 0);
 	*sim = (Sim){.config = config};
 	sim->zone = arena_create("zone", (ptrdiff_t)256 << 20);
 	sim->interaction = arena_create("interaction", (ptrdiff_t)64 << 20);
@@ -629,7 +640,7 @@ void sim_init(Sim *sim, SimConfig config)
 		f->scratch = arena_create(scratch_names[k], (ptrdiff_t)64 << 20);
 
 		float spread = 1.6f * f_sqrt((float)config.initial_units);
-		for (int32_t n = 0; n < config.initial_units; n++) spawn_near_base(f, t, spread);
+		for (int32_t n = 0; n < config.initial_units; n++) spawn_near_base(f, &config, t, spread);
 	}
 }
 

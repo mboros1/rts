@@ -6,6 +6,7 @@
 #   make bench      time the sim at 5000 units per side
 #   make determinism-x86   arm64 record, x86-64 (Rosetta) verify, and back
 #   make cross      x86-64 Linux (run in Docker) and Windows builds
+#   make clips      every scenario as build/clips/NAME.mp4 + .png sheet + .txt
 
 CC      := clang
 GCC     := gcc-15
@@ -24,7 +25,7 @@ RAYLIB_LIBS   := $(shell pkg-config --libs raylib)
 SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h,$(SRC))
 
-.PHONY: all check bench determinism-x86 cross clean
+.PHONY: all check bench determinism-x86 cross clips clean
 
 all: $(B)/rts $(B)/rts-headless
 
@@ -60,6 +61,10 @@ check:
 	$(GCC) $(BASE) -Werror -O1 -fanalyzer src/main_tests.c -o $(CHECK)/tests-gcc
 	$(GCC) $(BASE) -Werror -O1 -fanalyzer src/main_headless.c -o $(CHECK)/headless-gcc
 	$(GCC) $(BASE) -Werror -O1 $(RAYLIB_CFLAGS) -c src/main_game.c -o $(CHECK)/game-gcc.o
+	@echo "== clip smoke test: contact sheet, and a replay clip that must reproduce"
+	$(CHECK)/rts clip --scenario skirmish --to 600 --sheet $(CHECK)/skirmish.png --frames 4 \
+		--save-replay $(CHECK)/skirmish.replay
+	$(CHECK)/rts clip --replay $(CHECK)/skirmish.replay --last 3 --sheet $(CHECK)/replayed.png --frames 4
 	@echo "== check passed"
 
 # Same replay on both architectures, both directions. x86-64 runs under Rosetta.
@@ -83,6 +88,14 @@ cross: $(B)/rts-headless
 		sh -c './headless-linux record linux.replay 900 2000 && ./headless-linux verify linux.replay'
 	$(B)/rts-headless verify $(CROSS)/linux.replay
 	@echo "== linux x86-64 replay verifies natively"
+
+CLIPS := $(B)/clips
+clips: $(B)/rts
+	@mkdir -p $(CLIPS)
+	@for s in $$($(B)/rts clip --list | cut -d' ' -f1); do \
+		$(B)/rts clip --scenario $$s --out $(CLIPS)/$$s.mp4 --sheet $(CLIPS)/$$s.png \
+			--save-replay $(CLIPS)/$$s.replay || exit 1; \
+	done
 
 clean:
 	rm -rf $(B)

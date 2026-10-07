@@ -4,16 +4,15 @@
 //   left-drag / click            select       shift        add to selection
 //   right-click                  attack-move  ctrl+right   move
 //   X  stop    B  toggle your side's bot    space  pause    F1  overlay
+//   C  clip the last 10 seconds, as you saw them, to the clipboard
+//
+//   rts [--scenario NAME]    play (default: battle)
+//   rts clip ...             render clips offline; see clip.h, `rts clip`
 //
 // Every admitted command, yours and the bots', is recorded; on exit the run
 // is written to build/last.replay for `rts-headless verify`.
 //
-// RTS_AUTOSHOT=path.png runs RTS_AUTOSHOT_TICKS sim ticks (default 600),
-// saves a screenshot and exits: a way to look at the game without a person.
-//
 // Unity build: this file is the whole program.
-#include <raylib.h>
-
 #include "base.h"
 
 #include <math.h>
@@ -24,10 +23,14 @@
 #include "sim.c"
 #include "bot.c"
 #include "replay.c"
+#include "scenario.c"
 #include "render.c"
+#include "clip.c"
 
 static constexpr ptrdiff_t MAX_COMMANDS_PER_TICK = 256;
 static constexpr int TIMING_WINDOW = 64; // a power of two
+static constexpr int CAMERA_RING = 2048;  // a power of two; ~68 s of ticks
+static constexpr double CLIP_SECONDS = 10.0;
 
 typedef struct {
 	Camera3D camera;
@@ -61,7 +64,19 @@ typedef struct {
 	// Derived data for the overlay: recent sim step times, a ring.
 	double step_ms[TIMING_WINDOW];
 	int64_t steps;
+
+	// Derived data for clips: where the camera was each tick, a ring.
+	CameraKey camera_ring[CAMERA_RING];
+	int64_t camera_keys;
+
+	// A clip rendering in the background, finished when `clip_done` exists.
+	char clip_done[512];
+	char clip_video[512];
+	char toast[512];
+	double toast_until;
 } Game;
+
+static void start_clip(Game *g);
 
 // ---------------------------------------------------------------- camera
 
@@ -83,9 +98,7 @@ static void view_update(View *v, const Terrain *t)
 	if (wheel != 0.0f) v->distance = f_clamp(v->distance * powf(0.88f, wheel), 25.0f, 700.0f);
 	v->focus = v2(f_clamp(v->focus.x, 0.0f, t->size_x), f_clamp(v->focus.z, 0.0f, t->size_z));
 
-	Vector3 target = {v->focus.x, terrain_height(t, v->focus.x, v->focus.z), v->focus.z};
-	v->camera.target = target;
-	v->camera.position = (Vector3){target.x, target.y + v->distance * 0.85f, target.z + v->distance * 0.55f};
+	v->camera = render_camera(t, v->focus, v->distance);
 }
 
 // March the mouse ray down to the sim's terrain, then bisect.
@@ -164,6 +177,7 @@ static void handle_input(Game *g)
 	if (IsKeyPressed(KEY_SPACE)) g->paused = !g->paused;
 	if (IsKeyPressed(KEY_F1)) g->overlay = !g->overlay;
 	if (IsKeyPressed(KEY_B)) g->bots[0].enabled = !g->bots[0].enabled;
+	if (IsKeyPressed(KEY_C)) start_clip(g);
 	if (IsKeyPressed(KEY_X)) {
 		const Units *u = &g->sim.factions[0].units;
 		ptrdiff_t d = g->selection_count ? units_find(u, g->selection[0]) : -1;
@@ -204,8 +218,92 @@ static void step(Game *g)
 	sim_step(&g->sim, g->queued, n);
 	g->step_ms[g->steps++ & (TIMING_WINDOW - 1)] = 1e3 * (platform_seconds() - t0);
 	replay_tick(&g->writer, tick, g->queued, n, sim_hash_now(&g->sim));
+	g->camera_ring[g->camera_keys++ & (CAMERA_RING - 1)] =
+		(CameraKey){g->sim.tick.v, g->view.focus.x, g->view.focus.z, g->view.distance};
 	g->queued_count = 0;
 	arena_reset(&g->commands);
+}
+
+// ---------------------------------------------------------------- clips
+
+static void show_toast(Game *g, const char *text, double seconds)
+{
+	snprintf(g->toast, sizeof g->toast, "%s", text);
+	g->toast_until = GetTime() + seconds;
+}
+
+// Hand the run so far and the camera's recent path to `rts clip` in the
+// background; it re-renders the last seconds exactly and fills the clipboard.
+static void start_clip(Game *g)
+{
+	if (g->clip_done[0]) {
+		show_toast(g, "still rendering the last clip", 2.0);
+		return;
+	}
+	int64_t now = g->sim.tick.v;
+	if (now < 2) return;
+	const char *dir = TextFormat("%sclips", GetApplicationDirectory());
+	if (!platform_make_dir(dir)) {
+		show_toast(g, "cannot create the clips directory", 3.0);
+		return;
+	}
+	// A truncated path would point the clip somewhere else: refuse instead.
+	char base[400], replay[512], camera[512], sheet[512];
+	int n = snprintf(base, sizeof base, "%s/clip-%06lld", dir, (long long)now);
+	bool fits = n > 0 && n < (int)sizeof base;
+	fits = fits && snprintf(replay, sizeof replay, "%s.replay", base) < (int)sizeof replay;
+	fits = fits && snprintf(camera, sizeof camera, "%s.camera", base) < (int)sizeof camera;
+	fits = fits && snprintf(sheet, sizeof sheet, "%s.png", base) < (int)sizeof sheet;
+	fits = fits && snprintf(g->clip_video, sizeof g->clip_video, "%s.mp4", base) < (int)sizeof g->clip_video;
+	fits = fits && snprintf(g->clip_done, sizeof g->clip_done, "%s.done", base) < (int)sizeof g->clip_done;
+	if (!fits) {
+		show_toast(g, "clip path too long", 3.0);
+		g->clip_done[0] = 0;
+		return;
+	}
+
+	Str bytes = replay_bytes(&g->writer);
+	int64_t keys = g->camera_keys < CAMERA_RING ? g->camera_keys : CAMERA_RING;
+	CameraKey *ordered = PUSH(&g->frame, CameraKey, keys);
+	for (int64_t k = 0; k < keys; k++)
+		ordered[k] = g->camera_ring[(g->camera_keys - keys + k) & (CAMERA_RING - 1)];
+	if (!platform_write_file(replay, bytes.ptr, bytes.len) || !camera_track_write(camera, ordered, keys)) {
+		show_toast(g, "cannot write the clip's inputs", 3.0);
+		g->clip_done[0] = 0;
+		return;
+	}
+	char last[32], to[32];
+	snprintf(last, sizeof last, "%.1f", CLIP_SECONDS);
+	snprintf(to, sizeof to, "%lld", (long long)now);
+	const char *self = TextFormat("%srts", GetApplicationDirectory());
+	const char *argv[] = {self, "clip", "--replay", replay, "--camera", camera, "--to", to,
+	                      "--last", last, "--out", g->clip_video, "--sheet", sheet,
+	                      "--clipboard", "--done", g->clip_done, nullptr};
+	if (!platform_spawn(argv)) {
+		show_toast(g, "cannot start the clip renderer", 3.0);
+		g->clip_done[0] = 0;
+		return;
+	}
+	show_toast(g, "clipping the last 10 seconds...", 60.0);
+}
+
+static void poll_clip(Game *g)
+{
+	platform_reap_children();
+	if (!g->clip_done[0] || !platform_file_exists(g->clip_done)) return;
+	bool ok = platform_file_exists(g->clip_video);
+	show_toast(g, ok ? TextFormat("clip on the clipboard: %s", GetFileName(g->clip_video))
+	                 : "clip failed; run `rts clip` by hand to see why", 5.0);
+	g->clip_done[0] = 0;
+}
+
+static void draw_toast(const Game *g)
+{
+	if (GetTime() > g->toast_until) return;
+	int w = MeasureText(g->toast, 20);
+	int x = (GetScreenWidth() - w) / 2, y = GetScreenHeight() - 60;
+	DrawRectangle(x - 12, y - 8, w + 24, 36, (Color){0, 0, 0, 180});
+	DrawText(g->toast, x, y, 20, RAYWHITE);
 }
 
 // ---------------------------------------------------------------- overlay
@@ -249,18 +347,25 @@ static void draw_overlay(const Game *g)
 		         12, y, 16, LIGHTGRAY);
 		y += line;
 	}
-	DrawText("drag select | right: attack-move | ctrl+right: move | X stop | B bot | space pause",
+	DrawText("drag select | right: attack-move | ctrl+right: move | X stop | B bot | C clip | space pause",
 	         12, y, 14, GRAY);
 }
 
 // ---------------------------------------------------------------- main
 
-int main(void)
+int main(int argc, char **argv)
 {
+	if (argc > 1 && !strcmp(argv[1], "clip")) return clip_main(argc, argv);
+	const Scenario *scenario = scenario_find("battle");
+	if (argc > 2 && !strcmp(argv[1], "--scenario") && !(scenario = scenario_find(argv[2]))) {
+		fprintf(stderr, "unknown scenario %s; `rts clip --list` lists them\n", argv[2]);
+		return 2;
+	}
+
 	static Game g;
-	SimConfig config = sim_config_default();
+	SimConfig config = scenario_config(scenario);
 	sim_init(&g.sim, config);
-	for (int k = 0; k < FACTION_COUNT; k++) g.bots[k] = bot_create((FactionId){(uint32_t)k}, config.seed);
+	scenario_bots(scenario, g.bots);
 
 	g.program = arena_create("program", (ptrdiff_t)64 << 20);
 	g.frame = arena_create("frame", (ptrdiff_t)256 << 20);
@@ -271,30 +376,21 @@ int main(void)
 	g.overlay = true;
 
 	SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
-	InitWindow(1600, 900, "rts spike 1");
+	InitWindow(1600, 900, TextFormat("rts: %s", scenario->name));
 	SetTargetFPS(120);
 	renderer_init(&g.renderer, &g.sim, &g.program);
 	g.view = (View){
-		.camera = {.up = {0, 1, 0}, .fovy = 45.0f, .projection = CAMERA_PERSPECTIVE},
 		.focus = v2(g.sim.terrain.size_x * 0.5f, g.sim.terrain.size_z * 0.5f),
 		.distance = 420.0f,
 	};
-
-	const char *autoshot = getenv("RTS_AUTOSHOT");
-	const char *autoshot_ticks = getenv("RTS_AUTOSHOT_TICKS");
-	int64_t shot_at = autoshot_ticks ? atoll(autoshot_ticks) : 600;
-	int settled_frames = 0;
-	if (autoshot) g.view.distance = 260.0f;
 
 	double accumulator = 0.0;
 	while (!WindowShouldClose()) {
 		arena_reset(&g.frame);
 		view_update(&g.view, &g.sim.terrain);
 		handle_input(&g);
+		poll_clip(&g);
 
-		// Autoshot runs the sim flat out to the target tick before drawing.
-		if (autoshot && GetTime() > 1.0)
-			while (g.sim.tick.v < shot_at) step(&g);
 		if (!g.paused) {
 			accumulator += fmin(GetFrameTime(), 0.25);
 			while (accumulator >= SIM_DT) {
@@ -318,17 +414,8 @@ int main(void)
 			DrawRectangleLinesEx(box, 1.0f, SELECTED_COLOR);
 		}
 		if (g.overlay) draw_overlay(&g);
+		draw_toast(&g);
 		EndDrawing();
-
-		// raylib reads the framebuffer after the swap, which can hold an older
-		// frame: pause on the target tick and draw a few frames before reading.
-		if (autoshot && g.sim.tick.v >= shot_at) {
-			g.paused = true;
-			if (++settled_frames == 4) {
-				TakeScreenshot(autoshot);
-				break;
-			}
-		}
 	}
 
 	// Next to the executable, so it lands in build/ wherever the game is run from.

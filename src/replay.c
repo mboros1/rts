@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 1;
+static constexpr uint32_t REPLAY_VERSION = 2;
 
 // ---------------------------------------------------------------- writing
 
@@ -45,6 +45,7 @@ void replay_begin(ReplayWriter *w, Arena *buf, SimConfig c)
 	put_u32(w, (uint32_t)c.spawn_interval);
 	put_u32(w, (uint32_t)c.max_units);
 	put_u32(w, (uint32_t)c.max_projectiles);
+	for (int k = 0; k < UNIT_TYPE_COUNT; k++) put_u32(w, (uint32_t)c.type_weight[k]);
 }
 
 void replay_tick(ReplayWriter *w, Tick tick, const Command *cmds, ptrdiff_t count, Hash after)
@@ -133,7 +134,15 @@ ReplayStatus replay_open(ReplayReader *r, Str data)
 	bool ok = get_u64(r, &c->seed) && get_i32(r, &c->initial_units) && get_i32(r, &c->population)
 	       && get_i32(r, &c->spawn_interval) && get_i32(r, &c->max_units)
 	       && get_i32(r, &c->max_projectiles);
+	int32_t weights = 0;
+	bool weights_ok = true;
+	for (int k = 0; k < UNIT_TYPE_COUNT && ok; k++) {
+		ok = get_i32(r, &c->type_weight[k]);
+		weights_ok = weights_ok && c->type_weight[k] >= 0 && c->type_weight[k] <= 1000;
+		weights += ok && weights_ok ? c->type_weight[k] : 0;
+	}
 	if (!ok) return REPLAY_TRUNCATED;
+	if (!weights_ok || weights <= 0) return REPLAY_BAD_CONFIG;
 	// sim_init asserts on these; a file must not be able to trip an assert.
 	if (c->max_units <= 0 || c->max_projectiles <= 0 || c->spawn_interval <= 0
 	    || c->population > c->max_units || c->initial_units > c->population
