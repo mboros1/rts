@@ -24,6 +24,7 @@
 #include "bot.c"
 #include "replay.c"
 #include "scenario.c"
+#include "script.c"
 #include "render.c"
 #include "clip.c"
 
@@ -162,13 +163,14 @@ static void prune_selection(Game *g, uint8_t *mark)
 	g->selection_count = kept;
 }
 
-static void queue_command(Game *g, OrderKind kind, V2 target)
+static void queue_command(Game *g, CommandKind kind, V2 target)
 {
 	if (g->selection_count == 0 || g->queued_count == MAX_COMMANDS_PER_TICK) return;
 	const UnitHandle *units = arena_copy(&g->commands, g->selection,
 	                                     g->selection_count * (ptrdiff_t)sizeof(UnitHandle),
 	                                     alignof(UnitHandle));
-	g->queued[g->queued_count++] = (Command){{0}, kind, target, g->selection_count, units};
+	g->queued[g->queued_count++] = (Command){.faction = {0}, .kind = kind, .target = target,
+	                                       .count = g->selection_count, .units = units};
 }
 
 static void handle_input(Game *g)
@@ -181,7 +183,7 @@ static void handle_input(Game *g)
 	if (IsKeyPressed(KEY_X)) {
 		const Units *u = &g->sim.factions[0].units;
 		ptrdiff_t d = g->selection_count ? units_find(u, g->selection[0]) : -1;
-		if (d >= 0) queue_command(g, ORDER_IDLE, v2(u->px[d], u->pz[d]));
+		if (d >= 0) queue_command(g, COMMAND_STOP, v2(u->px[d], u->pz[d]));
 	}
 
 	Vector2 mouse = GetMousePosition();
@@ -201,7 +203,7 @@ static void handle_input(Game *g)
 		V2 at;
 		if (pick_ground(&g->view, t, mouse, &at)) {
 			bool move = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-			queue_command(g, move ? ORDER_MOVE : ORDER_ATTACK_MOVE, at);
+			queue_command(g, move ? COMMAND_MOVE : COMMAND_ATTACK_MOVE, at);
 		}
 	}
 }

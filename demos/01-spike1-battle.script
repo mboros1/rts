@@ -1,0 +1,9 @@
+title Spike 1: a 10,000-unit battle
+about Deterministic C sim, ballistic shells with lead, bots on both sides. 1.5 ms a tick.
+
+scenario battle
+clip 600..1050               # the armies meet: 15 s keeps the file small
+camera director
+
+at 1050 expect blue lost > 1000
+at 1050 expect red lost > 1000

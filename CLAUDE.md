@@ -24,3 +24,10 @@ persistent map. Read these before changing anything:
   frame. Use `--from/--to` to pick the moment, `--out x.mp4` for video,
   `--replay` to render a recorded run (it refuses if the replay doesn't
   reproduce hash for hash).
+
+## Shipping a feature
+
+Every feature commit includes a demo: `demos/NN-name.script` (see
+`src/script.h` for the format), rendered with `make demos`, its contact sheet
+read to confirm it shows the feature, and its `expect` lines passing in
+`make check`. Details in `docs/conventions.md`, "Demos".

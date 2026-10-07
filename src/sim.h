@@ -166,14 +166,31 @@ typedef struct {
 	Arena scratch;             // tick lifetime, owned by this faction's phase
 } Faction;
 
-// An order for some of one faction's units. Handles that are stale or not
-// that faction's are ignored.
+// What a command does. The first three order units; spawn creates them and
+// is for scripts and setup only (admission will refuse it from players).
+typedef enum : uint8_t {
+	COMMAND_STOP,
+	COMMAND_MOVE,
+	COMMAND_ATTACK_MOVE,
+	COMMAND_SPAWN,
+	COMMAND_KIND_COUNT,
+} CommandKind;
+
+static constexpr int32_t SPAWN_MAX = 4096;      // units per spawn command
+static constexpr float SPAWN_MAX_RADIUS = 200.0f;
+
+// An input to the sim for one faction. Handles that are stale or not that
+// faction's are ignored. Spawn uses unit_type, amount and radius around
+// target, and no handles.
 typedef struct {
 	FactionId faction;
-	OrderKind kind;
+	CommandKind kind;
 	V2 target;
 	ptrdiff_t count;
 	const UnitHandle *units;
+	UnitType unit_type;
+	int32_t amount;
+	float radius;
 } Command;
 
 typedef struct {

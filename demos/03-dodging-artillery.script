@@ -1,0 +1,40 @@
+title Dodging artillery
+about Two tank columns under artillery fire: one holds still, one keeps changing direction.
+
+scenario skirmish
+units 0
+respawn off
+bot blue off
+bot red off
+clip 0..900
+camera 265,200 135
+
+# Two batteries, each nearest one column, out of the tanks' reach.
+at 0    spawn red artillery 15 at 220,150 radius 6
+at 0    spawn red artillery 15 at 310,150 radius 6
+at 0    spawn blue tank 20 at 220,215 radius 6
+at 0    spawn blue tank 20 at 310,215 radius 6
+
+at 1    select blue tank within 20 of 220,215 as still
+at 1    select blue tank within 20 of 310,215 as dodging
+
+# Reverse every two seconds: shells lead the target's velocity at launch and
+# fly for about three seconds, so a column that keeps turning isn't there.
+at 2    move dodging 335,215
+at 60   move dodging 290,215
+at 120  move dodging 335,215
+at 180  move dodging 290,215
+at 240  move dodging 335,215
+at 300  move dodging 290,215
+at 360  move dodging 335,215
+at 420  move dodging 290,215
+at 480  move dodging 335,215
+at 540  move dodging 290,215
+at 600  move dodging 335,215
+at 660  move dodging 290,215
+at 720  move dodging 335,215
+at 780  move dodging 290,215
+at 840  move dodging 335,215
+
+at 880  expect still alive <= 10     # observed 7 of 20
+at 880  expect dodging alive >= 13   # observed 15 of 20: about double

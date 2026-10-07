@@ -16,6 +16,7 @@
 #include "arena.h"
 #include "render.h"
 #include "scenario.h"
+#include "script.h"
 #include "sim.h"
 
 // The camera at one tick. Recorded by the game, one line per tick:
@@ -45,7 +46,9 @@ void director_update(Director *d, const Sim *sim);
 
 typedef struct {
 	const char *replay;         // run this replay ...
-	const Scenario *scenario;   // ... or play this scenario with bots
+	const Scenario *scenario;   // ... or play this scenario with bots ...
+	const char *script;         // ... or run this script (with its bots)
+	const char *label;          // shown on the title card, e.g. the commit
 	int64_t from, to;           // tick window; to < 0 means the end
 	double last_seconds;        // if > 0, from = to - this many seconds
 	const char *camera;         // camera track path; nullptr for the director
@@ -56,6 +59,7 @@ typedef struct {
 	const char *done;           // marker written when everything is finished
 	bool clipboard;             // put the video on the system clipboard
 	int width, height;          // output size
+	int crf;                    // x264 quality: lower is better and bigger
 } ClipRequest;
 
 // Expects a window (hidden is fine) for the GL context. Returns an exit code.

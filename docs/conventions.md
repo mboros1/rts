@@ -49,6 +49,24 @@ Slow checks (`make cross`, `make determinism-x86`, soak runs) stay out of the
 hook. Run them by hand before merging sim math, or nightly from
 `launchd`/`cron`.
 
+## Demos: every feature ships with a clip
+
+A feature commit adds `demos/NN-name.script`: a short script that shows the
+feature working, with `expect` lines for what it should do. `make demos`
+renders its small `.mp4` and `.jpg` contact sheet, and all three go in the
+same commit.
+
+- **The script is the source of truth.** The sim is deterministic, so any
+  commit can re-render its demos exactly. The committed video exists so the
+  history can be browsed without building anything. Keep it small: 960x540,
+  CRF 30, and trim the window rather than lower the quality further.
+- **Its expectations are tests.** `make check` runs every demo script.
+  Set thresholds from what you observed in the sheet, not from guesses.
+- **Look before committing.** Read the contact sheet and check that it
+  shows what the title claims.
+- **For posting**, `make share DEMO=NN-name` renders 720p with the commit on
+  the title card and puts it on the clipboard.
+
 ## Modules and APIs
 
 - One module = one `.h` (public API) + one `.c`. Everything not in the header

@@ -3,10 +3,11 @@
 // tick that does not is the divergence.
 //
 // Format, all little-endian:
-//   header  "RTSR" u32 version (2), config (u64 seed, 5 x i32,
+//   header  "RTSR" u32 version (3), config (u64 seed, 5 x i32,
 //           UNIT_TYPE_COUNT x i32 spawn weights)
 //   tick    u64 tick, u32 command count, commands, u64 hash after the step
-//   command u32 faction, u32 kind, f32 x, f32 z, u32 n, n x (u32 index, u32 gen)
+//   command u32 faction, u32 kind, f32 x, f32 z, u32 unit type, u32 amount,
+//           f32 radius, u32 n, n x (u32 index, u32 gen)
 #pragma once
 
 #include "arena.h"

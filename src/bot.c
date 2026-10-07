@@ -29,7 +29,8 @@ void bot_think(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *
 			if (*count == cap) return;
 			V2 target = v2(enemy->base.x + rng_range(&bot->rng, -40.0f, 40.0f),
 			               enemy->base.z + rng_range(&bot->rng, -120.0f, 120.0f));
-			out[(*count)++] = (Command){bot->faction, ORDER_ATTACK_MOVE, target, in_group, group};
+			out[(*count)++] = (Command){.faction = bot->faction, .kind = COMMAND_ATTACK_MOVE,
+			                             .target = target, .count = in_group, .units = group};
 			in_group = 0;
 		}
 		if (i == u->count) break;

@@ -281,12 +281,40 @@ static V2 clamp_to_map(const Terrain *t, V2 p, float margin)
 
 static bool finite_f(float x) { return x == x && x - x == 0.0f; }
 
+static void spawn_at(Faction *f, const Terrain *t, UnitType type, V2 at, float radius)
+{
+	V2 p = v2(at.x + rng_range(&f->rng, -radius, radius), at.z + rng_range(&f->rng, -radius, radius));
+	p = clamp_to_map(t, p, 2.0f);
+	units_spawn(&f->units, type, p.x, p.z, terrain_height(t, p.x, p.z));
+	f->stats.units_spawned++;
+}
+
+static void apply_spawn(Faction *f, const Terrain *t, const Command *c)
+{
+	if (c->unit_type >= UNIT_TYPE_COUNT || c->amount < 0 || c->amount > SPAWN_MAX) return;
+	if (!finite_f(c->radius) || c->radius < 0.0f || c->radius > SPAWN_MAX_RADIUS) return;
+	V2 at = clamp_to_map(t, c->target, 2.0f);
+	// The pool's capacity is the limit, checked before asking it.
+	for (int32_t k = 0; k < c->amount && f->units.count < f->units.cap; k++)
+		spawn_at(f, t, c->unit_type, at, c->radius);
+}
+
+static const OrderKind order_for_command[] = {
+	[COMMAND_STOP] = ORDER_IDLE,
+	[COMMAND_MOVE] = ORDER_MOVE,
+	[COMMAND_ATTACK_MOVE] = ORDER_ATTACK_MOVE,
+};
+
 // Orders keep the group's shape: each unit aims at the target plus its offset
 // from the group's centre, squeezed so the group doesn't stay spread out.
 static void apply_command(Faction *f, const Terrain *t, const Command *c)
 {
-	if (c->kind >= ORDER_KIND_COUNT) return;
+	if (c->kind >= COMMAND_KIND_COUNT) return;
 	if (!finite_f(c->target.x) || !finite_f(c->target.z)) return;
+	if (c->kind == COMMAND_SPAWN) {
+		apply_spawn(f, t, c);
+		return;
+	}
 	Units *u = &f->units;
 	V2 target = clamp_to_map(t, c->target, 1.0f);
 
@@ -314,7 +342,7 @@ static void apply_command(Faction *f, const Terrain *t, const Command *c)
 		if (d < 0) continue;
 		V2 offset = v2_scale(v2_sub(v2(u->px[d], u->pz[d]), centre), squeeze);
 		V2 dest = clamp_to_map(t, v2_add(target, offset), 1.0f);
-		u->order[d] = c->kind;
+		u->order[d] = order_for_command[c->kind];
 		u->tx[d] = dest.x;
 		u->tz[d] = dest.z;
 	}
@@ -334,13 +362,7 @@ static UnitType pick_type(Rng *rng, const int32_t weight[UNIT_TYPE_COUNT])
 
 static void spawn_near_base(Faction *f, const SimConfig *c, const Terrain *t, float radius)
 {
-	Units *u = &f->units;
-	UnitType type = pick_type(&f->rng, c->type_weight);
-	V2 p = v2(f->base.x + rng_range(&f->rng, -radius, radius),
-	          f->base.z + rng_range(&f->rng, -radius, radius));
-	p = clamp_to_map(t, p, 2.0f);
-	units_spawn(u, type, p.x, p.z, terrain_height(t, p.x, p.z));
-	f->stats.units_spawned++;
+	spawn_at(f, t, pick_type(&f->rng, c->type_weight), f->base, radius);
 }
 
 static void spawn(Faction *f, const Sim *sim)

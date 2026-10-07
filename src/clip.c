@@ -7,7 +7,8 @@
 
 static constexpr int SUPERSAMPLE = 2;   // render at 2x, encoder scales down
 static constexpr int CLIP_FPS = 30;     // one frame per sim tick
-// CRF 26 keeps ~10 s under 10 MB: thousands of tiny shells are costly to encode.
+// CRF 26 (the default) keeps ~10 s of 720p under 10 MB: thousands of tiny
+// shells are costly to encode.
 
 // ---------------------------------------------------------------- camera tracks
 
@@ -106,14 +107,14 @@ void director_update(Director *d, const Sim *sim)
 
 // ---------------------------------------------------------------- encoding
 
-static FILE *encoder_open(const char *path, int src_w, int src_h, int out_w, int out_h)
+static FILE *encoder_open(const char *path, int src_w, int src_h, int out_w, int out_h, int crf)
 {
 	// Render textures read back bottom-up, hence vflip.
 	const char *cmd = TextFormat(
 		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d -r %d -i - "
-		"-vf vflip,scale=%d:%d:flags=area -c:v libx264 -preset veryfast -crf 26 "
+		"-vf vflip,scale=%d:%d:flags=area -c:v libx264 -preset veryfast -crf %d "
 		"-pix_fmt yuv420p -movflags +faststart '%s'",
-		src_w, src_h, CLIP_FPS, out_w, out_h, path);
+		src_w, src_h, CLIP_FPS, out_w, out_h, crf, path);
 	if (strchr(path, '\'')) return nullptr;
 	return popen(cmd, "w");
 }
@@ -145,6 +146,29 @@ static const char *caption(const char *name, const Sample *s)
 	                  s->units[0], s->units[1], s->shells);
 }
 
+// A title card for sharing: the first seconds of a clip say what it shows
+// and which commit made it, then shrink to a corner label.
+static void draw_title_card(const char *title, const char *about, const char *label,
+                            int64_t frame, int w, int h)
+{
+	const int s = SUPERSAMPLE;
+	const int64_t hold = 60, fade = 30;
+	if (frame < hold + fade) {
+		float k = frame < hold ? 1.0f : 1.0f - (float)(frame - hold) / (float)fade;
+		unsigned char a = (unsigned char)(255.0f * k);
+		DrawRectangle(0, 0, w, h, (Color){12, 14, 18, (unsigned char)(200.0f * k)});
+		int ts = 56 * s, as = 24 * s, ls = 18 * s;
+		DrawText(title, (w - MeasureText(title, ts)) / 2, h / 2 - ts, ts, (Color){245, 245, 245, a});
+		if (about[0]) DrawText(about, (w - MeasureText(about, as)) / 2, h / 2 + 12 * s, as, (Color){200, 200, 200, a});
+		if (label && label[0])
+			DrawText(label, (w - MeasureText(label, ls)) / 2, h / 2 + 52 * s, ls, (Color){140, 160, 190, a});
+		return;
+	}
+	const char *corner = label && label[0] ? TextFormat("%s   %s", title, label) : title;
+	DrawRectangle(10 * s, 10 * s, MeasureText(corner, 20 * s) + 20 * s, 32 * s, (Color){0, 0, 0, 140});
+	DrawText(corner, 20 * s, 16 * s, 20 * s, (Color){235, 235, 235, 230});
+}
+
 static int fail(const char *msg, const char *detail)
 {
 	fprintf(stderr, "clip: %s%s%s\n", msg, detail ? ": " : "", detail ? detail : "");
@@ -163,13 +187,32 @@ int clip_run(const ClipRequest *req)
 	Arena frame = arena_create("clip frame", (ptrdiff_t)256 << 20);
 	Arena replay_out = arena_create("clip replay", (ptrdiff_t)1 << 30);
 
-	// Where the commands come from: a replay file or bots playing a scenario.
+	// Where the commands come from: a replay file, a script, or bots playing
+	// a scenario.
 	ReplayReader reader = {0};
 	SimConfig config;
 	Bot bots[FACTION_COUNT];
+	Script script = {0};
+	ScriptRun script_run = {0};
 	const char *name;
+	const char *title = "", *about = "";
 	int64_t from = req->from, to = req->to;
-	if (req->replay) {
+	CameraTrack track = {0};
+	if (req->script) {
+		char err[512];
+		if (!script_load(&script, &work, req->script, err, sizeof err)) return fail(err, nullptr);
+		config = script.config;
+		name = script.title[0] ? script.title : req->script;
+		title = script.title;
+		about = script.about;
+		if (from < 0) from = script.clip_from;
+		if (to < 0) to = script.clip_to;
+		if (script.fixed_camera) {
+			CameraKey *k = PUSH(&work, CameraKey, 1);
+			*k = (CameraKey){0, script.camera_at.x, script.camera_at.z, script.camera_distance};
+			track = (CameraTrack){k, 1};
+		}
+	} else if (req->replay) {
 		Str data;
 		if (!platform_read_file(&work, req->replay, &data)) return fail("cannot read", req->replay);
 		ReplayStatus st = replay_open(&reader, data);
@@ -194,7 +237,7 @@ int clip_run(const ClipRequest *req)
 			to = last;
 		}
 	} else {
-		if (!req->scenario) return fail("need --replay or --scenario", nullptr);
+		if (!req->scenario) return fail("need --script, --replay or --scenario", nullptr);
 		config = scenario_config(req->scenario);
 		scenario_bots(req->scenario, bots);
 		name = req->scenario->name;
@@ -205,12 +248,12 @@ int clip_run(const ClipRequest *req)
 	if (from < 0) from = 0;
 	if (to <= from) return fail("empty tick window", nullptr);
 
-	CameraTrack track = {0};
 	if (req->camera && !camera_track_read(req->camera, &work, &track))
 		return fail("cannot read camera track", req->camera);
 
 	Sim sim;
 	sim_init(&sim, config);
+	if (req->script) script_run_init(&script_run, &script, &work, stdout);
 	Renderer renderer;
 	renderer_init(&renderer, &sim, &work);
 	int rw = req->width * SUPERSAMPLE, rh = req->height * SUPERSAMPLE;
@@ -220,7 +263,7 @@ int clip_run(const ClipRequest *req)
 	if (req->save_replay) replay_begin(&writer, &replay_out, config);
 
 	FILE *video = nullptr;
-	if (req->video && !(video = encoder_open(req->video, rw, rh, req->width, req->height)))
+	if (req->video && !(video = encoder_open(req->video, rw, rh, req->width, req->height, req->crf)))
 		return fail("cannot start ffmpeg for", req->video);
 
 	// Contact sheet: evenly spaced ticks in (from, to], in a grid of cells.
@@ -245,6 +288,8 @@ int clip_run(const ClipRequest *req)
 			ReplayStatus st = replay_next(&reader, &decode, &t, &cmds, &n, &want);
 			if (st != REPLAY_OK) return fail("replay ended early", replay_status_name(st));
 			if (t.v != tick.v) return fail("replay out of order", req->replay);
+		} else if (req->script) {
+			n = script_tick(&script_run, &sim, &decode, bot_cmds, countof(bot_cmds));
 		} else {
 			for (int k = 0; k < FACTION_COUNT; k++)
 				bot_think(&bots[k], &sim, &decode, bot_cmds, &n, countof(bot_cmds));
@@ -269,7 +314,7 @@ int clip_run(const ClipRequest *req)
 		if (!video && !sample) continue;
 
 		Camera3D cam;
-		if (req->camera) {
+		if (track.count) {
 			CameraKey k = camera_track_at(&track, sim.tick.v);
 			cam = render_camera(&sim.terrain, v2(k.focus_x, k.focus_z), k.distance);
 		} else {
@@ -284,6 +329,7 @@ int clip_run(const ClipRequest *req)
 		EndMode3D();
 		DrawText(caption(name, &now), 16 * SUPERSAMPLE, rh - 30 * SUPERSAMPLE, 18 * SUPERSAMPLE,
 		         (Color){230, 230, 230, 200});
+		if (title[0]) draw_title_card(title, about, req->label, sim.tick.v - from, rw, rh);
 		EndTextureMode();
 
 		Image img = LoadImageFromTexture(target.texture);
@@ -351,7 +397,7 @@ int clip_run(const ClipRequest *req)
 static void usage(void)
 {
 	fprintf(stderr,
-	        "usage: rts clip (--scenario NAME | --replay PATH) [options]\n"
+	        "usage: rts clip (--script PATH | --scenario NAME | --replay PATH) [options]\n"
 	        "  --from TICK --to TICK    window (scenario default: its clip window;\n"
 	        "                           replay default: the whole replay)\n"
 	        "  --last SECONDS           window ends at --to (or the end), this long\n"
@@ -363,12 +409,14 @@ static void usage(void)
 	        "  --clipboard              copy the video to the system clipboard\n"
 	        "  --size WxH               output size (default 1280x720)\n"
 	        "  --done PATH              touch PATH when finished\n"
+	        "  --label TEXT             title card subtitle, e.g. the commit\n"
+	        "  --crf N                  video quality, 0..51, lower is bigger (default 26)\n"
 	        "  --list                   list scenarios\n");
 }
 
 int clip_main(int argc, char **argv)
 {
-	ClipRequest req = {.from = -1, .to = -1, .width = 1280, .height = 720, .sheet_frames = 9};
+	ClipRequest req = {.from = -1, .to = -1, .width = 1280, .height = 720, .sheet_frames = 9, .crf = 26};
 	for (int i = 2; i < argc; i++) {
 		const char *a = argv[i];
 		const char *v = i + 1 < argc ? argv[i + 1] : nullptr;
@@ -386,6 +434,12 @@ int clip_main(int argc, char **argv)
 		} else if (!strcmp(a, "--scenario")) {
 			if (!(req.scenario = scenario_find(v))) return fail("unknown scenario (try --list)", v);
 		} else if (!strcmp(a, "--replay")) req.replay = v;
+		else if (!strcmp(a, "--script")) req.script = v;
+		else if (!strcmp(a, "--label")) req.label = v;
+		else if (!strcmp(a, "--crf")) {
+			req.crf = atoi(v);
+			if (req.crf < 0 || req.crf > 51) return fail("--crf is 0..51", v);
+		}
 		else if (!strcmp(a, "--from")) req.from = atoll(v);
 		else if (!strcmp(a, "--to")) req.to = atoll(v);
 		else if (!strcmp(a, "--last")) req.last_seconds = atof(v);

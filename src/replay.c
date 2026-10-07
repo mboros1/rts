@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 2;
+static constexpr uint32_t REPLAY_VERSION = 3;
 
 // ---------------------------------------------------------------- writing
 
@@ -58,6 +58,9 @@ void replay_tick(ReplayWriter *w, Tick tick, const Command *cmds, ptrdiff_t coun
 		put_u32(w, c->kind);
 		put_f32(w, c->target.x);
 		put_f32(w, c->target.z);
+		put_u32(w, c->unit_type);
+		put_u32(w, (uint32_t)c->amount);
+		put_f32(w, c->radius);
 		put_u32(w, (uint32_t)c->count);
 		for (ptrdiff_t i = 0; i < c->count; i++) {
 			put_u32(w, c->units[i].index);
@@ -158,23 +161,28 @@ ReplayStatus replay_next(ReplayReader *r, Arena *arena, Tick *tick,
 	uint64_t t;
 	uint32_t n;
 	if (!get_u64(r, &t) || !get_u32(r, &n)) return REPLAY_TRUNCATED;
-	// Each command takes at least 20 bytes, which bounds n before allocating.
-	if ((ptrdiff_t)n > (r->data.len - r->pos) / 20) return REPLAY_TRUNCATED;
+	// Each command takes at least 32 bytes, which bounds n before allocating.
+	if ((ptrdiff_t)n > (r->data.len - r->pos) / 32) return REPLAY_TRUNCATED;
 	Command *out = arena_try_push(arena, (ptrdiff_t)n * (ptrdiff_t)sizeof(Command), alignof(Command));
 	if (n && !out) return REPLAY_TOO_LARGE;
 	for (uint32_t k = 0; k < n; k++) {
-		uint32_t faction, kind, units;
+		uint32_t faction, kind, unit_type, amount, units;
 		V2 target;
+		float radius;
 		if (!get_u32(r, &faction) || !get_u32(r, &kind) || !get_f32(r, &target.x)
-		    || !get_f32(r, &target.z) || !get_u32(r, &units))
+		    || !get_f32(r, &target.z) || !get_u32(r, &unit_type) || !get_u32(r, &amount)
+		    || !get_f32(r, &radius) || !get_u32(r, &units))
 			return REPLAY_TRUNCATED;
-		if (faction >= FACTION_COUNT || kind >= ORDER_KIND_COUNT) return REPLAY_BAD_COMMAND;
+		if (faction >= FACTION_COUNT || kind >= COMMAND_KIND_COUNT || unit_type >= UNIT_TYPE_COUNT
+		    || amount > SPAWN_MAX)
+			return REPLAY_BAD_COMMAND;
 		if ((ptrdiff_t)units > (r->data.len - r->pos) / 8) return REPLAY_TRUNCATED;
 		UnitHandle *h = arena_try_push(arena, (ptrdiff_t)units * (ptrdiff_t)sizeof(UnitHandle), alignof(UnitHandle));
 		if (units && !h) return REPLAY_TOO_LARGE;
 		for (uint32_t i = 0; i < units; i++)
 			if (!get_u32(r, &h[i].index) || !get_u32(r, &h[i].generation)) return REPLAY_TRUNCATED;
-		out[k] = (Command){(FactionId){faction}, (OrderKind)kind, target, (ptrdiff_t)units, h};
+		out[k] = (Command){(FactionId){faction}, (CommandKind)kind, target, (ptrdiff_t)units, h,
+		                   (UnitType)unit_type, (int32_t)amount, radius};
 	}
 	uint64_t hash;
 	if (!get_u64(r, &hash)) return REPLAY_TRUNCATED;

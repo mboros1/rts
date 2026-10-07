@@ -1,0 +1,28 @@
+title Scripted flank
+about Red pushes into blue's line; blue's raiders wait to the north, then hit red's flank.
+
+scenario skirmish
+units 0                      # only what the script spawns
+respawn off
+bot blue off
+bot red off
+clip 0..900
+camera 250,240 150
+
+at 0    spawn blue tank 40 at 200,256 radius 12
+at 0    spawn blue artillery 20 at 170,256 radius 10
+at 0    spawn blue raider 50 at 205,215 radius 9
+at 0    spawn red tank 50 at 290,256 radius 14
+at 0    spawn red artillery 20 at 330,256 radius 10
+
+at 1    select blue raider as flank
+at 1    select red tank as push
+at 1    select red artillery as red_guns
+
+at 2    attack-move push 200,256     # red advances on blue's line, which holds
+at 2    attack-move red_guns 262,256
+at 2    move flank 248,196           # raiders slip north of red's advance
+at 330  attack-move flank 300,262    # then into red's side
+
+at 330  expect flank alive >= 45     # waiting out of range kept them whole
+at 880  expect red units == 0       # the flank broke them

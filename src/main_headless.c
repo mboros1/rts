@@ -3,6 +3,7 @@
 //   rts-headless bench  [ticks] [units]  time the sim with bots on both sides
 //   rts-headless record PATH [ticks] [units]  run bots and record a replay
 //   rts-headless verify PATH             replay and compare every tick's hash
+//   rts-headless script PATH...          run scripts and their expectations
 //
 // Unity build: this file is the whole program.
 #include "base.h"
@@ -13,6 +14,8 @@
 #include "sim.c"
 #include "bot.c"
 #include "replay.c"
+#include "scenario.c"
+#include "script.c"
 
 static constexpr ptrdiff_t MAX_COMMANDS_PER_TICK = 256;
 
@@ -177,6 +180,39 @@ static int cmd_verify(const char *path)
 	return 0;
 }
 
+static int cmd_script(int count, char **paths)
+{
+	Arena work = arena_create("script", (ptrdiff_t)1 << 30);
+	Arena tick = arena_create("script tick", (ptrdiff_t)64 << 20);
+	int failed = 0;
+	for (int i = 0; i < count; i++) {
+		arena_reset(&work);
+		Script script;
+		char err[512];
+		if (!script_load(&script, &work, paths[i], err, sizeof err)) {
+			fprintf(stderr, "%s\n", err);
+			failed++;
+			continue;
+		}
+		printf("%s: %s\n", paths[i], script.title[0] ? script.title : "(untitled)");
+		Sim sim;
+		sim_init(&sim, script.config);
+		ScriptRun run;
+		script_run_init(&run, &script, &work, stdout);
+		Command cmds[MAX_COMMANDS_PER_TICK];
+		while (sim.tick.v < script.end) {
+			arena_reset(&tick);
+			ptrdiff_t n = script_tick(&run, &sim, &tick, cmds, MAX_COMMANDS_PER_TICK);
+			sim_step(&sim, cmds, n);
+		}
+		printf("  %d of %d expectations held over %lld ticks\n", run.expects - run.failures,
+		       run.expects, (long long)script.end);
+		failed += run.failures > 0;
+		sim_destroy(&sim);
+	}
+	return failed ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *cmd = argc > 1 ? argv[1] : "";
@@ -186,6 +222,7 @@ int main(int argc, char **argv)
 		return cmd_record(argv[2], parse_long(argc > 3 ? argv[3] : nullptr, 1800),
 		                  parse_long(argc > 4 ? argv[4] : nullptr, 5000));
 	if (!strcmp(cmd, "verify") && argc > 2) return cmd_verify(argv[2]);
-	fprintf(stderr, "usage: %s bench [ticks] [units] | record PATH [ticks] [units] | verify PATH\n", argv[0]);
+	if (!strcmp(cmd, "script") && argc > 2) return cmd_script(argc - 2, argv + 2);
+	fprintf(stderr, "usage: %s bench [ticks] [units] | record PATH [ticks] [units] | verify PATH | script PATH...\n", argv[0]);
 	return 2;
 }

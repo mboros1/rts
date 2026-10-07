@@ -7,6 +7,8 @@
 #   make determinism-x86   arm64 record, x86-64 (Rosetta) verify, and back
 #   make cross      x86-64 Linux (run in Docker) and Windows builds
 #   make clips      every scenario as build/clips/NAME.mp4 + .png sheet + .txt
+#   make demos      render demos/*.script whose clip is missing or stale
+#   make share DEMO=NAME   full-quality copy of a demo, on the clipboard
 
 CC      := clang
 GCC     := gcc-15
@@ -25,7 +27,7 @@ RAYLIB_LIBS   := $(shell pkg-config --libs raylib)
 SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h,$(SRC))
 
-.PHONY: all check bench determinism-x86 cross clips clean
+.PHONY: all check bench determinism-x86 cross clips demos share clean
 
 all: $(B)/rts $(B)/rts-headless
 
@@ -65,6 +67,8 @@ check:
 	$(CHECK)/rts clip --scenario skirmish --to 600 --sheet $(CHECK)/skirmish.png --frames 4 \
 		--save-replay $(CHECK)/skirmish.replay
 	$(CHECK)/rts clip --replay $(CHECK)/skirmish.replay --last 3 --sheet $(CHECK)/replayed.png --frames 4
+	@echo "== demo scripts: every expectation must hold"
+	$(CHECK)/headless script demos/*.script
 	@echo "== check passed"
 
 # Same replay on both architectures, both directions. x86-64 runs under Rosetta.
@@ -96,6 +100,25 @@ clips: $(B)/rts
 		$(B)/rts clip --scenario $$s --out $(CLIPS)/$$s.mp4 --sheet $(CLIPS)/$$s.png \
 			--save-replay $(CLIPS)/$$s.replay || exit 1; \
 	done
+
+# Demos: one per feature, committed with it. The script is the source of
+# truth (the sim is deterministic); the small .mp4 and .jpg sheet are kept in
+# git so history shows each change without building anything. Rendered only
+# when the script changes, never because the binary did.
+DEMO_SCRIPTS := $(wildcard demos/*.script)
+demos: $(DEMO_SCRIPTS:.script=.mp4)
+
+demos/%.mp4: demos/%.script | $(B)/rts
+	$(B)/rts clip --script $< --out $@ --sheet $(B)/demo-$*.png --size 960x540 --crf 30 \
+		--label "$*"
+	ffmpeg -loglevel error -y -i $(B)/demo-$*.png -q:v 6 demos/$*.jpg
+
+# For posting: 720p at the default quality, labelled with the commit.
+share: $(B)/rts
+	@test -n "$(DEMO)" || { echo "usage: make share DEMO=02-scripted-flank"; exit 2; }
+	@mkdir -p $(B)/share
+	$(B)/rts clip --script demos/$(DEMO).script --out $(B)/share/$(DEMO).mp4 \
+		--label "$$(git describe --always --dirty)" --clipboard
 
 clean:
 	rm -rf $(B)

@@ -7,6 +7,8 @@
 #include "sim.c"
 #include "bot.c"
 #include "replay.c"
+#include "scenario.c"
+#include "script.c"
 
 static int failures;
 static int checks;
@@ -273,6 +275,70 @@ static void test_shell_hits(void)
 	sim_destroy(&sim);
 }
 
+static bool parse_fails(const char *text, const char *needle)
+{
+	Arena a = arena_create("script test", 4 << 20);
+	Script s;
+	char err[512] = {0};
+	bool ok = script_parse(&s, &a, (Str){text, (ptrdiff_t)strlen(text)}, "t.script", err, sizeof err);
+	bool matched = !ok && strstr(err, needle) != nullptr;
+	if (!matched) fprintf(stderr, "  parse of [%s] gave: %s\n", text, ok ? "success" : err);
+	arena_destroy(&a);
+	return matched;
+}
+
+static void test_script(void)
+{
+	const char *text =
+		"title Test  # comment\n"
+		"scenario skirmish\n"
+		"units 0\n"
+		"bot red off\n"
+		"bot blue off  # or blue's bot would send the idle units to attack\n"
+		"at 5 expect blue units == 6\n"
+		"at 0 spawn blue tank 6 at 100,100 radius 4\n"
+		"at 1 select blue tank within 20 of 100,100 max 4 as g\n"
+		"at 2 move g 140,100\n"
+		"at 90 expect g alive == 4\n";
+	Arena a = arena_create("script", 16 << 20);
+	Script s;
+	char err[512];
+	CHECK(script_parse(&s, &a, (Str){text, (ptrdiff_t)strlen(text)}, "t.script", err, sizeof err));
+	CHECK(!strcmp(s.title, "Test"));
+	CHECK(s.action_count == 5 && s.group_count == 1);
+	CHECK(s.actions[0].tick == 0 && s.actions[4].tick == 90); // sorted by tick
+	CHECK(!s.bots_on[1] && s.config.initial_units == 0);
+
+	Sim sim;
+	sim_init(&sim, s.config);
+	ScriptRun run;
+	script_run_init(&run, &s, &a, nullptr);
+	Arena tick = arena_create("tick", 4 << 20);
+	Command cmds[64];
+	while (sim.tick.v < s.end) {
+		arena_reset(&tick);
+		ptrdiff_t n = script_tick(&run, &sim, &tick, cmds, countof(cmds));
+		sim_step(&sim, cmds, n);
+	}
+	CHECK(run.expects == 2 && run.failures == 0);
+	CHECK(sim.factions[0].units.count == 6);
+	// The selected four moved toward 140,100; the other two stayed.
+	ptrdiff_t moved = 0;
+	for (ptrdiff_t i = 0; i < sim.factions[0].units.count; i++) moved += sim.factions[0].units.px[i] > 125.0f;
+	CHECK(moved == 4);
+	sim_destroy(&sim);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+
+	CHECK(parse_fails("at 0 explode blue\n", "t.script:1: unknown action"));
+	CHECK(parse_fails("\nat 3 move nobody 1,1\n", "t.script:2: no group"));
+	CHECK(parse_fails("at 0 spawn blue tank 99999 at 1,1\n", "amount"));
+	CHECK(parse_fails("at 0 spawn green tank 1 at 1,1\n", "side"));
+	CHECK(parse_fails("clip 9..3\n", "FROM < TO"));
+	CHECK(parse_fails("at 0 expect blue lost > lots\n", "not a number"));
+	CHECK(parse_fails("scenario nope\n", "unknown scenario"));
+}
+
 int main(void)
 {
 	test_arena();
@@ -281,6 +347,7 @@ int main(void)
 	test_determinism();
 	test_replay();
 	test_shell_hits();
+	test_script();
 	printf("%d checks, %d failed\n", checks, failures);
 	return failures ? 1 : 0;
 }
