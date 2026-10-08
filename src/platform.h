@@ -24,6 +24,10 @@ bool platform_read_file(Arena *arena, const char *path, Str *out);
 
 bool platform_write_file(const char *path, const void *data, ptrdiff_t len);
 
+// Write to PATH.tmp, fsync, rename over PATH: after a crash the file is the
+// old version or the new one, never half of either.
+bool platform_write_file_atomic(const char *path, const void *data, ptrdiff_t len);
+
 // Put a file on the system clipboard, so pasting into a chat or a folder
 // attaches the file. path must be absolute. False if the OS tool failed or
 // this platform has no implementation yet.

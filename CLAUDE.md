@@ -11,6 +11,8 @@ persistent map. Read these before changing anything:
 
 - `make check` is CI (the pre-push hook runs it). Keep it under ~30 s.
 - Touched sim math? Also run `make determinism-x86`.
+- Touched saving, zones or the coordinator? Also run `make soak MINUTES=3`
+  (random SIGKILLs; checks no unit is lost and replays chain).
 - Programs: `rts` (game, client, clips), `rts-headless` (bench, replays,
   scripts), `rts-server` (a zone), `rts-coord` (the coordinator).
 - Keep iteration fast: `make check` prints a time per stage (history in

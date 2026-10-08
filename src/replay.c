@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 4;
+static constexpr uint32_t REPLAY_VERSION = 5;
 
 // ---------------------------------------------------------------- writing
 
@@ -36,6 +36,11 @@ static void put_f32(ReplayWriter *w, float f)
 
 void replay_begin(ReplayWriter *w, Arena *buf, SimConfig c)
 {
+	replay_begin_from(w, buf, c, (Str){"", 0});
+}
+
+void replay_begin_from(ReplayWriter *w, Arena *buf, SimConfig c, Str snapshot)
+{
 	*w = (ReplayWriter){.buf = buf};
 	put_u32(w, REPLAY_MAGIC);
 	put_u32(w, REPLAY_VERSION);
@@ -47,6 +52,16 @@ void replay_begin(ReplayWriter *w, Arena *buf, SimConfig c)
 	put_u32(w, (uint32_t)c.max_projectiles);
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) put_u32(w, (uint32_t)c.type_weight[k]);
 	put_u32(w, c.economy);
+	put_u32(w, (uint32_t)snapshot.len);
+	if (snapshot.len) put(w, snapshot.ptr, snapshot.len);
+}
+
+bool replay_start(const ReplayReader *r, Sim *sim)
+{
+	sim_init(sim, r->config);
+	if (!r->snapshot.len) return true;
+	ByteReader br = byte_reader(r->snapshot.ptr, r->snapshot.len);
+	return sim_load(sim, &br) && br.pos == br.len;
 }
 
 void replay_tick(ReplayWriter *w, Tick tick, const Command *cmds, ptrdiff_t count, Hash after)
@@ -75,6 +90,15 @@ void replay_tick(ReplayWriter *w, Tick tick, const Command *cmds, ptrdiff_t coun
 Str replay_bytes(const ReplayWriter *w)
 {
 	return (Str){(const char *)w->start, w->len};
+}
+
+bool replay_flush(ReplayWriter *w, FILE *f)
+{
+	bool ok = w->len == 0 || (fwrite(w->start, 1, (size_t)w->len, f) == (size_t)w->len && fflush(f) == 0);
+	arena_reset(w->buf);
+	w->start = nullptr;
+	w->len = 0;
+	return ok;
 }
 
 // ---------------------------------------------------------------- reading
@@ -155,6 +179,11 @@ ReplayStatus replay_open(ReplayReader *r, Str data)
 	    || c->population > c->max_units || c->initial_units > c->population
 	    || c->initial_units < 0 || c->max_units > (1 << 16) || c->max_projectiles > (1 << 20))
 		return REPLAY_BAD_CONFIG;
+	uint32_t snap;
+	if (!get_u32(r, &snap)) return REPLAY_TRUNCATED;
+	if ((ptrdiff_t)snap > r->data.len - r->pos) return REPLAY_TRUNCATED;
+	r->snapshot = (Str){r->data.ptr + r->pos, (ptrdiff_t)snap};
+	r->pos += snap;
 	return REPLAY_OK;
 }
 

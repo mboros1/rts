@@ -176,6 +176,62 @@ Done. Zones are separate `rts-server` processes; `rts-coord` sits between.
   but weren't yet reported (spike 6: zone snapshots). Zones are local
   processes on one machine; the directory hands out 127.0.0.1.
 
+## Spike 6 results (2026-10-08)
+
+Done. A zone can be killed at any moment and comes back where it was.
+
+- **Zone state**: `--state PATH` saves the whole sim (both factions, spot
+  owners, the tick) plus the zone's own bookkeeping to one file, written
+  atomically (temp file, fsync, rename). It saves every `--save-every`
+  seconds, on SIGTERM, and after any tick where units left or arrived.
+  About 140–470 KB and 2 ms for a few hundred units.
+- **No unit lost or duplicated**: a zone saves before it tells the
+  coordinator anything. Departures wait in an outbox inside the saved state,
+  each with the zone's own sequence number, until the coordinator
+  acknowledges them; after a restart they are re-sent and the coordinator
+  drops ones it already logged. Arrivals are confirmed only once a save
+  includes them, and the zone remembers recent transfer ids, so a
+  redelivery after a crash is ignored.
+- **Replays in segments**: a replay can begin from an embedded snapshot, so
+  each run of a zone writes a segment that starts from its saved state.
+  Segments stream to disk at every save; `rts-headless verify --partial`
+  checks one cut short by a crash, and prints where it starts and ends so
+  segments can be chained.
+- **Logout**: `--logout entrench` turns a faction's combat units into
+  turrets when its last player leaves (more hp, longer reach, can't move)
+  and back when a player returns; `--logout bot` hands the faction to its
+  bot; `hold` does nothing. Demo 08 shows a line of tanks entrenching and
+  holding off two waves, then mobilizing.
+- **Soak** (`make soak MINUTES=N`, `tools/soak.py`): a coordinator, zones
+  alpha and beta with an economy and bots on both sides, blue sending
+  raider waves through gates both ways, a player logging in and out of alpha
+  (entrench and mobilize), and SIGKILLs: alpha every 15–40 s, the
+  coordinator every 45–90 s, at 8x speed. It then checks unit conservation
+  against the coordinator's log, that every replay segment verifies and
+  chains to the last, that the player never saw a faction hash mismatch,
+  that beta's memory stayed flat, and that nothing died on its own.
+  A 10-minute run (80 simulated minutes per zone): 21 kills of alpha, 8 of
+  the coordinator, 95 player sessions; 1838 units crossed with none lost or
+  duplicated (7 still in transit at the end, pending in the coordinator);
+  alpha's 22 replay segments all verify and chain; beta held 67 MB
+  throughout; no hash mismatch; 13 minutes wall time.
+- **Found by the soak**: a charged gate (`work == 1.0`) failed the faction
+  state's validation on load, so a zone killed while a gate was full could
+  not resume. Fixed, and `test_gates` now saves and reloads a charged gate.
+  And three ways the soak itself could pass without proving anything, each
+  now a failure: orphans from an aborted run writing into the next run's
+  directory (it now kills its children however it exits); the laptop
+  sleeping through the run (it holds `caffeinate` and fails if the wall
+  clock jumped past the uptime clock); and one side losing its gates early,
+  so nothing crossed (both sides now send waves, and fewer than 10 units
+  crossing per minute fails). An outbox entry whose ack was lost is already
+  in the coordinator's log; zones report outbox sequence numbers so it's
+  counted once.
+- **Not yet**: the coordinator's log grows forever and it holds at most
+  4096 transfers (it needs compaction: a snapshot line plus the tail).
+  Replay segments are never pruned. Hours-long runs and real players are
+  still ahead; the soak runs minutes at 8x.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.
@@ -213,7 +269,9 @@ restart).
 - Gate expansion metagame: seed energy cost, distance scaling on the zone
   graph, which units can travel without a gate (drop pods, commandos).
 - Logout exploits: logging out to escape a fight (needs a logout timer), and
-  converting units to defenses only in friendly territory.
+  converting units to defenses only in friendly territory. Entrenching is
+  instant today.
+- Coordinator log compaction and replay segment pruning (spike 6 limits).
 - Offline defenses piling up: upkeep so static defenses decay unless supplied.
 - Economy growth over a war that never ends: war resets or hard resource sinks.
 - Use-based skills and XP: farming with alt accounts, the experience for new

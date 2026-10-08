@@ -71,6 +71,16 @@ static bool parse_counts(char **save, int32_t counts[UNIT_TYPE_COUNT])
 	return true;
 }
 
+static uint64_t *seq_of(Ledger *l, const char *zone)
+{
+	for (int32_t k = 0; k < l->seq_zones; k++)
+		if (!strcmp(l->seq_zone[k], zone)) return &l->seq_max[k];
+	if (l->seq_zones == (int32_t)countof(l->seq_max)) fatal("coordinator: too many zones");
+	snprintf(l->seq_zone[l->seq_zones], ZONE_NAME, "%s", zone);
+	l->seq_max[l->seq_zones] = 0;
+	return &l->seq_max[l->seq_zones++];
+}
+
 static Transfer *add_transfer(Ledger *l, uint64_t id, const char *src, const char *dst, uint8_t faction, bool seed,
                               const int32_t counts[UNIT_TYPE_COUNT])
 {
@@ -125,9 +135,12 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 		if (!strcmp(verb, "transfer")) {
 			char *src = strtok_r(nullptr, " ", &save), *dst = strtok_r(nullptr, " ", &save);
 			char *fac = strtok_r(nullptr, " ", &save), *kind = strtok_r(nullptr, " ", &save);
-			if (!src || !dst || !fac || !kind || !parse_counts(&save, counts)) return false;
+			char *seq_s = strtok_r(nullptr, " ", &save);
+			if (!src || !dst || !fac || !kind || !seq_s || !parse_counts(&save, counts)) return false;
 			long faction = strtol(fac, nullptr, 10);
 			if (faction < 0 || faction >= FACTION_COUNT) return false;
+			uint64_t seq = strtoull(seq_s, nullptr, 10), *max = seq_of(l, src);
+			if (seq > *max) *max = seq;
 			add_transfer(l, id, src, dst, (uint8_t)faction, !strcmp(kind, "seed"), counts);
 		} else if (!strcmp(verb, "delivered")) {
 			Transfer *t = ledger_find(l, id);
@@ -150,13 +163,16 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 	return true;
 }
 
-Transfer *ledger_depart(Ledger *l, const char *src, const char *dst, uint8_t faction, bool seed,
+Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *dst, uint8_t faction, bool seed,
                         const int32_t counts[UNIT_TYPE_COUNT])
 {
+	uint64_t *max = seq_of(l, src);
+	if (seq <= *max) return nullptr; // a zone re-sending after a restart
+	*max = seq;
 	char line[512], list[384];
 	format_counts(list, sizeof list, counts);
-	snprintf(line, sizeof line, "transfer %llu %s %s %u %s%s", (unsigned long long)l->next_id, src, dst, faction,
-	         seed ? "seed" : "units", list);
+	snprintf(line, sizeof line, "transfer %llu %s %s %u %s %llu%s", (unsigned long long)l->next_id, src, dst, faction,
+	         seed ? "seed" : "units", (unsigned long long)seq, list);
 	log_line(l, line);
 	return add_transfer(l, l->next_id, src, dst, faction, seed, counts);
 }

@@ -363,7 +363,12 @@ int clip_run(const ClipRequest *req)
 		return fail("cannot read camera track", req->camera);
 
 	Sim sim;
-	sim_init(&sim, config);
+	if (req->replay) {
+		if (!replay_start(&reader, &sim)) return fail("the replay's snapshot doesn't load", req->replay);
+		if (from < sim.tick.v) from = sim.tick.v; // a segment starts where it starts
+	} else {
+		sim_init(&sim, config);
+	}
 	if (req->script) script_run_init(&script_run, &script, &work, stdout);
 	Renderer renderer;
 	renderer_init(&renderer, &sim.terrain, sim.config.max_units, &work);

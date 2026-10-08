@@ -42,6 +42,7 @@ typedef enum : uint8_t {
 	UNIT_GENERATOR,
 	UNIT_FACTORY,
 	UNIT_GATE,          // warps units to other zones; charges on energy
+	UNIT_TURRET,        // a static gun; also what units entrench into
 	UNIT_TYPE_COUNT,
 } UnitType;
 
@@ -148,7 +149,8 @@ typedef struct {
 	uint8_t *queue_len;
 	uint8_t *repeat;       // factories: finished items go to the back
 	uint8_t *dest;         // units ordered through a gate: the zone they're for
-	uint8_t *seeded;       // gates: arrived as a seed, so they unfold unaided
+	uint8_t *seeded;       // gates: arrived as a seed, so they unfold unaided;
+	                       // turrets: an entrenched unit, of type build_type
 } Units;
 
 // Zones are numbered by the match's zone directory; the pool isn't a zone.
@@ -349,6 +351,8 @@ typedef enum : uint8_t {
 	COMMAND_SEED,       // the gate nearest target fires a gate seed to zone `amount`
 	COMMAND_ARRIVE,     // `amount` of unit_type come through our gate (a seed: SEED flag)
 	COMMAND_DRAW,       // ask the pool for `amount` of unit_type here: for the zone server
+	COMMAND_ENTRENCH,   // the faction's combat units dig in as turrets where they stand
+	COMMAND_MOBILIZE,   // entrenched turrets become the units they were
 	COMMAND_KIND_COUNT,
 } CommandKind;
 
@@ -416,6 +420,12 @@ void faction_tick(Sim *sim, FactionId f, const FactionEffects *fx, const Command
 // treats its input as untrusted and checks every invariant.
 void faction_write(const Faction *f, ByteBuf *b);
 bool faction_read(Faction *f, ByteReader *r);
+
+// The whole sim, for a zone to persist and resume: tick, both factions and
+// spot owners. sim_load expects a sim set up by sim_init with the same
+// config; it checks everything, and on false the sim must be discarded.
+void sim_save(const Sim *sim, ByteBuf *b);
+bool sim_load(Sim *sim, ByteReader *r);
 
 // Dense index of a live unit, or -1 if the handle is stale.
 ptrdiff_t units_find(const Units *u, UnitHandle h);

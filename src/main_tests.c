@@ -675,8 +675,9 @@ static void test_ledger(void)
 	Ledger *l = PUSH(&a, Ledger, 1);
 	l->log = log;
 	int32_t tanks[UNIT_TYPE_COUNT] = {[UNIT_TANK] = 10}, raiders[UNIT_TYPE_COUNT] = {[UNIT_RAIDER] = 4};
-	Transfer *t0 = ledger_depart(l, "alpha", "beta", 0, false, tanks);
-	Transfer *t1 = ledger_depart(l, "alpha", "pool", 0, false, raiders);
+	Transfer *t0 = ledger_depart(l, "alpha", 1, "beta", 0, false, tanks);
+	Transfer *t1 = ledger_depart(l, "alpha", 2, "pool", 0, false, raiders);
+	CHECK(ledger_depart(l, "alpha", 2, "pool", 0, false, raiders) == nullptr); // re-sent: already had it
 	CHECK(!t0->delivered && t1->delivered);        // the pool takes them at once
 	CHECK(l->pool[0][UNIT_RAIDER] == 4);
 	int32_t want[UNIT_TYPE_COUNT] = {[UNIT_RAIDER] = 6, [UNIT_TANK] = 1};
@@ -698,12 +699,13 @@ static void test_ledger(void)
 	CHECK(again->transfer_count == 3 && ledger_pending(again) == 1);
 	CHECK(again->pool[0][UNIT_RAIDER] == 0 && again->next_id == 3);
 	CHECK(ledger_find(again, 0)->delivered && !ledger_find(again, 2)->delivered);
+	CHECK(ledger_depart(again, "alpha", 2, "pool", 0, false, raiders) == nullptr); // remembered across a restart
 	int lines = 0;
 	for (ptrdiff_t i = 0; i < text.len; i++) lines += text.ptr[i] == '\n';
 	CHECK(lines == 4);
 
-	const char *broken[] = {"transfer 9 a b 7 units tank:1\n", "delivered 42\n", "draw 1 0 z tank:5\n",
-	                        "transfer 1 a b 0 units nonsense:3\n", "explode 1\n"};
+	const char *broken[] = {"transfer 9 a b 7 units 1 tank:1\n", "delivered 42\n", "draw 1 0 z tank:5\n",
+	                        "transfer 1 a b 0 units 1 nonsense:3\n", "explode 1\n", "transfer 1 a b 0 units\n"};
 	for (int k = 0; k < (int)countof(broken); k++) {
 		Ledger *x = PUSH(&a, Ledger, 1);
 		CHECK(!ledger_replay(x, (Str){broken[k], (ptrdiff_t)strlen(broken[k])}, &bad));
@@ -770,8 +772,144 @@ static void test_gates(void)
 	CHECK(server.factions[0].stats.units_arrived == 3 && raiders == 3);
 	CHECK(gates == 2);                       // the seed unfolded beside the first
 	CHECK(matched);
+	// A zone with gates (charged ones included) saves and loads.
+	ByteBuf snap = bytebuf_make(&a, 4 << 20);
+	sim_save(&server, &snap);
+	Sim loaded;
+	sim_init(&loaded, sc.config);
+	ByteReader sr = byte_reader(snap.data, snap.len);
+	CHECK(sim_load(&loaded, &sr) && sim_hash_now(&loaded).v == sim_hash_now(&server).v);
+	sim_destroy(&loaded);
 	sim_destroy(&server);
 	sim_destroy(&client);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+}
+
+// A zone saved and resumed is the same zone: a loaded sim steps exactly as
+// the original, a replay segment from the snapshot verifies, and a damaged
+// snapshot is refused.
+static void test_snapshot(void)
+{
+	Arena a = arena_create("snapshot", (ptrdiff_t)128 << 20);
+	Arena tick = arena_create("snapshot tick", 16 << 20);
+	SimConfig config = small_config(21);
+	Sim original, resumed;
+	sim_init(&original, config);
+	Bot bots[FACTION_COUNT];
+	for (int k = 0; k < FACTION_COUNT; k++) bots[k] = bot_create((FactionId){(uint32_t)k}, 21);
+	Command cmds[64];
+	for (int t = 0; t < 650; t++) { // into the fighting: shells in flight, units dead
+		arena_reset(&tick);
+		ptrdiff_t n = 0;
+		for (int k = 0; k < FACTION_COUNT; k++) bot_think(&bots[k], &original, &tick, cmds, &n, countof(cmds));
+		sim_step(&original, cmds, n);
+	}
+	ByteBuf snap = bytebuf_make(&a, 8 << 20);
+	sim_save(&original, &snap);
+	sim_init(&resumed, config);
+	ByteReader r = byte_reader(snap.data, snap.len);
+	CHECK(sim_load(&resumed, &r) && r.pos == r.len);
+	CHECK(sim_hash_now(&resumed).v == sim_hash_now(&original).v);
+
+	// Record the resumed run as a segment while checking it keeps step.
+	Arena file = arena_create("segment", 16 << 20);
+	ReplayWriter w;
+	replay_begin_from(&w, &file, config, (Str){(const char *)snap.data, snap.len});
+	bool same = true;
+	for (int t = 0; t < 300; t++) {
+		arena_reset(&tick);
+		ptrdiff_t n = 0;
+		for (int k = 0; k < FACTION_COUNT; k++) bot_think(&bots[k], &original, &tick, cmds, &n, countof(cmds));
+		Tick at = original.tick;
+		sim_step(&original, cmds, n);
+		sim_step(&resumed, cmds, n);
+		replay_tick(&w, at, cmds, n, sim_hash_now(&resumed));
+		same = same && sim_hash_now(&resumed).v == sim_hash_now(&original).v;
+	}
+	CHECK(same);
+	CHECK(original.factions[0].stats.units_lost + original.factions[1].stats.units_lost > 0);
+
+	ReplayReader rr;
+	CHECK(replay_open(&rr, replay_bytes(&w)) == REPLAY_OK && rr.snapshot.len == snap.len);
+	Sim again;
+	CHECK(replay_start(&rr, &again));
+	Arena decode = arena_create("decode", 4 << 20);
+	bool verified = true;
+	int ticks = 0;
+	for (;;) {
+		arena_reset(&decode);
+		Tick t;
+		Command *rc;
+		ptrdiff_t n;
+		Hash want;
+		if (replay_next(&rr, &decode, &t, &rc, &n, &want) != REPLAY_OK) break;
+		verified = verified && t.v == again.tick.v;
+		sim_step(&again, rc, n);
+		verified = verified && sim_hash_now(&again).v == want.v;
+		ticks++;
+	}
+	CHECK(verified && ticks == 300);
+
+	// Damaged snapshots: refused or loaded, never a crash.
+	uint8_t *copy = PUSH(&a, uint8_t, snap.len);
+	Rng rng = rng_seed(3);
+	int refused = 0;
+	for (int k = 0; k < 120; k++) {
+		memcpy(copy, snap.data, (size_t)snap.len);
+		for (int f = 0; f < 3; f++) copy[rng_below(&rng, (uint32_t)snap.len)] ^= 0x33;
+		Sim scratch;
+		sim_init(&scratch, config);
+		ByteReader cr = byte_reader(copy, k % 3 ? snap.len : (ptrdiff_t)rng_below(&rng, (uint32_t)snap.len));
+		refused += !sim_load(&scratch, &cr);
+		sim_destroy(&scratch);
+	}
+	CHECK(refused > 0);
+	sim_destroy(&again);
+	sim_destroy(&original);
+	sim_destroy(&resumed);
+	arena_destroy(&decode);
+	arena_destroy(&file);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+}
+
+// Logging out and in: units entrench as turrets, which hold a line, and
+// mobilize back into what they were.
+static void test_entrench(void)
+{
+	const char *text =
+		"scenario skirmish\n"
+		"units 0\n"
+		"bot blue off\n"
+		"bot red off\n"
+		"at 0 spawn blue tank 10 at 200,256 radius 6\n"
+		"at 0 spawn red raider 20 at 236,256 radius 6\n"  // inside a turret's reach, outside a raider's
+		"at 1 entrench blue\n"
+		"at 2 expect blue turrets == 10\n"
+		"at 2 expect blue tanks == 0\n"
+		"at 600 expect red lost >= 10\n"
+		"at 600 expect blue lost == 0\n"
+		"at 601 mobilize blue\n"
+		"at 602 expect blue turrets == 0\n"
+		"at 602 expect blue tanks == 10\n";
+	Arena a = arena_create("entrench", 32 << 20);
+	Script sc;
+	char err[512];
+	CHECK(script_parse(&sc, &a, (Str){text, (ptrdiff_t)strlen(text)}, "t.script", err, sizeof err));
+	Sim sim;
+	sim_init(&sim, sc.config);
+	ScriptRun run;
+	script_run_init(&run, &sc, &a, stderr);
+	Arena tick = arena_create("tick", 8 << 20);
+	Command cmds[32];
+	while (sim.tick.v < 610) {
+		arena_reset(&tick);
+		ptrdiff_t n = script_tick(&run, &sim, &tick, cmds, countof(cmds));
+		sim_step(&sim, cmds, n);
+	}
+	CHECK(run.expects == 6 && run.failures == 0);
+	sim_destroy(&sim);
 	arena_destroy(&tick);
 	arena_destroy(&a);
 }
@@ -795,6 +933,8 @@ static const Test tests[] = {
 	{"build_orders", test_build_orders},
 	{"ledger", test_ledger},
 	{"gates", test_gates},
+	{"snapshot", test_snapshot},
+	{"entrench", test_entrench},
 };
 
 // tests            run all, in order

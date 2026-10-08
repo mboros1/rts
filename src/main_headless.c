@@ -2,7 +2,8 @@
 //
 //   rts-headless bench  [ticks] [units]  time the sim with bots on both sides
 //   rts-headless record PATH [ticks] [units]  run bots and record a replay
-//   rts-headless verify PATH             replay and compare every tick's hash
+//   rts-headless verify PATH [--partial] replay and compare every tick's hash;
+//                                         --partial accepts a crash-cut tail
 //   rts-headless script PATH...          run scripts and their expectations
 //   rts-headless wire [ticks] [units]    bytes a spectator would receive
 //   rts-headless split [ticks] [units]   both factions simulated as clients from
@@ -134,7 +135,7 @@ static int cmd_record(const char *path, long ticks, long units)
 	return 0;
 }
 
-static int cmd_verify(const char *path)
+static int cmd_verify(const char *path, bool partial)
 {
 	Arena file = arena_create("replay file", (ptrdiff_t)1 << 30);
 	Arena decode = arena_create("replay decode", (ptrdiff_t)64 << 20);
@@ -150,8 +151,13 @@ static int cmd_verify(const char *path)
 		return 1;
 	}
 	Sim sim;
-	sim_init(&sim, r.config);
+	if (!replay_start(&r, &sim)) {
+		fprintf(stderr, "%s: its snapshot doesn't load\n", path);
+		return 1;
+	}
 	int64_t ticks = 0;
+	int64_t start_tick = sim.tick.v;
+	Hash start_hash = sim_hash_now(&sim);
 	for (;;) {
 		arena_reset(&decode);
 		Tick tick;
@@ -159,7 +165,7 @@ static int cmd_verify(const char *path)
 		ptrdiff_t n;
 		Hash want;
 		st = replay_next(&r, &decode, &tick, &cmds, &n, &want);
-		if (st == REPLAY_END) break;
+		if (st == REPLAY_END || (partial && st == REPLAY_TRUNCATED)) break;
 		if (st != REPLAY_OK) {
 			fprintf(stderr, "%s: %s at byte %td\n", path, replay_status_name(st), r.pos);
 			return 1;
@@ -180,6 +186,8 @@ static int cmd_verify(const char *path)
 	}
 	printf("verified %lld ticks of %s: every hash matches, final %016llx\n", (long long)ticks,
 	       path, (unsigned long long)sim_hash_now(&sim).v);
+	printf("segment from tick %lld (%016llx) to tick %lld (%016llx)\n", (long long)start_tick,
+	       (unsigned long long)start_hash.v, (long long)sim.tick.v, (unsigned long long)sim_hash_now(&sim).v);
 	sim_destroy(&sim);
 	return 0;
 }
@@ -334,7 +342,7 @@ int main(int argc, char **argv)
 	if (!strcmp(cmd, "record") && argc > 2)
 		return cmd_record(argv[2], parse_long(argc > 3 ? argv[3] : nullptr, 1800),
 		                  parse_long(argc > 4 ? argv[4] : nullptr, 5000));
-	if (!strcmp(cmd, "verify") && argc > 2) return cmd_verify(argv[2]);
+	if (!strcmp(cmd, "verify") && argc > 2) return cmd_verify(argv[2], argc > 3 && !strcmp(argv[3], "--partial"));
 	if (!strcmp(cmd, "script") && argc > 2) return cmd_script(argc - 2, argv + 2);
 	if (!strcmp(cmd, "split")) return cmd_split(parse_long(argc > 2 ? argv[2] : nullptr, 1800),
 	                                           parse_long(argc > 3 ? argv[3] : nullptr, 5000));

@@ -11,6 +11,7 @@
 #   make demos      render demos/*.script whose clip is missing or stale
 #   make demos-restore   re-render demo videos that are only LFS pointers
 #   make share DEMO=NAME   full-quality copy of a demo, on the clipboard
+#   make soak MINUTES=N   zones, a coordinator and a player under random kills
 
 CC      := clang
 GCC     := gcc-15
@@ -32,7 +33,7 @@ SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
 # The zone smoke test drives these through processes; rebuild them together.
 
-.PHONY: demos-rerender all setup check check-zones check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 cross clips demos demos-restore share clean
+.PHONY: demos-rerender all setup check check-zones check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 soak cross clips demos demos-restore share clean
 
 all: $(B)/rts $(B)/rts-headless $(B)/rts-server $(B)/rts-coord
 
@@ -148,6 +149,13 @@ determinism-x86:
 	$(X86)/headless-x86_64 record $(X86)/x86.replay 1800 5000
 	$(X86)/headless-arm64 verify $(X86)/x86.replay
 	@echo "== arm64 and x86-64 agree on every tick"
+
+# Persistence under chaos: alpha and the coordinator are SIGKILLed at random
+# while units cross between zones and a player logs in and out. Checks no unit
+# is lost or duplicated, replay segments chain, and beta's memory stays flat.
+MINUTES ?= 5
+soak: all
+	@$(S) "soak: $(MINUTES) min" python3 tools/soak.py $(B) $(B)/soak --minutes $(MINUTES)
 
 CROSS := $(B)/cross
 cross: $(B)/rts-headless

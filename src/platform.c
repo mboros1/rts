@@ -121,6 +121,21 @@ bool platform_read_file(Arena *arena, const char *path, Str *out)
 	return true;
 }
 
+bool platform_write_file_atomic(const char *path, const void *data, ptrdiff_t len)
+{
+	char tmp[4096];
+	int n = snprintf(tmp, sizeof tmp, "%s.tmp", path);
+	if (n <= 0 || n >= (int)sizeof tmp) return false;
+	FILE *f = fopen(tmp, "wb");
+	if (!f) return false;
+	bool ok = fwrite(data, 1, (size_t)len, f) == (size_t)len && fflush(f) == 0;
+#ifndef _WIN32
+	ok = ok && fsync(fileno(f)) == 0;
+#endif
+	ok = (fclose(f) == 0) && ok;
+	return ok && rename(tmp, path) == 0;
+}
+
 bool platform_write_file(const char *path, const void *data, ptrdiff_t len)
 {
 	FILE *f = fopen(path, "wb");

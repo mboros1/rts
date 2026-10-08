@@ -221,6 +221,14 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		a->flags = 0xff; // marks an arrival rather than a spawn
 		return true;
 	}
+	if (!strcmp(verb, "entrench") || !strcmp(verb, "mobilize")) {
+		// entrench SIDE | mobilize SIDE: what logging out and back in do
+		if (n != 2) return bad(p, "entrench|mobilize SIDE", nullptr);
+		if (!(a = new_action(p, tick, ACTION_SPAWN, text))) return bad(p, "too many actions", nullptr);
+		if (!parse_side(tok[1], &a->side)) return bad(p, "side is blue or red", tok[1]);
+		a->flags = !strcmp(verb, "entrench") ? 0xfe : 0xfd;
+		return true;
+	}
 	if (!strcmp(verb, "spawn")) {
 		// spawn SIDE TYPE N at X,Z [radius R]
 		if (n != 6 && n != 8) return bad(p, "spawn SIDE TYPE N at X,Z [radius R]", nullptr);
@@ -252,7 +260,8 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		                               "metal", "energy", "metal_income", "energy_income",
 		                               "", "departed", "arrived"};
 		static const char *counts[UNIT_TYPE_COUNT] = {"raiders", "tanks", "artillery", "engineers",
-		                                              "extractors", "generators", "factories", "gates"};
+		                                              "extractors", "generators", "factories", "gates",
+		                                              "turrets"};
 		static const char *ops[] = {"<", "<=", ">", ">=", "==", "!="};
 		int f = -1, o = -1;
 		for (int k = 0; k < (int)countof(fields); k++) if (!strcmp(tok[2], fields[k])) f = k;
@@ -644,6 +653,10 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			break;
 		case ACTION_SPAWN:
 			if (n == cap) break;
+			if (a->flags == 0xfe || a->flags == 0xfd) {
+				out[n++] = (Command){.faction = a->side, .kind = a->flags == 0xfe ? COMMAND_ENTRENCH : COMMAND_MOBILIZE};
+				break;
+			}
 			if (a->flags == 0xff) {
 				out[n++] = (Command){.faction = a->side, .kind = COMMAND_ARRIVE, .unit_type = (UnitType)a->type,
 				                     .amount = a->limit};

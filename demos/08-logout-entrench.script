@@ -1,0 +1,37 @@
+title Spike 6: logging out entrenches
+about Blue's player logs out: the army digs in as turrets and holds the line against red's waves. They log back in: the turrets mobilize and push.
+
+scenario skirmish
+units 0
+respawn off
+bot blue off
+bot red off
+clip 0..1200
+camera 250,256 110
+
+# Blue holds a line of tanks. The player logs out at 2 s: the server
+# entrenches them (logout policy "entrench"), and turrets outrange raiders
+# and tanks alike.
+at 0    spawn blue tank 12 at 210,256 radius 8
+at 60   entrench blue
+
+# Red's waves, from the east, while nobody is at the controls.
+at 90   spawn red raider 12 at 330,240 radius 8
+at 90   spawn red tank 3 at 285,272 radius 6
+at 92   select red any within 60 of 310,256 as wave1
+at 93   attack-move wave1 200,256
+at 450  spawn red raider 12 at 330,240 radius 8
+at 450  spawn red tank 3 at 285,272 radius 6
+at 452  select red any within 60 of 310,256 as wave2
+at 453  attack-move wave2 200,256
+
+# The player is back: the turrets turn into tanks again and go after what's left.
+at 840  mobilize blue
+at 842  select blue tank as army
+at 843  attack-move army 330,256
+
+at 62   expect blue turrets == 12
+at 830  expect blue lost <= 4        # observed 3 of 12
+at 830  expect red lost >= 24        # observed 26 of 30, before blue is back
+at 1190 expect blue tanks >= 7       # observed 8
+at 1190 expect red units == 0

@@ -44,6 +44,12 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.name = "gate", .radius = 5.0f, .sight = 30.0f, .height = 6.0f, .hp = 2500.0f,
 		.metal_cost = 600.0f, .energy_cost = 6000.0f, .build_time = 600.0f,
 	},
+	// Outranges the units it's made from, and is sturdier: a held line.
+	[UNIT_TURRET] = {
+		.name = "turret", .radius = 1.6f, .sight = 34.0f, .height = 2.2f, .hp = 360.0f,
+		.range = 38.0f, .reload = 24, .shell_speed = 46.0f, .damage = 30.0f, .splash = 1.0f, .spread = 0.6f,
+		.metal_cost = 120.0f, .energy_cost = 900.0f, .build_time = 120.0f,
+	},
 };
 
 static constexpr float MAX_SIGHT = 48.0f;
@@ -472,6 +478,28 @@ static ptrdiff_t nearest_gate(const Faction *f, V2 at, float within)
 	return best;
 }
 
+// Logging out and back in: combat units become turrets where they stand, or
+// entrenched turrets become what they were. In place, so handles survive and
+// a returning player's selections still work. Health keeps its proportion.
+static void entrench(Faction *f, bool dig_in)
+{
+	Units *u = &f->units;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		UnitType from = u->type[i];
+		bool unit = dig_in && unit_is_combat(from);
+		bool turret = !dig_in && from == UNIT_TURRET && u->seeded[i];
+		if (!unit && !turret) continue;
+		UnitType to = unit ? UNIT_TURRET : u->build_type[i];
+		u->hp[i] *= unit_defs[to].hp / unit_defs[from].hp;
+		u->type[i] = to;
+		u->build_type[i] = unit ? from : UNIT_EXTRACTOR;
+		u->seeded[i] = unit;
+		u->order[i] = ORDER_IDLE;
+		u->vx[i] = u->vz[i] = 0.0f;
+		u->cooldown[i] = 0;
+	}
+}
+
 // A gate fires a seed when it's charged and the energy is there.
 static void apply_seed(Faction *f, const Sim *sim, const Command *c)
 {
@@ -536,6 +564,10 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		return;
 	}
 	if (c->kind == COMMAND_DRAW) return; // for the zone server, which asks the pool
+	if (c->kind == COMMAND_ENTRENCH || c->kind == COMMAND_MOBILIZE) {
+		entrench(f, c->kind == COMMAND_ENTRENCH);
+		return;
+	}
 	ptrdiff_t gate = -1;
 	if (c->kind == COMMAND_GATE && (gate = nearest_gate(f, c->target, 30.0f)) < 0) return;
 	if (c->kind == COMMAND_BUILD && !unit_is_structure(c->unit_type)) return;
@@ -1556,7 +1588,8 @@ bool faction_read(Faction *f, ByteReader *r)
 		u->seeded[i] = get8(r);
 		if (type >= UNIT_TYPE_COUNT || order >= ORDER_KIND_COUNT || u->engaged[i] > 1 || u->cooldown[i] < 0
 		    || build_type >= UNIT_TYPE_COUNT || u->queue_len[i] > FACTORY_QUEUE || u->repeat[i] > 1 || u->seeded[i] > 1
-		    || !(u->progress[i] >= 0.0f && u->progress[i] <= 1.0f) || !(u->work[i] >= 0.0f && u->work[i] < 1.0f))
+		    // work: a factory item's progress, below 1; a gate's charge, up to 1.
+		    || !(u->progress[i] >= 0.0f && u->progress[i] <= 1.0f) || !(u->work[i] >= 0.0f && u->work[i] <= 1.0f))
 			return false;
 		for (int q = 0; q < u->queue_len[i]; q++)
 			if ((u->queue[i] >> (8 * q) & 0xff) >= UNIT_EXTRACTOR) return false;
@@ -1636,5 +1669,31 @@ bool faction_read(Faction *f, ByteReader *r)
 		seen->type[s] = (UnitType)type;
 		seen->live[s] = 1;
 	}
+	return !r->bad;
+}
+
+// ---------------------------------------------------------------- zone snapshots
+
+void sim_save(const Sim *sim, ByteBuf *b)
+{
+	put32(b, 0x5a4d4953u); // "SIMZ"
+	put64(b, (uint64_t)sim->tick.v);
+	for (int k = 0; k < MAX_SPOTS; k++) put8(b, (uint8_t)sim->spot_owner[k]);
+	for (int f = 0; f < FACTION_COUNT; f++) faction_write(&sim->factions[f], b);
+}
+
+bool sim_load(Sim *sim, ByteReader *r)
+{
+	if (get32(r) != 0x5a4d4953u) return false;
+	int64_t tick = (int64_t)get64(r);
+	if (r->bad || tick < 0) return false;
+	sim->tick.v = tick;
+	for (int k = 0; k < MAX_SPOTS; k++) {
+		int8_t o = (int8_t)get8(r);
+		if (o < -1 || o >= FACTION_COUNT) return false;
+		sim->spot_owner[k] = o;
+	}
+	for (int f = 0; f < FACTION_COUNT; f++)
+		if (!faction_read(&sim->factions[f], r)) return false;
 	return !r->bad;
 }

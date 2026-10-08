@@ -105,13 +105,20 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 		break;
 	}
 	case COORD_DEPART: {
+		uint64_t seq = get64(&r);
 		uint8_t faction = get8(&r);
 		bool ok = get_name(&r, name);
 		uint8_t seed = get8(&r);
 		if (!from || !ok || faction >= FACTION_COUNT || !get_counts(&r, counts)) break;
-		Transfer *t = ledger_depart(&c->ledger, from->name, name, faction, seed, counts);
-		printf("coord: transfer %llu %s -> %s (faction %u%s)\n", (unsigned long long)t->id, from->name, name,
-		       faction, seed ? ", a gate seed" : "");
+		Transfer *t = ledger_depart(&c->ledger, from->name, seq, name, faction, seed, counts);
+		if (t) printf("coord: transfer %llu %s -> %s (faction %u%s)\n", (unsigned long long)t->id, from->name, name,
+		              faction, seed ? ", a gate seed" : "");
+		else printf("coord: %s re-sent departure %llu, already logged\n", from->name, (unsigned long long)seq);
+		// Logged now, or before: either way the zone can forget it.
+		arena_reset(&c->out);
+		ByteBuf b = bytebuf_make(&c->out, 16);
+		put64(&b, seq);
+		send_to(c, p, COORD_DEPART_ACK, &b, now);
 		break;
 	}
 	case COORD_DRAW: {
