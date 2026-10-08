@@ -97,6 +97,10 @@ void put_zone_status(ByteBuf *b, const ZoneStatus *s)
 		put16(b, s->units[f]);
 		put16(b, s->structures[f]);
 		put8(b, s->transporters[f]);
+		put8(b, s->intel[f].contact);
+		put32(b, s->intel[f].seen_age);
+		put8(b, s->intel[f].transporters);
+		put32(b, s->intel[f].transporter_age);
 	}
 }
 
@@ -107,6 +111,12 @@ bool get_zone_status(ByteReader *r, ZoneStatus *s)
 		s->units[f] = get16(r);
 		s->structures[f] = get16(r);
 		s->transporters[f] = get8(r);
+		uint8_t contact = get8(r);
+		s->intel[f].seen_age = get32(r);
+		s->intel[f].transporters = get8(r);
+		s->intel[f].transporter_age = get32(r);
+		if (contact > 1) return false;
+		s->intel[f].contact = contact;
 	}
 	return !r->bad && s->tick >= 0;
 }
@@ -192,9 +202,14 @@ void directory_print(const Directory *d, FILE *out)
 		if (z->reported) {
 			int64_t secs = z->status.tick / (int64_t)SIM_HZ;
 			fprintf(out, " %lld:%02lld:%02lld ", (long long)(secs / 3600), (long long)(secs / 60 % 60), (long long)(secs % 60));
-			for (int f = 0; f < FACTION_COUNT; f++)
+			for (int f = 0; f < FACTION_COUNT; f++) {
+				const Intel *in = &z->status.intel[f];
 				fprintf(out, "%s %s %d units %d bldg %d transporters", f ? " |" : "", f ? "red" : "blue", z->status.units[f],
 				        z->status.structures[f], z->status.transporters[f]);
+				if (in->contact) fprintf(out, " (contact)");
+				else if (in->seen_age != INTEL_NEVER) fprintf(out, " (saw them %us ago)", in->seen_age);
+				if (in->transporters) fprintf(out, " (saw %u of their transporters %us ago)", in->transporters, in->transporter_age);
+			}
 		}
 		fprintf(out, "\n");
 	}
@@ -217,17 +232,42 @@ void bot_world_build(BotWorld *w, const Directory *d, int here, uint8_t f)
 	for (int z = 0; z < w->count; z++) {
 		const DirectoryZone *dz = &d->zones[z];
 		w->home[z] = dz->home == f;
+		w->seen_age[z] = w->transporter_age[z] = BOT_NEVER;
 		if (!dz->reported) continue;
+		const Intel *in = &dz->status.intel[f];
 		w->ours[z] = dz->status.transporters[f] > 0;
 		w->mine[z] = dz->status.units[f] + 2 * dz->status.structures[f];
-		w->theirs[z] = dz->status.units[1 - f] + 2 * dz->status.structures[1 - f];
+		w->contact[z] = in->contact;
+		w->seen_age[z] = in->seen_age;
+		w->transporter_age[z] = in->transporters ? in->transporter_age : BOT_NEVER;
 	}
+}
+
+void bot_world_links(BotWorld *w, const Directory *d)
+{
 	for (int k = 0; k < d->link_count; k++) {
 		int a = d->links[k][0], b = d->links[k][1];
 		if (a >= w->count || b >= w->count) continue;
-		if (a == here) w->linked[b] = true;
-		if (b == here) w->linked[a] = true;
-		if (w->theirs[a] > 0) w->neighbours_enemy[b] = true;
-		if (w->theirs[b] > 0) w->neighbours_enemy[a] = true;
+		if (a == w->here) w->linked[b] = true;
+		if (b == w->here) w->linked[a] = true;
+		if (bot_believes_enemy(w, a)) w->neighbours_enemy[b] = true;
+		if (bot_believes_enemy(w, b)) w->neighbours_enemy[a] = true;
 	}
+}
+
+void directory_fog(Directory *d, uint8_t viewer)
+{
+	if (viewer >= FACTION_COUNT) return;
+	uint8_t enemy = (uint8_t)(1 - viewer);
+	for (int k = 0; k < d->zone_count; k++) {
+		ZoneStatus *s = &d->zones[k].status;
+		s->units[enemy] = 0;
+		s->structures[enemy] = 0;
+		s->transporters[enemy] = 0;
+		s->intel[enemy] = (Intel){.seen_age = INTEL_NEVER, .transporter_age = INTEL_NEVER};
+	}
+	int kept = 0;
+	for (int k = 0; k < d->transit_count; k++)
+		if (d->transit[k].faction == viewer) d->transit[kept++] = d->transit[k];
+	d->transit_count = kept;
 }

@@ -2,7 +2,8 @@
 # tools/world-smoke BIN_DIR OUT_DIR: the game as a player gets it, through
 # `rts world`. Checks that:
 #   - a new world starts its coordinator and zones in the background, and the
-#     map (as text) shows every zone up and reporting;
+#     map (as text) shows every zone up and reporting, and blue's map shows
+#     nothing of red's numbers (fog);
 #   - a player's journey (map, a zone, the map, another zone) keeps its
 #     faction in step, with the bot playing as that player;
 #   - stopping saves every zone and the world continues where it was;
@@ -27,6 +28,11 @@ for i in 1 2 3 4 5 6 7 8 9 10; do # until every zone has reported
 done
 [ "$(grep -c ' up ' "$out/status1.txt")" = 3 ] || fail "not all three zones up: $(cat "$out/status1.txt")"
 grep -q 'links: west-middle middle-east' "$out/status1.txt" || fail "no links on the map"
+# Fog: blue's map has nothing of red's numbers, even in red's home.
+grep '^east ' "$out/status1.txt" | grep -q 'red 0 units 0 bldg' && fail "red's home looks empty to a spectator"
+$world --status --as blue > "$out/status-blue.txt"
+grep '^east ' "$out/status-blue.txt" | grep -q 'red 0 units 0 bldg 0 transporters' \
+	|| fail "blue's map shows red's numbers: $(grep '^east ' "$out/status-blue.txt")"
 
 "$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --bot --journey map:0.5,west:2.5,map:0.5,middle:2 \
 	--netlog "$out/journey.netlog" --stats "$out/journey.txt" > "$out/journey.out" 2>&1 || fail "the journey failed"

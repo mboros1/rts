@@ -38,6 +38,7 @@ typedef enum : uint8_t {
 	UNIT_TANK,
 	UNIT_ARTILLERY,
 	UNIT_ENGINEER,      // builds structures; unarmed
+	UNIT_SCOUT,         // fast, sees far; unarmed: intel
 	UNIT_EXTRACTOR,     // structures: never move
 	UNIT_GENERATOR,
 	UNIT_FACTORY,
@@ -406,7 +407,7 @@ static constexpr float UNPAIRED_ENERGY = 4000.0f;
 static constexpr float UNPAIRED_ENERGY_PER = 400.0f;
 static constexpr int32_t UNPAIRED_BATCH = 8;
 static constexpr float SEND_REACH = 7.0f;   // beyond the transporter's radius
-static inline bool unpaired_can_send(UnitType t) { return t == UNIT_RAIDER || t == UNIT_ENGINEER; }
+static inline bool unpaired_can_send(UnitType t) { return t == UNIT_RAIDER || t == UNIT_ENGINEER || t == UNIT_SCOUT; }
 
 // Each side lands unpaired sends in its own strip of a zone: blue the west
 // STRIP of the map's width, red the east. The rest is contested.

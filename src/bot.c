@@ -8,7 +8,6 @@ Bot bot_create(FactionId faction, uint64_t seed)
 		.period = 30,
 		.group_size = 128,
 		.enabled = true,
-		.enemy_since = -1,
 	};
 }
 
@@ -79,7 +78,7 @@ static bool own_transporter(const Units *u, bool finished_only)
 	return false;
 }
 
-enum { BOT_ARMY_CAP = 300 };
+enum { BOT_ARMY_CAP = 300, SCOUTS_WANTED = 2 };
 
 // An economy, kept simply: factories cycle a mix of units (with engineers
 // while there are too few); idle engineers take the most useful job.
@@ -89,9 +88,10 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	const Faction *me = &sim->factions[f.v];
 	const Units *u = &me->units;
 	const Economy *e = &me->economy;
-	int engineers = 0, factories = 0, army = 0;
+	int engineers = 0, factories = 0, army = 0, scouts = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		engineers += u->type[i] == UNIT_ENGINEER;
+		scouts += u->type[i] == UNIT_SCOUT;
 		factories += u->type[i] == UNIT_FACTORY;
 		army += unit_is_combat(u->type[i]);
 	}
@@ -104,15 +104,19 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (u->type[i] != UNIT_FACTORY || u->progress[i] < 1.0f) continue;
 		bool short_handed = engineers < want_engineers;
+		bool want_scout = bot->world && scouts < SCOUTS_WANTED;
 		bool want_army = !opening && army < BOT_ARMY_CAP; // enough here: spend it first
 		bool has_army = queue_has(u, i, UNIT_RAIDER);
-		if (u->queue_len[i] > 0 && queue_has(u, i, UNIT_ENGINEER) == short_handed && has_army == want_army) continue;
-		if (u->queue_len[i] == 0 && !short_handed && !want_army) continue;
+		if (u->queue_len[i] > 0 && queue_has(u, i, UNIT_ENGINEER) == short_handed && has_army == want_army
+		    && queue_has(u, i, UNIT_SCOUT) == want_scout)
+			continue;
+		if (u->queue_len[i] == 0 && !short_handed && !want_army && !want_scout) continue;
 		UnitHandle *h = PUSH(arena, UnitHandle, 1);
 		*h = units_handle(u, i);
 		Command c = {.faction = f, .kind = COMMAND_PRODUCE, .count = 1, .units = h, .flags = COMMAND_REPEAT};
 		const struct { UnitType type; int32_t amount; } mix[] = {
 			{UNIT_ENGINEER, short_handed ? 1 : 0},
+			{UNIT_SCOUT, want_scout ? 1 : 0},
 			{UNIT_RAIDER, want_army ? 2 : 0},
 			{UNIT_TANK, want_army ? 1 : 0},
 			{UNIT_ARTILLERY, want_army ? 1 : 0},
@@ -192,14 +196,16 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 }
 
 enum { STRATEGY_PERIOD = 300, GARRISON = 10, SEND_MIN = 12, CREW_ENGINEERS = 4, CREW_RAIDERS = 4, ASSAULT_ARMY = 40,
-       FRONT_MARGIN = 100, HUNT_AFTER = 1800 };
+       FRONT_MARGIN = 100, HUNT_RECENT = 120, RECON_STALE = 300 };
 
 
-// How far forward a zone of ours is: where the enemy is, then next to them;
-// the weaker we are there, the more it needs.
+// How far forward a zone of ours is: where we see the enemy, then where
+// we've seen a transporter of theirs, then next to a zone we believe is
+// theirs; the weaker we are there, the more it needs.
 static int32_t front_score(const BotWorld *w, int z)
 {
-	return (w->theirs[z] > 0 ? 100000 : 0) + (w->neighbours_enemy[z] ? 50000 : 0) - w->mine[z];
+	return (w->contact[z] ? 100000 : 0) + (w->transporter_age[z] < 1800 ? 80000 : 0)
+	     + (w->neighbours_enemy[z] ? 50000 : 0) - w->mine[z];
 }
 
 // The map: a transporter here, crews to open empty neighbours, surplus to
@@ -213,14 +219,16 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	const Economy *e = &me->economy;
 	int here = w->here;
 	bool sending = false;
-	int32_t idle_army = 0, idle_engineers = 0;
+	int32_t idle_army = 0, idle_engineers = 0, scouts = 0;
+	ptrdiff_t idle_scout = -1;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		sending = sending || u->order[i] == ORDER_SEND;
 		bool idle = u->order[i] == ORDER_IDLE && !u->engaged[i];
 		idle_army += idle && unit_is_combat(u->type[i]);
 		idle_engineers += idle && u->type[i] == UNIT_ENGINEER;
+		scouts += u->type[i] == UNIT_SCOUT;
+		if (u->type[i] == UNIT_SCOUT && u->order[i] != ORDER_SEND) idle_scout = i; // patrolling will do
 	}
-	int32_t theirs_here = w->theirs[here];
 
 	// No transporter here: build one, with an idle engineer, once it's affordable.
 	if (!own_transporter(u, false)) {
@@ -247,7 +255,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	if (idle_engineers > CREW_ENGINEERS && e->energy >= crew_energy) {
 		int target = -1;
 		for (int z = 0; z < w->count; z++)
-			if (z != here && w->linked[z] && !w->ours[z] && w->theirs[z] == 0 && (target < 0 || rng_below(&bot->rng, 2)))
+			if (z != here && w->linked[z] && !w->ours[z] && !bot_believes_enemy(w, z) && (target < 0 || rng_below(&bot->rng, 2)))
 				target = z;
 		for (int z = 0; z < w->count && target < 0 && idle_army >= ASSAULT_ARMY; z++)
 			if (z != here && w->linked[z] && !w->ours[z]) target = z;
@@ -264,11 +272,24 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		}
 	}
 
+	// Recon: a scout, unpaired, to a neighbour we know nothing fresh about
+	// and hold no transporter in. One stays home.
+	if (idle_scout >= 0 && scouts > 1 && e->energy >= UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER) {
+		for (int z = 0; z < w->count; z++) {
+			if (z == here || !w->linked[z] || w->ours[z] || w->contact[z]) continue;
+			if (w->seen_age[z] != BOT_NEVER && w->seen_age[z] < RECON_STALE) continue;
+			UnitHandle *h = PUSH(arena, UnitHandle, 1);
+			*h = units_handle(u, idle_scout);
+			emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_SEND, .amount = z, .count = 1, .units = h});
+			return;
+		}
+	}
+
 	// Send what can be spared toward the fight: a zone of ours where the
 	// enemy is (a beachhead, or one under attack) first, then one next to
 	// them; only ever to a zone further forward than this one, so a front
 	// holds and a beachhead draws the army behind it.
-	if (theirs_here > 0 && !w->neighbours_enemy[here]) return; // a fight here: everyone stays
+	if (w->contact[here] && !w->neighbours_enemy[here]) return; // a fight here: everyone stays
 	int32_t spare = idle_army - GARRISON;
 	if (spare < SEND_MIN) return;
 	int target = -1;
@@ -290,6 +311,22 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_SEND, .amount = target, .count = n, .units = h});
 }
 
+// Idle scouts wander the zone, the enemy's side of it most: our eyes.
+static void bot_patrol(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *count, ptrdiff_t cap)
+{
+	const Units *u = &sim->factions[bot->faction.v].units;
+	const Terrain *t = &sim->terrain;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] != UNIT_SCOUT || u->order[i] != ORDER_IDLE) continue;
+		float x = rng_range(&bot->rng, 0.15f, 0.95f);
+		if (bot->faction.v == 1) x = 1.0f - x;
+		UnitHandle *h = PUSH(arena, UnitHandle, 1);
+		*h = units_handle(u, i);
+		emit(out, count, cap, (Command){.faction = bot->faction, .kind = COMMAND_MOVE, .count = 1, .units = h,
+		                                .target = v2(x * t->size_x, rng_range(&bot->rng, 0.05f, 0.95f) * t->size_z)});
+	}
+}
+
 // Every period: run the economy if there is one, and send idle combat units
 // in groups to attack-move on the enemy base from a random angle (in a
 // world, only once we see an enemy). Every STRATEGY_PERIOD, on
@@ -304,16 +341,13 @@ void bot_think(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *
 	const Faction *f = &sim->factions[bot->faction.v];
 	const Faction *enemy = &sim->factions[faction_enemy(bot->faction).v];
 	const Units *u = &f->units;
-	// In a world, attack an enemy we can see. One we only know is here we go
-	// looking for once it has been here a while (HUNT_AFTER), if we're the
-	// stronger: a landing nobody has spotted gets its chance to dig in.
+	// In a world, attack an enemy we see, or go after one seen here lately
+	// that slipped out of sight. A landing nobody has spotted gets its
+	// chance: scouts are how it gets spotted.
 	const BotWorld *w = bot->world;
 	if (w) {
-		if (w->theirs[w->here] == 0) bot->enemy_since = -1;
-		else if (bot->enemy_since < 0) bot->enemy_since = sim->tick.v;
-		bool hunt = bot->enemy_since >= 0 && sim->tick.v - bot->enemy_since >= HUNT_AFTER
-		         && w->mine[w->here] > w->theirs[w->here];
-		if (f->view.count == 0 && !hunt) return;
+		bot_patrol(bot, sim, arena, out, count, cap);
+		if (f->view.count == 0 && !(w->seen_age[w->here] < HUNT_RECENT)) return;
 	}
 
 	UnitHandle *group = nullptr;

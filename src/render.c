@@ -109,6 +109,7 @@ void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Are
 	r->unit_mesh[UNIT_TANK] = GenMeshCube(1.0f, 1.0f, 1.0f);
 	r->unit_mesh[UNIT_ARTILLERY] = GenMeshCone(0.5f, 1.0f, 8);
 	r->unit_mesh[UNIT_ENGINEER] = GenMeshCube(1.0f, 1.0f, 1.0f);
+	r->unit_mesh[UNIT_SCOUT] = GenMeshSphere(0.5f, 6, 8);
 	r->unit_mesh[UNIT_EXTRACTOR] = GenMeshCylinder(0.5f, 1.0f, 10);
 	r->unit_mesh[UNIT_GENERATOR] = GenMeshCylinder(0.3f, 1.0f, 6);
 	r->unit_mesh[UNIT_FACTORY] = GenMeshCube(1.0f, 1.0f, 1.0f);

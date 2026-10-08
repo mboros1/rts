@@ -117,6 +117,11 @@ typedef struct {
 	Directory dir;               // the coordinator's, refreshed every few seconds
 	bool have_dir;
 	BotWorld bot_world[FACTION_COUNT]; // each side's bot's view of the map
+	// What each side has seen of the other here (saved with the zone):
+	// the last tick it saw enemy units, and enemy transporters (how many).
+	int64_t contact_tick[FACTION_COUNT], transporter_tick[FACTION_COUNT];
+	uint8_t transporters_seen[FACTION_COUNT];
+	bool contact[FACTION_COUNT];
 	double next_dir;
 	int64_t sends_routed, sends_refused, arrivals_held;
 	char coord_host[64];
@@ -399,6 +404,8 @@ static void on_depart_ack(Server *s, uint64_t seq)
 	s->outgoing_count = kept;
 }
 
+static uint32_t age_of(const Server *s, int64_t tick);
+
 static void coord_service(Server *s, double now)
 {
 	if (!s->coord_port) return;
@@ -440,6 +447,9 @@ static void coord_service(Server *s, double now)
 			st.units[f] = (uint16_t)(units < 65535 ? units : 65535);
 			st.structures[f] = (uint16_t)(structures < 65535 ? structures : 65535);
 			st.transporters[f] = (uint8_t)(transporters < 255 ? transporters : 255);
+			st.intel[f] = (Intel){.contact = s->contact[f], .seen_age = age_of(s, s->contact_tick[f]),
+			                      .transporters = s->transporters_seen[f],
+			                      .transporter_age = age_of(s, s->transporter_tick[f])};
 		}
 		ArenaMark m = arena_mark(&s->encode);
 		ByteBuf b = bytebuf_make(&s->encode, 64);
@@ -462,7 +472,7 @@ static void coord_service(Server *s, double now)
 //   "RTSZ" u32 version, config (wire_put_config), u64 last departure number,
 //   u32 n, n x outgoing departure, u32 m, m x u64 applied transfer, sim_save
 
-enum { ZONE_STATE_VERSION = 2 };
+enum { ZONE_STATE_VERSION = 3 };
 
 static void put_outgoing(ByteBuf *b, const Outgoing *o)
 {
@@ -489,6 +499,11 @@ static bool save_zone(Server *s)
 	for (int k = 0; k < s->outgoing_count; k++) put_outgoing(&b, &s->outgoing[k]);
 	put32(&b, (uint32_t)s->applied_count);
 	for (int k = 0; k < s->applied_count; k++) put64(&b, s->applied[k]);
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		put64(&b, (uint64_t)s->contact_tick[f]);
+		put64(&b, (uint64_t)s->transporter_tick[f]);
+		put8(&b, s->transporters_seen[f]);
+	}
 	sim_save(&s->sim, &b);
 	bool ok = !b.overflow && platform_write_file_atomic(s->state_path, b.data, b.len);
 	if (!ok) fprintf(stderr, "server %s: cannot save %s\n", s->zone_name, s->state_path);
@@ -525,6 +540,11 @@ static bool load_zone(Server *s, Arena *scratch)
 	if (m > countof(s->applied)) fatal("%s: too many applied transfers", s->state_path);
 	for (uint32_t k = 0; k < m; k++) s->applied[k] = get64(&r);
 	s->applied_count = (int)m;
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		s->contact_tick[f] = (int64_t)get64(&r);
+		s->transporter_tick[f] = (int64_t)get64(&r);
+		s->transporters_seen[f] = get8(&r);
+	}
 	if (r.bad || !sim_load(&s->sim, &r) || r.pos != r.len) fatal("%s: the sim doesn't load", s->state_path);
 	return true;
 }
@@ -660,6 +680,34 @@ static bool route_send(Server *s, Command *c)
 	return true;
 }
 
+// What each side sees of the other, from its perception (the same it aims
+// with, and its client gets): enemy units now, and enemy transporters.
+static void note_sightings(Server *s)
+{
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		const Perception *p = &s->sim.factions[f].seen;
+		int32_t seen = 0, transporters = 0;
+		for (ptrdiff_t k = 0; k < p->cap; k++) {
+			if (!p->live[k]) continue;
+			seen++;
+			transporters += p->type[k] == UNIT_TRANSPORTER;
+		}
+		s->contact[f] = seen > 0;
+		if (seen) s->contact_tick[f] = s->sim.tick.v;
+		if (transporters) {
+			s->transporter_tick[f] = s->sim.tick.v;
+			s->transporters_seen[f] = (uint8_t)(transporters < 255 ? transporters : 255);
+		}
+	}
+}
+
+static uint32_t age_of(const Server *s, int64_t tick)
+{
+	if (tick < 0) return INTEL_NEVER;
+	int64_t secs = (s->sim.tick.v - tick) / (int64_t)SIM_HZ;
+	return (uint32_t)(secs < 0 ? 0 : secs > 0x7fffffff ? 0x7fffffff : secs);
+}
+
 // Each side's bot sees the map as the directory last told it, with this zone
 // as it is now.
 static void update_bot_worlds(Server *s)
@@ -667,16 +715,19 @@ static void update_bot_worlds(Server *s)
 	if (!s->world.zone_count || !s->have_dir) return;
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		BotWorld *w = &s->bot_world[f];
-		bot_world_build(w, &s->dir, s->here, (uint8_t)f);
-		int32_t strength[FACTION_COUNT] = {0};
-		for (int g = 0; g < FACTION_COUNT; g++) {
-			const Units *u = &s->sim.factions[g].units;
-			for (ptrdiff_t i = 0; i < u->count; i++)
-				strength[g] += unit_is_structure(u->type[i]) ? 2 : unit_is_combat(u->type[i]);
-		}
-		w->mine[s->here] = strength[f];
-		w->theirs[s->here] = strength[1 - f];
+		// Through this side's fog, like a player's map; this zone as it is now.
+		Directory fogged = s->dir;
+		directory_fog(&fogged, (uint8_t)f);
+		bot_world_build(w, &fogged, s->here, (uint8_t)f);
+		const Units *u = &s->sim.factions[f].units;
+		int32_t mine = 0;
+		for (ptrdiff_t i = 0; i < u->count; i++) mine += unit_is_structure(u->type[i]) ? 2 : unit_is_combat(u->type[i]);
+		w->mine[s->here] = mine;
 		w->ours[s->here] = has_transporter(s, s->here, (uint8_t)f);
+		w->contact[s->here] = s->contact[f];
+		w->seen_age[s->here] = age_of(s, s->contact_tick[f]);
+		w->transporter_age[s->here] = s->transporters_seen[f] ? age_of(s, s->transporter_tick[f]) : BOT_NEVER;
+		bot_world_links(w, &fogged);
 		s->run.bots[f].world = w;
 	}
 }
@@ -703,6 +754,7 @@ static void step(Server *s, double now)
 	Tick tick = s->sim.tick;
 	double t0 = platform_seconds();
 	sim_step(&s->sim, s->queued, n);
+	note_sightings(s);
 	double ms = 1e3 * (platform_seconds() - t0);
 	s->step_ms_avg = s->step_ms_avg == 0.0 ? ms : s->step_ms_avg * 0.95 + ms * 0.05;
 	if (s->recording) replay_tick(&s->writer, tick, s->queued, n, sim_hash_now(&s->sim));
@@ -845,6 +897,7 @@ int main(int argc, char **argv)
 	if (s.world.zone_count) {
 		if (!s.zone_name || (s.here = world_zone(&s.world, s.zone_name)) < 0) fatal("--world needs --zone, one of its zones");
 	}
+	for (int f = 0; f < FACTION_COUNT; f++) s.contact_tick[f] = s.transporter_tick[f] = -1;
 	load_driver(&s, scenario, script);
 	if (s.world.zone_count) {
 		// Fixtures set up; after that, only what a player could do.

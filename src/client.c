@@ -134,7 +134,7 @@ static void client_event(Client *c, uint8_t kind, const char *text)
 
 // Ask the coordinator at HOST:PORT for the directory. Blocks up to half a
 // second. The raw frame (for netlogs) lives in a.
-static bool directory_fetch(const char *coord, Arena *a, Directory *d, Str *raw)
+static bool directory_fetch(const char *coord, uint8_t viewer, Arena *a, Directory *d, Str *raw)
 {
 	const char *colon = strrchr(coord, ':');
 	if (!colon) fatal("--coord HOST:PORT");
@@ -144,7 +144,8 @@ static bool directory_fetch(const char *coord, Arena *a, Directory *d, Str *raw)
 	if (fd < 0) return false;
 	Conn q;
 	conn_init(&q, a, fd, 1 << 16, 1 << 16);
-	conn_send(&q, COORD_DIRECTORY_ASK, "", 0, platform_seconds());
+	// As our side, through its fog; spectators (and tools) see it all.
+	conn_send(&q, COORD_DIRECTORY_ASK, &viewer, viewer < FACTION_COUNT ? 1 : 0, platform_seconds());
 	bool got = false;
 	for (int i = 0; i < 100 && q.open && !got; i++) {
 		conn_pump(&q, platform_seconds());
@@ -167,7 +168,7 @@ static bool client_directory(Client *c)
 	arena_reset(&c->out);
 	Directory d;
 	Str raw;
-	if (!directory_fetch(c->opt.coord, &c->out, &d, &raw)) return false;
+	if (!directory_fetch(c->opt.coord, c->opt.faction, &c->out, &d, &raw)) return false;
 	c->dir = d;
 	// Logged: a clip of this client draws the map as it was then.
 	client_log(c, COORD_DIRECTORY, raw.ptr, raw.len);
@@ -421,6 +422,8 @@ static void client_bot(Client *c)
 		}
 		c->bot_world.mine[c->zone_at] = mine;
 		c->bot_world.ours[c->zone_at] = ours;
+		c->bot_world.contact[c->zone_at] = c->remote.sim.factions[c->opt.faction].view.count > 0;
+		bot_world_links(&c->bot_world, &c->dir);
 		c->bot.world = &c->bot_world;
 	}
 	Command cmds[64];

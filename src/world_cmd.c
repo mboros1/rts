@@ -6,7 +6,7 @@
 //                                   then open the strategic map
 //   rts world --new FILE            a new world from a world file (worlds/)
 //   rts world --stop                save every zone and stop
-//   rts world --status              the map as text
+//   rts world --status [--as SIDE]  the map as text (as SIDE sees it: through its fog)
 //   rts world --save NAME           stop, copy the world, start it again
 //   rts world --load NAME           stop, replace the world with a save, start
 //   rts world --saves               list saves
@@ -179,11 +179,11 @@ static int run_tool(const char *const argv[])
 	return status;
 }
 
-static void print_status(WorldCmd *w)
+static void print_status(WorldCmd *w, uint8_t viewer)
 {
 	Directory d;
 	const char *coord = fmt("127.0.0.1:%d", w->world.port);
-	if (!directory_fetch(coord, &w->arena, &d, nullptr)) {
+	if (!directory_fetch(coord, viewer, &w->arena, &d, nullptr)) {
 		printf("world: the coordinator isn't answering (rts world to start it)\n");
 		return;
 	}
@@ -196,7 +196,7 @@ int world_main(int argc, char **argv)
 	w.speed = 1.0;
 	w.arena = arena_create("world", (ptrdiff_t)64 << 20);
 	snprintf(w.dir, sizeof w.dir, "world");
-	const char *new_file = nullptr, *save = nullptr, *load = nullptr, *faction = "blue";
+	const char *new_file = nullptr, *save = nullptr, *load = nullptr, *faction = "blue", *as = nullptr;
 	bool stop = false, status = false, saves = false;
 	// What isn't ours goes to the client.
 	const char *client_args[64];
@@ -214,6 +214,7 @@ int world_main(int argc, char **argv)
 		else if (!strcmp(a, "--dir") && v) snprintf(w.dir, sizeof w.dir, "%s", v), i++;
 		else if (!strcmp(a, "--speed") && v) w.speed = atof(v), i++;
 		else if (!strcmp(a, "--faction") && v) faction = v, i++;
+		else if (!strcmp(a, "--as") && v) as = v, i++;
 		else if (client_argc < (int)countof(client_args) - 6) client_args[client_argc++] = a;
 	}
 	if (!(w.speed > 0.0 && w.speed <= 100.0)) fatal("--speed is between 0 and 100");
@@ -279,7 +280,7 @@ int world_main(int argc, char **argv)
 		if (!was) return 0;
 	}
 	if (status) {
-		print_status(&w);
+		print_status(&w, !as ? SPECTATOR : !strcmp(as, "blue") ? 0 : !strcmp(as, "red") ? 1 : SPECTATOR);
 		return 0;
 	}
 

@@ -272,7 +272,7 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		static const char *fields[] = {"units", "lost", "fired", "shells", "spawned", "alive",
 		                               "metal", "energy", "metal_income", "energy_income",
 		                               "", "departed", "arrived"};
-		static const char *counts[UNIT_TYPE_COUNT] = {"raiders", "tanks", "artillery", "engineers",
+		static const char *counts[UNIT_TYPE_COUNT] = {"raiders", "tanks", "artillery", "engineers", "scouts",
 		                                              "extractors", "generators", "factories", "transporters",
 		                                              "turrets"};
 		static const char *ops[] = {"<", "<=", ">", ">=", "==", "!="};

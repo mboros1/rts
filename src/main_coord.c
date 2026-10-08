@@ -198,8 +198,11 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 		break;
 	}
 	case COORD_DIRECTORY_ASK: {
+		// A side asking sees the map through its fog; anyone else (zones,
+		// spectators, tools) sees all of it. Nothing checks who's asking yet.
 		Directory d;
 		directory(c, &d);
+		if (f->len == 1) directory_fog(&d, f->data[0]);
 		arena_reset(&c->out);
 		ByteBuf b = bytebuf_make(&c->out, 8192);
 		put_directory(&b, &d);

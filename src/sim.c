@@ -28,6 +28,12 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.height = 1.0f, .hp = 120.0f, .build_power = 10.0f,
 		.metal_cost = 60.0f, .energy_cost = 400.0f, .build_time = 70.0f,
 	},
+	// Eyes: fast, far-sighted, fragile, unarmed. Cheap enough to lose.
+	[UNIT_SCOUT] = {
+		.name = "scout", .speed = 14.0f, .accel = 40.0f, .radius = 0.7f, .sight = 70.0f,
+		.height = 0.8f, .hp = 40.0f,
+		.metal_cost = 20.0f, .energy_cost = 150.0f, .build_time = 20.0f,
+	},
 	[UNIT_EXTRACTOR] = {
 		.name = "extractor", .radius = 1.6f, .sight = 20.0f, .height = 1.6f, .hp = 300.0f,
 		.metal_cost = 50.0f, .energy_cost = 500.0f, .build_time = 60.0f, .metal_income = 3.0f,

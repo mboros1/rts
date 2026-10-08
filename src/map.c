@@ -9,21 +9,22 @@ static const Color MAP_DIM = {120, 128, 140, 255};
 
 static Color side_color(int f) { return f == 0 ? (Color){70, 130, 230, 255} : (Color){220, 70, 60, 255}; }
 
-// Laid out for a 900 px tall window; everything scales with the height.
-static float unit(int h) { return (float)h / 900.0f; }
+// Laid out for a 1600 x 900 window; everything scales with whichever of the
+// two is tighter (a half-width comparison, say).
+static float unit(int w, int h) { return f_min((float)h / 900.0f, (float)w / 1600.0f); }
 
 // Zones sit inside a margin; positions are 0..1 across it.
 static Vector2 zone_at(const DirectoryZone *z, int w, int h)
 {
-	float mx = 190.0f * unit(h), my = 190.0f * unit(h);
+	float mx = 190.0f * unit(w, h), my = 190.0f * unit(w, h);
 	return (Vector2){mx + z->x * ((float)w - 2.0f * mx), my + z->y * ((float)h - 2.0f * my)};
 }
 
-static float zone_radius(int h) { return 100.0f * unit(h); }
+static float zone_radius(int w, int h) { return 100.0f * unit(w, h); }
 
 int map_pick(const Directory *d, float x, float y, int w, int h)
 {
-	float r = zone_radius(h);
+	float r = zone_radius(w, h);
 	for (int k = 0; k < d->zone_count; k++) {
 		Vector2 c = zone_at(&d->zones[k], w, h);
 		if ((c.x - x) * (c.x - x) + (c.y - y) * (c.y - y) <= r * r) return k;
@@ -34,12 +35,47 @@ int map_pick(const Directory *d, float x, float y, int w, int h)
 // How much of a zone each side holds: units count once, structures twice.
 static float strength(const ZoneStatus *st, int f) { return (float)st->units[f] + 2.0f * (float)st->structures[f]; }
 
-static void draw_zone(const DirectoryZone *z, Vector2 c, bool hover, int h)
+// "4m", "1h 20m": how old a sighting is.
+static const char *age_text(uint32_t secs)
 {
-	float u = unit(h), r = zone_radius(h);
+	if (secs < 60) return "<1m";
+	if (secs < 3600) return TextFormat("%um", secs / 60);
+	return TextFormat("%uh %02um", secs / 3600, secs / 60 % 60);
+}
+
+// Older sightings fade, down to a ghost after half an hour.
+static unsigned char stale_alpha(uint32_t secs)
+{
+	float a = 1.0f - 0.75f * f_min(1.0f, (float)secs / 1800.0f);
+	return (unsigned char)(255.0f * a);
+}
+
+static void draw_marker(Vector2 m, float k, Color c, int small, int n)
+{
+	DrawPoly(m, 4, k, 45.0f, c);
+	DrawPolyLines(m, 4, k, 45.0f, (Color){255, 255, 255, c.a});
+	if (n > 1) {
+		const char *count = TextFormat("%d", n);
+		DrawText(count, (int)m.x - MeasureText(count, small) / 2, (int)m.y - small / 2, small, (Color){255, 255, 255, c.a});
+	}
+}
+
+static void draw_zone(const DirectoryZone *z, Vector2 c, bool hover, int w, int h, int viewer)
+{
+	float u = unit(w, h), r = zone_radius(w, h);
+	bool fogged = viewer >= 0 && viewer < FACTION_COUNT;
 	float blue = strength(&z->status, 0), red = strength(&z->status, 1), total = blue + red;
-	// The disc shows the balance: blue's share fills from the left.
+	// The disc shows the balance: blue's share fills from the left. Through
+	// fog: our presence, or the enemy's colour where we believe they are.
 	Color fill = {44, 50, 60, 255};
+	if (fogged && z->up && z->reported) {
+		const Intel *in = &z->status.intel[viewer];
+		bool ours = strength(&z->status, viewer) > 0.0f;
+		bool theirs = in->contact || in->seen_age < 600 || (in->transporters && in->transporter_age < 1800);
+		if (ours) fill = ColorBrightness(side_color(viewer), -0.35f);
+		else if (theirs) fill = ColorBrightness(side_color(1 - viewer), -0.55f);
+		total = 0.0f;
+	}
 	if (z->up && z->reported && total > 0.0f) {
 		float b = blue / total;
 		Color bc = side_color(0), rc = side_color(1);
@@ -71,7 +107,39 @@ static void draw_zone(const DirectoryZone *z, Vector2 c, bool hover, int h)
 		DrawText("...", (int)c.x - dw / 2, (int)c.y - fs / 2, fs, MAP_DIM);
 		return;
 	}
-	for (int f = 0; f < FACTION_COUNT; f++) {
+	if (fogged) {
+		// Ours, in numbers; theirs, only as seen.
+		int f = viewer, e = 1 - viewer;
+		const Intel *in = &z->status.intel[f];
+		const char *line = TextFormat("%d units  %d bldg", z->status.units[f], z->status.structures[f]);
+		int lw = MeasureText(line, small), y = (int)(c.y + r) + 8 * px;
+		DrawText(line, (int)c.x - lw / 2, y, small, side_color(f));
+		Color ec = side_color(e);
+		const char *intel = "no intel";
+		Color ic = MAP_DIM;
+		if (in->contact) {
+			intel = "CONTACT";
+			ic = ec;
+		} else if (in->seen_age != INTEL_NEVER) {
+			intel = TextFormat("seen %s ago", age_text(in->seen_age));
+			ic = (Color){ec.r, ec.g, ec.b, stale_alpha(in->seen_age)};
+		}
+		int iw = MeasureText(intel, small);
+		DrawText(intel, (int)c.x - iw / 2, y + small + 4 * px, small, ic);
+		float k = 14.0f * u;
+		if (z->status.transporters[f])
+			draw_marker((Vector2){c.x + (f == 0 ? -r : r), c.y}, k, side_color(f), small, z->status.transporters[f]);
+		if (in->transporters) {
+			// Theirs, as last seen: faded with age, the age beside it.
+			Vector2 m = {c.x + (e == 0 ? -r : r), c.y};
+			Color tc = {ec.r, ec.g, ec.b, stale_alpha(in->transporter_age)};
+			draw_marker(m, k, tc, small, in->transporters);
+			const char *age = age_text(in->transporter_age);
+			int aw = MeasureText(age, small);
+			DrawText(age, (int)m.x - aw / 2, (int)(m.y + k) + 4 * px, small, tc);
+		}
+	}
+	for (int f = 0; f < FACTION_COUNT && !fogged; f++) {
 		const char *line = TextFormat("%d units  %d bldg", z->status.units[f], z->status.structures[f]);
 		int lw = MeasureText(line, small);
 		DrawText(line, (int)c.x - lw / 2, (int)(c.y + r) + 8 * px + f * (small + 4 * px), small, side_color(f));
@@ -97,7 +165,7 @@ static void draw_zone(const DirectoryZone *z, Vector2 c, bool hover, int h)
 
 void map_draw(const Directory *d, int viewer, int hover, int w, int h)
 {
-	float u = unit(h);
+	float u = unit(w, h);
 	int px = (int)(u + 0.5f);
 	DrawRectangle(0, 0, w, h, MAP_BG);
 	for (int k = 0; k < d->link_count; k++) {
@@ -114,13 +182,13 @@ void map_draw(const Directory *d, int viewer, int hover, int w, int h)
 		const char *n = TextFormat("%d %s %s", t->units, "->", d->zones[t->dst].name);
 		DrawText(n, (int)m.x + 14 * px, (int)m.y - 8 * px, 16 * px, side_color(t->faction));
 	}
-	for (int k = 0; k < d->zone_count; k++) draw_zone(&d->zones[k], zone_at(&d->zones[k], w, h), k == hover, h);
+	for (int k = 0; k < d->zone_count; k++) draw_zone(&d->zones[k], zone_at(&d->zones[k], w, h), k == hover, w, h, viewer);
 
 	// Title centred at the top, help along the bottom.
 	int ts = (int)(40.0f * u), hs = (int)(20.0f * u);
 	const char *title = "strategic map";
 	DrawText(title, (w - MeasureText(title, ts)) / 2, (int)(48.0f * u), ts, MAP_TEXT);
-	const char *who = viewer == 0 ? "you are blue" : viewer == 1 ? "you are red" : "spectating";
+	const char *who = viewer == 0 ? "you are blue: red only as seen" : viewer == 1 ? "you are red: blue only as seen" : "spectating";
 	const char *help = TextFormat("%s   click a zone to launch in   esc: quit   (squares: transporters)", who);
 	DrawText(help, (w - MeasureText(help, hs)) / 2, h - (int)(56.0f * u), hs, MAP_DIM);
 	if (d->link_count == 0 && d->zone_count > 1) {

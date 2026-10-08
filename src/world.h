@@ -41,12 +41,23 @@ bool world_adjacent(const World *w, int a, int b);
 //
 // What the coordinator tells players about the world: the strategic map.
 
+// What a side knows of its enemy in a zone: only what its units have seen.
+// Ages are in game seconds; INTEL_NEVER: never seen.
+enum : uint32_t { INTEL_NEVER = 0xffffffffu };
+typedef struct {
+	bool contact;                // sees enemy units there now
+	uint32_t seen_age;           // since it last did
+	uint8_t transporters;        // enemy transporters it saw, when it last saw any
+	uint32_t transporter_age;    // since then
+} Intel;
+
 // A zone's report of itself, sent to the coordinator every second.
 typedef struct {
 	int64_t tick;
 	uint16_t units[FACTION_COUNT];       // combat units
 	uint16_t structures[FACTION_COUNT];  // everything that doesn't move
 	uint8_t transporters[FACTION_COUNT]; // finished transporters
+	Intel intel[FACTION_COUNT];          // each side's, of the other
 } ZoneStatus;
 
 typedef struct {
@@ -77,6 +88,11 @@ typedef struct {
 	int transit_count;
 } Directory;
 
+// A side's view of a directory (fog of war on the map): its own presence,
+// its own transits, and its intel; nothing of the enemy's numbers.
+// SPECTATOR (wire.h): the whole of it.
+void directory_fog(Directory *d, uint8_t viewer);
+
 void put_zone_status(ByteBuf *b, const ZoneStatus *s);
 bool get_zone_status(ByteReader *r, ZoneStatus *s);
 void put_directory(ByteBuf *b, const Directory *d);
@@ -88,6 +104,8 @@ bool get_directory(ByteReader *r, Directory *d);
 //   transit: blue 12 west->middle
 void directory_print(const Directory *d, FILE *out);
 
-// What a bot of side f in zone `here` knows of the world: from the directory
-// (matched to the world by name), links from the world or the directory's.
+// What a bot of side f in zone `here` knows of the world, from a directory
+// already fogged for f; then, once the caller has put in what it knows of
+// `here` first-hand, the links (which depend on what's believed where).
 void bot_world_build(BotWorld *w, const Directory *d, int here, uint8_t f);
+void bot_world_links(BotWorld *w, const Directory *d);

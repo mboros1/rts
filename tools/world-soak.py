@@ -30,6 +30,35 @@ import subprocess
 import sys
 import time
 
+def chain_segments(bin_dir, paths, failures):
+    """Verify each replay segment and check it carries on from the one
+    before: it starts at a tick the last one reached, in the same state.
+    (A zone flushes its replay before writing its state, so one killed in
+    between restarts from a state a little behind its replay's end.)"""
+    prev = None  # (path, end tick, end hash)
+    for path in paths:
+        r = subprocess.run([f"{bin_dir}/rts-headless", "verify", path, "--partial"], capture_output=True, text=True)
+        m = re.search(r"segment from tick (\d+) \((\w+)\) to tick (\d+) \((\w+)\)", r.stdout)
+        if r.returncode or not m:
+            failures.append(f"{path} doesn't verify: {r.stderr.strip()[:200]}")
+            prev = None
+            continue
+        start, start_hash = int(m[1]), m[2]
+        if prev:
+            prev_path, prev_end, prev_hash = prev
+            if start > prev_end:
+                failures.append(f"{path} starts at tick {start} but {prev_path} ended at tick {prev_end}")
+            else:
+                h = prev_hash
+                if start < prev_end:
+                    rr = subprocess.run([f"{bin_dir}/rts-headless", "verify", prev_path, "--partial", "--hash-at", str(start)],
+                                        capture_output=True, text=True)
+                    hm = re.search(r"hash at tick \d+: (\w+)", rr.stdout)
+                    h = hm[1] if hm else None
+                if h != start_hash:
+                    failures.append(f"{path} starts at tick {start} in a state {prev_path} wasn't in then")
+        prev = (path, int(m[3]), m[4])
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -200,20 +229,12 @@ def main():
             failures.append(f"{z}: {arrived} arrived but {delivered.get(z, 0)} delivered")
     # Replay segments chain and verify.
     for z in zones:
-        prev, k = None, 1
+        paths, k = [], 1
         while os.path.exists(os.path.join(live, f"{z}-{k:03d}.replay")):
-            path = os.path.join(live, f"{z}-{k:03d}.replay")
-            r = subprocess.run([f"{a.bin}/rts-headless", "verify", path, "--partial"], capture_output=True, text=True)
-            m = re.search(r"segment from tick (\d+) \((\w+)\) to tick (\d+) \((\w+)\)", r.stdout)
-            if r.returncode or not m:
-                failures.append(f"{path} doesn't verify: {r.stderr.strip()[:200]}")
-            else:
-                start_at = (int(m[1]), m[2])
-                if prev and (prev[0] > start_at[0] or (prev[0] == start_at[0] and prev[1] != start_at[1])):
-                    failures.append(f"{path} starts at tick {start_at[0]} but the last segment ended at tick {prev[0]}")
-                prev = (int(m[3]), m[4])
+            paths.append(os.path.join(live, f"{z}-{k:03d}.replay"))
             k += 1
-        say(f"{z}: {k - 1} replay segments verified and chained")
+        chain_segments(a.bin, paths, failures)
+        say(f"{z}: {len(paths)} replay segments verified and chained")
     # Memory, over each process's life: after warming up (the first third),
     # within 25% (+16 MB). Lives too short to say are skipped.
     for (name, p), samples in sorted(rss.items()):

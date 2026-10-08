@@ -145,8 +145,8 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 			if (IsKeyPressed(KEY_R)) c->placing = UNIT_TRANSPORTER;
 		}
 		if (selection_has(c, sim, UNIT_FACTORY)) {
-			const UnitType keys[] = {UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_ENGINEER};
-			for (int k = 0; k < 4; k++)
+			const UnitType keys[] = {UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_ENGINEER, UNIT_SCOUT};
+			for (int k = 0; k < (int)countof(keys); k++)
 				if (IsKeyPressed(KEY_ONE + k))
 					order(c, frame, out, cap, &n, (Order){.kind = COMMAND_PRODUCE, .type = keys[k], .amount = 1,
 					                                      .flags = shift ? COMMAND_REPEAT : 0});
@@ -267,8 +267,8 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 		snprintf(sel, sizeof sel, "landing in %s: click where, in your strip (esc cancels)", z->name[c->landing_for]);
 	DrawText(sel, 14, y + 26, 18, RAYWHITE);
 	DrawText(sim->config.economy
-	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-4, 0 clear | T send"
-	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-4, 0 clear")
+	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-5, 0 clear | T send"
+	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-5, 0 clear")
 	             : "drag select | right attack-move | ctrl+right move | X stop | V entrench",
 	         14, y + 50, 14, GRAY);
 }

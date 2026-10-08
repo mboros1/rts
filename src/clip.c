@@ -677,6 +677,14 @@ static Scene playback_scene(const Playback *p, Arena *frame)
 	return p->player ? remote_scene(&p->remote, p->base, frame) : scene_from_mirror(&p->mirror, &p->terrain, p->base, frame);
 }
 
+static void draw_heading(const char *heading, int w)
+{
+	const int s = SUPERSAMPLE;
+	int hw = MeasureText(heading, 22 * s);
+	DrawRectangle((w - hw) / 2 - 12 * s, 56 * s, hw + 24 * s, 34 * s, (Color){0, 0, 0, 160});
+	DrawText(heading, (w - hw) / 2, 62 * s, 22 * s, RAYWHITE);
+}
+
 // Draws the view into the current render target, with its network panel:
 // what this client saw at time t.
 static void playback_draw(Playback *p, Renderer *renderer, const Scene *scene, Camera3D cam, double t,
@@ -696,11 +704,7 @@ static void playback_draw(Playback *p, Renderer *renderer, const Scene *scene, C
 	BeginMode3D(cam);
 	renderer_draw_scene(renderer, scene, alpha, frame, nullptr, -1);
 	EndMode3D();
-	if (heading) {
-		int hw = MeasureText(heading, 22 * s);
-		DrawRectangle((w - hw) / 2 - 12 * s, 56 * s, hw + 24 * s, 34 * s, (Color){0, 0, 0, 160});
-		DrawText(heading, (w - hw) / 2, 62 * s, 22 * s, RAYWHITE);
-	}
+	if (heading) draw_heading(heading, w);
 	// The panel is laid out for 600 px and scales down to fit a half frame.
 	float k = f_min(1.0f, (float)w / (float)(600 * s));
 	int u = (int)((float)s * k * 100.0f); // hundredths of a layout pixel
@@ -784,20 +788,29 @@ int clip_netlog(const ClipRequest *req)
 		for (int v = 0; v < count; v++) playback_advance(&views[v], t);
 		if (views[0].world_changed) {
 			// Into another zone: its terrain, and a camera that finds its way again.
+			// (Two views compared go to the same zones together.)
 			renderer_unload(&renderer);
 			renderer_init(&renderer, &views[0].terrain, views[0].config.max_units, &work);
-			views[0].world_changed = false;
+			for (int v = 0; v < count; v++) views[v].world_changed = false;
 			director = (Director){.side = director.side};
 		}
-		bool map = count == 1 && views[0].on_map && views[0].have_dir;
-		if (!map && (!views[0].have_state || (count == 2 && !views[1].have_state))) continue;
+		bool on_map[2] = {false, false}, ready = true;
+		for (int v = 0; v < count; v++) {
+			on_map[v] = views[v].on_map && views[v].have_dir;
+			ready = ready && (on_map[v] || views[v].have_state);
+		}
+		bool map = count == 1 && on_map[0];
+		if (!ready) continue;
 		arena_reset(&frame);
 		Scene scenes[2] = {0};
-		if (!map) {
-			for (int v = 0; v < count; v++) scenes[v] = playback_scene(&views[v], &frame);
-			// Frame the whole picture when there is one to compare against.
-			director_update(&director, &scenes[count - 1]);
-		}
+		int zone_view = -1; // the last view showing a zone frames the camera
+		for (int v = 0; v < count; v++)
+			if (!on_map[v]) {
+				scenes[v] = playback_scene(&views[v], &frame);
+				zone_view = v;
+			}
+		// Frame the whole picture when there is one to compare against.
+		if (zone_view >= 0) director_update(&director, &scenes[zone_view]);
 		bool sample = out_wants_sample(&out, k, frames);
 		if (!out.video && !sample) continue;
 		Camera3D cam = render_camera(&views[0].terrain, director.focus, director.distance);
@@ -815,8 +828,13 @@ int clip_netlog(const ClipRequest *req)
 				BeginTextureMode(half);
 				ClearBackground((Color){24, 28, 34, 255});
 				Camera3D half_cam = fixed ? render_camera(&views[v].terrain, view_at[v], view_d[v]) : cam;
-				playback_draw(&views[v], &renderer, &scenes[v], half_cam, t, &frame, rw / 2, rh,
-				              headings[v][0] ? headings[v] : playback_heading(&views[v]));
+				const char *heading = headings[v][0] ? headings[v] : playback_heading(&views[v]);
+				if (on_map[v]) {
+					map_draw(&views[v].dir, views[v].player ? views[v].faction : -1, -1, rw / 2, rh);
+					draw_heading(heading, rw / 2);
+				} else {
+					playback_draw(&views[v], &renderer, &scenes[v], half_cam, t, &frame, rw / 2, rh, heading);
+				}
 				EndTextureMode();
 				BeginTextureMode(out.big);
 				DrawTexturePro(half.texture, (Rectangle){0, 0, (float)(rw / 2), (float)-rh},

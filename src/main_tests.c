@@ -11,6 +11,7 @@
 #include "script.c"
 #include "wire.c"
 #include "coord.c"
+#include "world.c"
 
 static int failures;
 static int checks;
@@ -726,6 +727,55 @@ static void test_ledger(void)
 	arena_destroy(&a);
 }
 
+// The strategic map through fog: a side's view keeps its own presence, its
+// transits and its intel, and loses everything numeric about the enemy.
+static void test_fog(void)
+{
+	Arena a = arena_create("fog", 1 << 20);
+	Directory d = {.zone_count = 2, .link_count = 1, .links = {{0, 1}}, .transit_count = 2,
+	               .transit = {{0, 1, 0, 12}, {1, 0, 1, 9}}};
+	for (int k = 0; k < 2; k++) {
+		DirectoryZone *z = &d.zones[k];
+		snprintf(z->name, sizeof z->name, "%s", k ? "east" : "west");
+		snprintf(z->host, sizeof z->host, "127.0.0.1");
+		z->up = z->reported = true;
+		z->x = 0.25f + 0.5f * (float)k;
+		z->y = 0.5f;
+		z->home = (int8_t)k;
+		z->status = (ZoneStatus){.tick = 900, .units = {(uint16_t)(10 + k), (uint16_t)(20 + k)}, .structures = {3, 4},
+		                         .transporters = {1, 1},
+		                         .intel = {{.contact = k == 1, .seen_age = 40, .transporters = 1, .transporter_age = 90},
+		                                   {.seen_age = INTEL_NEVER, .transporter_age = INTEL_NEVER}}};
+	}
+	ByteBuf b = bytebuf_make(&a, 4096);
+	put_directory(&b, &d);
+	ByteReader r = byte_reader(b.data, b.len);
+	Directory back;
+	CHECK(get_directory(&r, &back) && r.pos == r.len);
+	CHECK(back.zones[1].status.intel[0].contact && back.zones[1].status.intel[0].transporter_age == 90);
+	CHECK(back.zones[0].status.intel[1].seen_age == INTEL_NEVER);
+
+	Directory blue = back;
+	directory_fog(&blue, 0);
+	CHECK(blue.zones[1].status.units[1] == 0 && blue.zones[1].status.structures[1] == 0
+	      && blue.zones[1].status.transporters[1] == 0);                         // nothing of red's numbers
+	CHECK(blue.zones[1].status.units[0] == 11 && blue.zones[1].status.transporters[0] == 1); // all of ours
+	CHECK(blue.zones[1].status.intel[0].contact && blue.zones[1].status.intel[0].seen_age == 40); // what we saw
+	CHECK(blue.zones[0].status.intel[1].seen_age == INTEL_NEVER);                 // nothing of what red saw
+	CHECK(blue.transit_count == 1 && blue.transit[0].faction == 0);               // only our units in transit
+	Directory all = back;
+	directory_fog(&all, SPECTATOR);
+	CHECK(all.zones[1].status.units[1] == 21 && all.transit_count == 2);          // a spectator sees it all
+
+	// What a bot of blue's makes of it: contact, the age, the transporter.
+	BotWorld w;
+	bot_world_build(&w, &blue, 0, 0);
+	bot_world_links(&w, &blue);
+	CHECK(w.contact[1] && w.seen_age[1] == 40 && w.transporter_age[1] == 90 && w.linked[1]);
+	CHECK(bot_believes_enemy(&w, 1) && w.neighbours_enemy[0]);
+	arena_destroy(&a);
+}
+
 // Transporters under the faction split: sends, relays and arrivals are all
 // faction state, so a client fed only its stream still matches.
 //   - a paired send of tanks leaves after its 10 s charge, paying 30 a unit;
@@ -1024,6 +1074,7 @@ static const Test tests[] = {
 	{"build_orders", test_build_orders},
 	{"ledger", test_ledger},
 	{"transporters", test_transporters},
+	{"fog", test_fog},
 	{"snapshot", test_snapshot},
 	{"entrench", test_entrench},
 };

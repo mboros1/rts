@@ -2,8 +2,11 @@
 //
 //   rts-headless bench  [ticks] [units]  time the sim with bots on both sides
 //   rts-headless record PATH [ticks] [units]  run bots and record a replay
-//   rts-headless verify PATH [--partial] replay and compare every tick's hash;
-//                                         --partial accepts a crash-cut tail
+//   rts-headless verify PATH [--partial] [--hash-at T]
+//                                         replay and compare every tick's hash;
+//                                         --partial accepts a crash-cut tail;
+//                                         --hash-at prints the state's hash at tick T
+//                                         (to chain segments that overlap)
 //   rts-headless script PATH...          run scripts and their expectations
 //   rts-headless wire [ticks] [units]    bytes a spectator would receive
 //   rts-headless split [ticks] [units]   both factions simulated as clients from
@@ -135,7 +138,7 @@ static int cmd_record(const char *path, long ticks, long units)
 	return 0;
 }
 
-static int cmd_verify(const char *path, bool partial)
+static int cmd_verify(const char *path, bool partial, int64_t hash_at)
 {
 	Arena file = arena_create("replay file", (ptrdiff_t)1 << 30);
 	Arena decode = arena_create("replay decode", (ptrdiff_t)64 << 20);
@@ -158,6 +161,7 @@ static int cmd_verify(const char *path, bool partial)
 	int64_t ticks = 0;
 	int64_t start_tick = sim.tick.v;
 	Hash start_hash = sim_hash_now(&sim);
+	if (hash_at == start_tick) printf("hash at tick %lld: %016llx\n", (long long)hash_at, (unsigned long long)start_hash.v);
 	for (;;) {
 		arena_reset(&decode);
 		Tick tick;
@@ -183,6 +187,7 @@ static int cmd_verify(const char *path, bool partial)
 			return 1;
 		}
 		ticks++;
+		if (sim.tick.v == hash_at) printf("hash at tick %lld: %016llx\n", (long long)hash_at, (unsigned long long)got.v);
 	}
 	printf("verified %lld ticks of %s: every hash matches, final %016llx\n", (long long)ticks,
 	       path, (unsigned long long)sim_hash_now(&sim).v);
@@ -342,7 +347,16 @@ int main(int argc, char **argv)
 	if (!strcmp(cmd, "record") && argc > 2)
 		return cmd_record(argv[2], parse_long(argc > 3 ? argv[3] : nullptr, 1800),
 		                  parse_long(argc > 4 ? argv[4] : nullptr, 5000));
-	if (!strcmp(cmd, "verify") && argc > 2) return cmd_verify(argv[2], argc > 3 && !strcmp(argv[3], "--partial"));
+	if (!strcmp(cmd, "verify") && argc > 2) {
+		bool partial = false;
+		int64_t hash_at = -1;
+		for (int i = 3; i < argc; i++) {
+			if (!strcmp(argv[i], "--partial")) partial = true;
+			else if (!strcmp(argv[i], "--hash-at") && i + 1 < argc) hash_at = atoll(argv[++i]);
+			else fatal("verify PATH [--partial] [--hash-at T]");
+		}
+		return cmd_verify(argv[2], partial, hash_at);
+	}
 	if (!strcmp(cmd, "script") && argc > 2) return cmd_script(argc - 2, argv + 2);
 	if (!strcmp(cmd, "split")) return cmd_split(parse_long(argc > 2 ? argv[2] : nullptr, 1800),
 	                                           parse_long(argc > 3 ? argv[3] : nullptr, 5000));

@@ -46,6 +46,8 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 8 | Transporters | Expansion across the zone graph | Only home zones start with bases; engineers build transporters; unpaired sends (adjacent only, raiders and engineers, landing in your strip at a point you pick) and paired sends (any unit, relayed hop by hop, each zone paying its hop, units waiting visibly at relays); landing areas queue; pool, gate seeds and logout policies gone; fixtures only set up state |
 | 9 | Entrench and away | Leaving the keyboard | Entrench is a paid order that transforms combat units into defenses and back; away, the bot plays your side |
 | 10 | Strategic bots | The world plays itself | A cross-zone layer for both sides expands, reinforces beachheads and relays; from a fresh world both sides push into the middle; an hour-long soak passes (with coordinator log compaction) |
+| 11 | Fog on the map | A side knows only what it has seen | The strategic map shows a side its own presence and nothing of the enemy's numbers: contact, last seen (with its age, fading), enemy transporters spotted; bots play by the same fog; a scout unit to see with |
+| 12 | Doctrines and units | Worlds that don't stall | Configurable bot doctrines (per side, world or zone) and new units, both sides with the same roster; fronts move in the hour soak |
 
 ## Spike 1 results (2026-10-07)
 
@@ -383,6 +385,49 @@ Done. A fresh world plays itself, and keeps going for hours.
   wins a zone for long. Making a war that moves is game design (costs,
   caps, what attackers and defenders can see), not plumbing. The map shows
   both sides' strength everywhere, which the bots use too.
+
+## Spike 11 results (2026-10-08)
+
+Done. A side's map shows the enemy only as it has seen them.
+
+- **Intel, from what units see**: each zone tracks, per side, the last tick
+  it perceived enemy units and enemy transporters (how many), from the same
+  perception it aims with; it's kept in the zone's saved state and reported
+  with the zone's status as ages in game seconds.
+- **The coordinator fogs the directory** for whoever asks as a side: its own
+  units, buildings, transporters and transits, its intel about the enemy,
+  and none of the enemy's numbers. Spectators, zones and tools get all of it
+  (nothing checks who's asking yet: there's no authentication).
+- **On the map**: "no intel", "CONTACT", or "seen 4m ago" fading with age;
+  enemy transporters spotted as markers, faded with age and labelled with
+  it. A zone's disc is your colour where you are, theirs (dark) where you
+  believe they are. `rts world --status --as blue` prints a side's view.
+- **The bots play by the same fog**: they believe a zone is the enemy's on
+  contact, a sighting within 10 minutes, or a transporter seen within 30;
+  the front is where they see the enemy, then where they saw a transporter,
+  then next to a zone they believe is theirs. They hunt only an enemy seen
+  lately; an unspotted landing goes unhunted.
+- **Scouts**: fast (14), far-sighted (70), fragile, unarmed, cheap; allowed in
+  unpaired sends; factory key 5. Each zone's bot keeps two, patrols with
+  them (the enemy's side of the zone most), and sends one to a neighbour it
+  has no fresh intel on.
+- **Evidence**: `test_fog` (the directory with intel round trips; a side's
+  view loses the enemy's numbers and transits and keeps its own; a bot's
+  beliefs follow); the world smoke test checks blue's map shows nothing of
+  red's home; a 10-minute world soak with the fogged bots (15 zone kills,
+  6 coordinator kills, 2591 units across, none lost or duplicated; blue held
+  north and south, red centre). Demo 13 is blue's map of a self-playing
+  world.
+- **Found by the soak**: a zone flushes its replay before writing its state,
+  so one killed between the two restarts a little behind its replay's end,
+  and the next segment overlaps the last. The soaks now accept an overlap
+  when the earlier segment was in the same state at that tick
+  (`rts-headless verify --hash-at T`).
+- **Formats**: replay v8, wire v5 (scouts renumber the unit types), zone
+  state v3 (intel).
+- **Not yet**: no authentication, so a client could ask for the whole map.
+  Sightings say when, not how many or where in the zone. Compare clips of
+  two maps side by side are too small to read, so demo 13 shows one.
 
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
