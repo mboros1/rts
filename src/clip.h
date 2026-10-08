@@ -69,6 +69,7 @@ typedef struct {
 	bool clipboard;             // put the video on the system clipboard
 	int width, height;          // output size
 	int crf;                    // x264 quality: lower is better and bigger
+	int speed;                  // time-lapse: render every Nth tick (0 or 1: all)
 } ClipRequest;
 
 // Expects a window (hidden is fine) for the GL context. Returns an exit code.

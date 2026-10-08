@@ -430,6 +430,7 @@ void wire_encode_faction_tick(const Sim *sim, FactionId f, const Command *cmds, 
 	put16(out, dilation);
 	put8(out, hash);
 	if (hash) put64(out, faction_hash(fa).v);
+	put64(out, sim->effects[f.v].spots);
 
 	ptrdiff_t count_at = reserve32(out);
 	uint32_t n = 0;
@@ -442,6 +443,7 @@ void wire_encode_faction_tick(const Sim *sim, FactionId f, const Command *cmds, 
 		put8(out, c->unit_type);
 		put32(out, (uint32_t)c->amount);
 		putf(out, c->radius);
+		put8(out, c->flags);
 		put32(out, (uint32_t)c->count);
 		for (ptrdiff_t i = 0; i < c->count; i++) {
 			put32(out, c->units[i].index);
@@ -495,6 +497,7 @@ bool wire_read_faction_tick(ByteReader *r, Arena *a, const SimConfig *c, Faction
 	if (r->bad || has_hash > 1 || out->dilation > 10000) return false;
 	out->has_hash = has_hash;
 	if (has_hash) out->hash = (Hash){get64(r)};
+	out->effects.spots = get64(r);
 
 	uint32_t n = get32(r);
 	if (r->bad || n > 4096) return false;
@@ -507,6 +510,7 @@ bool wire_read_faction_tick(ByteReader *r, Arena *a, const SimConfig *c, Faction
 		uint8_t type = get8(r);
 		cmd->amount = (int32_t)get32(r);
 		cmd->radius = getf(r);
+		cmd->flags = get8(r);
 		uint32_t m = get32(r);
 		if (r->bad || kind >= COMMAND_KIND_COUNT || type >= UNIT_TYPE_COUNT || m > (uint32_t)c->max_units
 		    || (ptrdiff_t)m * 8 > r->len - r->pos)
@@ -571,7 +575,8 @@ void wire_put_config(ByteBuf *b, const SimConfig *c)
 	put32(b, (uint32_t)c->spawn_interval);
 	put32(b, (uint32_t)c->max_units);
 	put32(b, (uint32_t)c->max_projectiles);
-	for (int k = 0; k < UNIT_TYPE_COUNT; k++) put32(b, (uint32_t)c->type_weight[k]);
+	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) put32(b, (uint32_t)c->type_weight[k]);
+	put8(b, c->economy);
 }
 
 bool wire_get_config(ByteReader *r, SimConfig *c)
@@ -583,11 +588,14 @@ bool wire_get_config(ByteReader *r, SimConfig *c)
 	c->max_units = (int32_t)get32(r);
 	c->max_projectiles = (int32_t)get32(r);
 	int32_t sum = 0;
-	for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
+	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) {
 		c->type_weight[k] = (int32_t)get32(r);
 		if (c->type_weight[k] < 0 || c->type_weight[k] > 1000) return false;
 		sum += c->type_weight[k];
 	}
+	uint8_t economy = get8(r);
+	if (economy > 1) return false;
+	c->economy = economy;
 	return !r->bad && sum > 0 && c->max_units > 0 && c->max_units <= 1 << 16
 	    && c->max_projectiles > 0 && c->max_projectiles <= 1 << 20 && c->spawn_interval > 0
 	    && c->initial_units >= 0 && c->initial_units <= c->population && c->population <= c->max_units;

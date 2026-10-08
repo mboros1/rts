@@ -544,6 +544,125 @@ static void test_split(void)
 	arena_destroy(&a);
 }
 
+
+// An economy game between bots: resources stay in bounds, spots are never
+// owned twice, both sides expand and produce, and the faction split still
+// holds with everything the economy adds to a faction's state.
+static void test_economy(void)
+{
+	Arena a = arena_create("economy", (ptrdiff_t)256 << 20);
+	Arena tick = arena_create("economy tick", 64 << 20);
+	const Scenario *sc = scenario_find("economy");
+	SimConfig config = scenario_config(sc);
+	Sim server, clients[FACTION_COUNT];
+	sim_init(&server, config);
+	Bot bots[FACTION_COUNT];
+	scenario_bots(sc, bots);
+	ByteBuf buf = bytebuf_make(&a, 8 << 20);
+	for (int k = 0; k < FACTION_COUNT; k++) {
+		sim_init(&clients[k], config);
+		buf.len = 0;
+		wire_encode_faction_snapshot(&server, (FactionId){(uint32_t)k}, &buf);
+		ByteReader r = byte_reader(buf.data, buf.len);
+		clients[k].tick.v = (int64_t)get64(&r);
+		CHECK(faction_read(&clients[k].factions[k], &r));
+	}
+
+	bool bounded = true, exclusive = true, earned = true, split = true;
+	Command cmds[256];
+	for (int t = 0; t < 3000; t++) { // 100 s: both sides have expanded and fielded units
+		arena_reset(&tick);
+		ptrdiff_t n = 0;
+		for (int k = 0; k < FACTION_COUNT; k++) bot_think(&bots[k], &server, &tick, cmds, &n, countof(cmds));
+		sim_step(&server, cmds, n);
+		uint64_t owned[FACTION_COUNT];
+		for (int k = 0; k < FACTION_COUNT; k++) {
+			const Faction *f = &server.factions[k];
+			const Economy *e = &f->economy;
+			bounded = bounded && e->metal >= 0.0f && e->metal <= e->metal_cap && e->energy >= 0.0f
+			       && e->energy <= e->energy_cap && e->rate >= 0.0f && e->rate <= 1.0f;
+			owned[k] = e->spots;
+			// Every owned spot has this faction's finished extractor on it.
+			for (int32_t sp = 0; sp < server.spots.count; sp++) {
+				if (!(e->spots >> sp & 1)) continue;
+				bool found = false;
+				for (ptrdiff_t i = 0; i < f->units.count && !found; i++)
+					found = f->units.type[i] == UNIT_EXTRACTOR && f->units.progress[i] >= 1.0f
+					     && spot_at(&server.spots, v2(f->units.px[i], f->units.pz[i])) == sp;
+				earned = earned && found;
+			}
+			FactionId fid = {(uint32_t)k};
+			buf.len = 0;
+			wire_encode_faction_tick(&server, fid, cmds, n, true, 1000, &buf);
+			ByteReader r = byte_reader(buf.data, buf.len);
+			FactionTick ft;
+			bool ok = wire_read_faction_tick(&r, &tick, &config, fid, &ft);
+			if (ok) faction_tick(&clients[k], fid, &ft.effects, ft.commands, ft.command_count);
+			split = split && ok && faction_hash(&clients[k].factions[k]).v == ft.hash.v;
+		}
+		exclusive = exclusive && (owned[0] & owned[1]) == 0;
+	}
+	CHECK(bounded);
+	CHECK(exclusive);
+	CHECK(earned);
+	CHECK(split);
+	for (int k = 0; k < FACTION_COUNT; k++) {
+		const Units *u = &server.factions[k].units;
+		int extractors = 0, factories = 0, combat = 0;
+		for (ptrdiff_t i = 0; i < u->count; i++) {
+			extractors += u->type[i] == UNIT_EXTRACTOR && u->progress[i] >= 1.0f;
+			factories += u->type[i] == UNIT_FACTORY && u->progress[i] >= 1.0f;
+			combat += unit_is_combat(u->type[i]);
+		}
+		CHECK(extractors >= 5);  // both sides expanded
+		CHECK(factories >= 1);
+		CHECK(combat + server.factions[k].stats.units_lost >= 6); // and fielded units (observed 8 and 10)
+	}
+	for (int k = 0; k < FACTION_COUNT; k++) sim_destroy(&clients[k]);
+	sim_destroy(&server);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+}
+
+// A player's economy, scripted: engineers take a queue of builds in turn and
+// a factory produces on repeat. No bots: only the orders a player gives.
+static void test_build_orders(void)
+{
+	const char *text =
+		"scenario economy\n"
+		"bot blue off\n"
+		"bot red off\n"
+		"at 1 select blue engineer as crew\n"
+		"at 1 select blue factory as plant\n"
+		"at 2 queue crew extractor at 46,229\n"
+		"at 2 queue crew extractor at 92,226\n"
+		"at 2 queue crew generator at 36,280\n"
+		"at 2 produce plant raider 2 repeat\n"
+		"at 1800 expect blue extractors == 2\n"
+		"at 1800 expect blue generators == 1\n"
+		"at 1800 expect blue raiders >= 4\n"
+		"at 1800 expect red spawned == 3\n"; // red did nothing
+	Arena a = arena_create("build orders", 64 << 20);
+	Script s;
+	char err[512];
+	CHECK(script_parse(&s, &a, (Str){text, (ptrdiff_t)strlen(text)}, "t.script", err, sizeof err));
+	Sim sim;
+	sim_init(&sim, s.config);
+	ScriptRun run;
+	script_run_init(&run, &s, &a, stderr);
+	Arena tick = arena_create("tick", 16 << 20);
+	Command cmds[64];
+	while (sim.tick.v < s.end) {
+		arena_reset(&tick);
+		ptrdiff_t n = script_tick(&run, &sim, &tick, cmds, countof(cmds));
+		sim_step(&sim, cmds, n);
+	}
+	CHECK(run.expects == 4 && run.failures == 0);
+	sim_destroy(&sim);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+}
+
 typedef struct {
 	const char *name;
 	void (*run)(void);
@@ -559,6 +678,8 @@ static const Test tests[] = {
 	{"script", test_script},
 	{"wire", test_wire},
 	{"split", test_split},
+	{"economy", test_economy},
+	{"build_orders", test_build_orders},
 };
 
 // tests            run all, in order

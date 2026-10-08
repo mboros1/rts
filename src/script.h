@@ -7,17 +7,24 @@
 //   title Scripted flank              # shown on the clip's title card
 //   about Raiders swing north and hit red's side
 //   scenario skirmish                 # starting config and bot behaviour
-//   seed 7 | units 400 | weights 6 3 2 | respawn off
+//   seed 7 | units 400 | weights 6 3 2 | respawn off | economy on
 //   bot red off                       # at tick 0
 //   clip 200..700                     # default clip window
+//   speed 4                           # time-lapse clips: a frame every 4 ticks
 //   camera director | camera 256,256 180
 //   end 900                           # default: after the last action/clip
 //
 //   at 0   spawn blue tank 20 at 120,256 radius 10
 //   at 1   select blue tank within 30 of 120,256 max 20 as column
 //   at 30  move column 256,90         # also: attack-move, stop
+//   at 40  build crew extractor at 92,226   # engineers; also generator, factory
+//   at 40  queue crew generator at 40,280   # build once the group is done building
+//   at 40  produce plant raider 2 repeat    # factories: queue N (0 clears)
 //   at 60  bot red on
 //   at 600 expect red lost > 50       # side fields: units lost fired shells spawned
+//                                     #   metal energy metal_income energy_income
+//                                     #   and finished counts: raiders tanks artillery
+//                                     #   engineers extractors generators factories
 //   at 600 expect column alive >= 15  # group field: alive
 //
 // Selections are queries resolved at their tick: SIDE, TYPE (raider, tank,
@@ -33,6 +40,7 @@
 typedef enum : uint8_t {
 	ACTION_SELECT,
 	ACTION_ORDER,
+	ACTION_QUEUE,           // a build that waits for the group to finish
 	ACTION_SPAWN,
 	ACTION_BOT,
 	ACTION_EXPECT,
@@ -45,6 +53,11 @@ typedef enum : uint8_t {
 	FIELD_SHELLS,
 	FIELD_SPAWNED,
 	FIELD_ALIVE,      // groups only
+	FIELD_METAL,
+	FIELD_ENERGY,
+	FIELD_METAL_INCOME,
+	FIELD_ENERGY_INCOME,
+	FIELD_COUNT,      // finished units of `type`
 } ExpectField;
 
 typedef enum : uint8_t { OP_LT, OP_LE, OP_GT, OP_GE, OP_EQ, OP_NE } ExpectOp;
@@ -60,7 +73,8 @@ typedef struct {
 	float radius;           // select area, spawn radius
 	V2 at;                  // select area centre, spawn point, order target
 	int32_t limit;          // select max (0 for all), spawn amount
-	CommandKind command;    // order
+	CommandKind command;    // order; build and produce use type and limit
+	uint8_t flags;          // produce: COMMAND_REPEAT
 	bool on;                // bot
 	ExpectField field;      // expect
 	ExpectOp op;
@@ -80,6 +94,7 @@ typedef struct {
 	const char **groups;
 	ptrdiff_t group_count;
 	int64_t clip_from, clip_to;
+	int32_t speed;                 // clip time-lapse: one frame every N ticks
 	int64_t end;
 	bool fixed_camera;
 	V2 camera_at;
@@ -97,6 +112,9 @@ typedef struct {
 	UnitHandle **group_units;
 	ptrdiff_t *group_len;
 	FactionId *group_side;
+	// Queued builds per group, issued one at a time as the group goes idle.
+	const ScriptAction ***queued;
+	int32_t *queued_head, *queued_len;
 	int32_t expects;
 	int32_t failures;
 	FILE *log;                     // expect results go here; may be nullptr

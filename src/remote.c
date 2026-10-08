@@ -102,11 +102,14 @@ Scene remote_scene(const Remote *r, const V2 base[FACTION_COUNT], Arena *arena)
 	const Sim *sim = &r->sim;
 	FactionId me = r->faction, them = faction_enemy(me);
 	const Faction *f = &sim->factions[me.v];
-	Scene s = {.terrain = &sim->terrain, .tick = sim->tick.v, .max_units = sim->config.max_units};
+	Scene s = {.terrain = &sim->terrain, .tick = sim->tick.v, .max_units = sim->config.max_units,
+	           .economy = sim->config.economy, .spots = &sim->spots};
 	for (int k = 0; k < FACTION_COUNT; k++) s.base[k] = base[k];
+	// A player knows which spots are its own, and nothing else about them.
+	for (int k = 0; k < MAX_SPOTS; k++) s.spot_owner[k] = (int8_t)(f->economy.spots >> k & 1 ? (int)me.v : -1);
 
 	const Units *u = &f->units;
-	s.units[me.v] = (SceneUnits){u->count, u->px, u->py, u->pz, u->vx, u->vz, u->type, u->dense_slot};
+	s.units[me.v] = (SceneUnits){u->count, u->px, u->py, u->pz, u->vx, u->vz, u->type, u->dense_slot, u->progress};
 	const Projectiles *p = &f->incoming;
 	s.shells[me.v] = (SceneShells){p->count, p->px, p->py, p->pz, p->vx, p->vy, p->vz, p->weapon};
 
@@ -130,7 +133,7 @@ Scene remote_scene(const Remote *r, const V2 base[FACTION_COUNT], Arena *arena)
 		slot[n] = (int32_t)k;
 		n++;
 	}
-	s.units[them.v] = (SceneUnits){n, px, py, pz, vx, vz, type, slot};
+	s.units[them.v] = (SceneUnits){n, px, py, pz, vx, vz, type, slot, nullptr};
 	const OutgoingShells *o = &r->outgoing;
 	s.shells[them.v] = (SceneShells){o->count, o->px, o->py, o->pz, o->vx, o->vy, o->vz, o->weapon};
 	return s;

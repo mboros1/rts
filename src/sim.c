@@ -6,12 +6,14 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.height = 1.2f, .hp = 60.0f, .range = 24.0f, .reload = 15,
 		.shell_speed = 45.0f, .damage = 12.0f, .splash = 0.0f,
 		.spread = 0.6f, .high_arc = false, .weight = 6,
+		.metal_cost = 50.0f, .energy_cost = 300.0f, .build_time = 60.0f,
 	},
 	[UNIT_TANK] = {
 		.name = "tank", .speed = 5.0f, .accel = 12.0f, .radius = 1.4f, .sight = 32.0f,
 		.height = 1.8f, .hp = 240.0f, .range = 32.0f, .reload = 36,
 		.shell_speed = 42.0f, .damage = 48.0f, .splash = 1.5f,
 		.spread = 0.8f, .high_arc = false, .weight = 3,
+		.metal_cost = 150.0f, .energy_cost = 700.0f, .build_time = 150.0f,
 	},
 	[UNIT_ARTILLERY] = {
 		// Outranges its own sight: artillery needs spotters.
@@ -19,10 +21,39 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.height = 1.4f, .hp = 90.0f, .range = 78.0f, .reload = 90,
 		.shell_speed = 40.0f, .damage = 60.0f, .splash = 4.0f,
 		.spread = 2.0f, .high_arc = true, .weight = 2,
+		.metal_cost = 120.0f, .energy_cost = 900.0f, .build_time = 140.0f,
+	},
+	[UNIT_ENGINEER] = {
+		.name = "engineer", .speed = 6.0f, .accel = 20.0f, .radius = 0.9f, .sight = 30.0f,
+		.height = 1.0f, .hp = 120.0f, .build_power = 10.0f,
+		.metal_cost = 60.0f, .energy_cost = 400.0f, .build_time = 70.0f,
+	},
+	[UNIT_EXTRACTOR] = {
+		.name = "extractor", .radius = 1.6f, .sight = 20.0f, .height = 1.6f, .hp = 300.0f,
+		.metal_cost = 50.0f, .energy_cost = 500.0f, .build_time = 60.0f, .metal_income = 3.0f,
+	},
+	[UNIT_GENERATOR] = {
+		.name = "generator", .radius = 1.8f, .sight = 16.0f, .height = 3.0f, .hp = 200.0f,
+		.metal_cost = 40.0f, .energy_cost = 0.0f, .build_time = 50.0f, .energy_income = 40.0f,
+	},
+	[UNIT_FACTORY] = {
+		.name = "factory", .radius = 4.0f, .sight = 30.0f, .height = 3.5f, .hp = 1500.0f,
+		.build_power = 15.0f, .metal_cost = 300.0f, .energy_cost = 1500.0f, .build_time = 300.0f,
 	},
 };
 
 static constexpr float MAX_SIGHT = 48.0f;
+static constexpr float MAX_RADIUS = 4.0f;           // factories; separation reach
+
+// The economy's constants: what a faction starts with and earns for free
+// (its headquarters), and how close a builder must be.
+static constexpr float START_METAL = 600.0f;
+static constexpr float START_ENERGY = 3000.0f;
+static constexpr float METAL_CAP = 2000.0f;
+static constexpr float ENERGY_CAP = 10000.0f;
+static constexpr float BASE_METAL_INCOME = 1.0f;
+static constexpr float BASE_ENERGY_INCOME = 30.0f;
+static constexpr float BUILD_RANGE = 6.0f;          // beyond the structure's radius
 static constexpr float GRID_CELL = 8.0f;
 static constexpr int32_t RETARGET_PERIOD = 8;
 static constexpr float ARRIVE_RADIUS = 3.0f;
@@ -48,6 +79,37 @@ SimConfig sim_config_default(void)
 	};
 }
 
+// ---------------------------------------------------------------- metal spots
+
+int32_t spot_at(const Spots *spots, V2 at)
+{
+	for (int32_t k = 0; k < spots->count; k++)
+		if (v2_len2(v2_sub(spots->at[k], at)) <= SPOT_RADIUS * SPOT_RADIUS) return k;
+	return -1;
+}
+
+// Mirrored pairs, so neither side's half is richer: two close to each base,
+// the rest scattered and spaced apart. Deterministic from the seed.
+static void spots_generate(Spots *s, const Terrain *t, uint64_t seed, const V2 base[FACTION_COUNT])
+{
+	*s = (Spots){0};
+	Rng rng = rng_seed(seed ^ 0x5b075u);
+	float mid = t->size_x * 0.5f;
+	V2 near[2] = {v2(base[0].x + 28.0f, base[0].z - 30.0f), v2(base[0].x + 28.0f, base[0].z + 30.0f)};
+	for (int k = 0; k < 2; k++) {
+		s->at[s->count++] = near[k];
+		s->at[s->count++] = v2(t->size_x - near[k].x, near[k].z);
+	}
+	for (int tries = 0; tries < 4000 && s->count + 2 <= MAX_SPOTS - 8; tries++) {
+		V2 p = v2(rng_range(&rng, 40.0f, mid - 20.0f), rng_range(&rng, 40.0f, t->size_z - 40.0f));
+		bool apart = true;
+		for (int32_t k = 0; k < s->count && apart; k++) apart = v2_len2(v2_sub(s->at[k], p)) > 40.0f * 40.0f;
+		if (!apart) continue;
+		s->at[s->count++] = p;
+		s->at[s->count++] = v2(t->size_x - p.x, p.z);
+	}
+}
+
 // ---------------------------------------------------------------- units
 
 static void units_init(Units *u, Arena *a, ptrdiff_t cap)
@@ -70,6 +132,13 @@ static void units_init(Units *u, Arena *a, ptrdiff_t cap)
 	u->cooldown = PUSH(a, int32_t, cap);
 	u->target = PUSH(a, UnitHandle, cap);
 	u->engaged = PUSH(a, uint8_t, cap);
+	u->progress = PUSH(a, float, cap);
+	u->build_type = PUSH(a, UnitType, cap);
+	u->building = PUSH(a, UnitHandle, cap);
+	u->work = PUSH(a, float, cap);
+	u->queue = PUSH(a, uint64_t, cap);
+	u->queue_len = PUSH(a, uint8_t, cap);
+	u->repeat = PUSH(a, uint8_t, cap);
 	// Free list pops from the end, so the first spawn gets slot 0.
 	for (ptrdiff_t s = 0; s < cap; s++) {
 		u->slot_dense[s] = -1;
@@ -114,6 +183,13 @@ static ptrdiff_t units_spawn(Units *u, UnitType type, float x, float z, float y)
 	u->cooldown[d] = 0;
 	u->target[d] = NO_UNIT;
 	u->engaged[d] = 0;
+	u->progress[d] = 1.0f;
+	u->build_type[d] = UNIT_EXTRACTOR;
+	u->building[d] = NO_UNIT;
+	u->work[d] = 0.0f;
+	u->queue[d] = 0;
+	u->queue_len[d] = 0;
+	u->repeat[d] = 0;
 	return d;
 }
 
@@ -128,6 +204,8 @@ static void units_kill(Units *u, ptrdiff_t d)
 		MOVE(dense_slot); MOVE(px); MOVE(py); MOVE(pz); MOVE(vx); MOVE(vz);
 		MOVE(hp); MOVE(type); MOVE(order); MOVE(tx); MOVE(tz);
 		MOVE(cooldown); MOVE(target); MOVE(engaged);
+		MOVE(progress); MOVE(build_type); MOVE(building); MOVE(work);
+		MOVE(queue); MOVE(queue_len); MOVE(repeat);
 #undef MOVE
 		u->slot_dense[u->dense_slot[d]] = (int32_t)d;
 	}
@@ -262,9 +340,34 @@ static ptrdiff_t view_find(const EnemyView *v, UnitHandle h)
 	return i;
 }
 
+// Each metal spot belongs to whichever faction has a finished extractor on
+// it. A holder keeps it while its extractor stands; a spot both claim at
+// once, with no holder, belongs to nobody.
+static void contest_spots(Sim *sim)
+{
+	bool claim[FACTION_COUNT][MAX_SPOTS] = {0};
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		const Units *u = &sim->factions[f].units;
+		for (ptrdiff_t i = 0; i < u->count; i++) {
+			if (u->type[i] != UNIT_EXTRACTOR || u->progress[i] < 1.0f) continue;
+			int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
+			if (k >= 0) claim[f][k] = true;
+		}
+	}
+	uint64_t owned[FACTION_COUNT] = {0};
+	for (int32_t k = 0; k < sim->spots.count; k++) {
+		int8_t o = sim->spot_owner[k];
+		if (o < 0 || !claim[o][k]) o = claim[0][k] && !claim[1][k] ? 0 : claim[1][k] && !claim[0][k] ? 1 : -1;
+		sim->spot_owner[k] = o;
+		if (o >= 0) owned[o] |= (uint64_t)1 << k;
+	}
+	for (int f = 0; f < FACTION_COUNT; f++) sim->effects[f].spots = owned[f];
+}
+
 static void interaction_phase(Sim *sim)
 {
 	arena_reset(&sim->interaction);
+	contest_spots(sim);
 	for (int t = 0; t < FACTION_COUNT; t++) {
 		// Shells fired at t last tick arrive now, in firing order.
 		const Faction *from = &sim->factions[faction_enemy((FactionId){(uint32_t)t}).v];
@@ -307,7 +410,41 @@ static const OrderKind order_for_command[] = {
 	[COMMAND_STOP] = ORDER_IDLE,
 	[COMMAND_MOVE] = ORDER_MOVE,
 	[COMMAND_ATTACK_MOVE] = ORDER_ATTACK_MOVE,
+	[COMMAND_BUILD] = ORDER_BUILD,
 };
+
+static UnitType queue_front(const Units *u, ptrdiff_t d) { return (UnitType)(u->queue[d] & 0xff); }
+
+static void queue_push(Units *u, ptrdiff_t d, UnitType t)
+{
+	if (u->queue_len[d] == FACTORY_QUEUE) return;
+	u->queue[d] |= (uint64_t)t << (8 * u->queue_len[d]);
+	u->queue_len[d]++;
+}
+
+static void queue_pop(Units *u, ptrdiff_t d)
+{
+	u->queue[d] >>= 8;
+	u->queue_len[d]--;
+}
+
+// Factories queue units; anything else ignores a produce command.
+static void apply_produce(Faction *f, const Command *c)
+{
+	if (c->unit_type >= UNIT_EXTRACTOR || c->amount < 0 || c->amount > FACTORY_QUEUE) return;
+	Units *u = &f->units;
+	for (ptrdiff_t k = 0; k < c->count; k++) {
+		ptrdiff_t d = units_find(u, c->units[k]);
+		if (d < 0 || u->type[d] != UNIT_FACTORY || u->progress[d] < 1.0f) continue;
+		if (c->amount == 0) {
+			u->queue[d] = 0;
+			u->queue_len[d] = 0;
+			u->work[d] = 0.0f;
+		}
+		for (int32_t n = 0; n < c->amount; n++) queue_push(u, d, c->unit_type);
+		u->repeat[d] = (c->flags & COMMAND_REPEAT) != 0;
+	}
+}
 
 // Orders keep the group's shape: each unit aims at the target plus its offset
 // from the group's centre, squeezed so the group doesn't stay spread out.
@@ -319,6 +456,11 @@ static void apply_command(Faction *f, const Terrain *t, const Command *c)
 		apply_spawn(f, t, c);
 		return;
 	}
+	if (c->kind == COMMAND_PRODUCE) {
+		apply_produce(f, c);
+		return;
+	}
+	if (c->kind == COMMAND_BUILD && !unit_is_structure(c->unit_type)) return;
 	Units *u = &f->units;
 	V2 target = clamp_to_map(t, c->target, 1.0f);
 
@@ -343,21 +485,26 @@ static void apply_command(Faction *f, const Terrain *t, const Command *c)
 
 	for (ptrdiff_t k = 0; k < c->count; k++) {
 		ptrdiff_t d = units_find(u, c->units[k]);
-		if (d < 0) continue;
+		if (d < 0 || unit_is_structure(u->type[d])) continue;
+		// Builders all go to the one site; others keep the group's shape.
+		bool build = c->kind == COMMAND_BUILD;
+		if (build && u->type[d] != UNIT_ENGINEER) continue;
 		V2 offset = v2_scale(v2_sub(v2(u->px[d], u->pz[d]), centre), squeeze);
-		V2 dest = clamp_to_map(t, v2_add(target, offset), 1.0f);
+		V2 dest = build ? target : clamp_to_map(t, v2_add(target, offset), 1.0f);
 		u->order[d] = order_for_command[c->kind];
 		u->tx[d] = dest.x;
 		u->tz[d] = dest.z;
+		u->building[d] = NO_UNIT;
+		if (build) u->build_type[d] = c->unit_type;
 	}
 }
 
-static UnitType pick_type(Rng *rng, const int32_t weight[UNIT_TYPE_COUNT])
+static UnitType pick_type(Rng *rng, const int32_t weight[COMBAT_TYPE_COUNT])
 {
 	int32_t total = 0;
-	for (int k = 0; k < UNIT_TYPE_COUNT; k++) total += weight[k];
+	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) total += weight[k];
 	int32_t roll = (int32_t)rng_below(rng, (uint32_t)total);
-	for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
+	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) {
 		roll -= weight[k];
 		if (roll < 0) return (UnitType)k;
 	}
@@ -372,7 +519,7 @@ static void spawn_near_base(Faction *f, const SimConfig *c, const Terrain *t, fl
 static void spawn(Faction *f, const Sim *sim)
 {
 	const SimConfig *c = &sim->config;
-	if (sim->tick.v % c->spawn_interval != 0) return;
+	if (c->economy || sim->tick.v % c->spawn_interval != 0) return;
 	// The population limit is a game rule, checked before the pool is asked.
 	if (f->units.count >= c->population || f->units.count >= f->units.cap) return;
 	spawn_near_base(f, c, &sim->terrain, 20.0f);
@@ -393,9 +540,18 @@ static void move_units(Faction *f, const Terrain *t)
 	// the order units are visited.
 	for (ptrdiff_t i = 0; i < n; i++) {
 		const UnitDef *def = &unit_defs[u->type[i]];
+		if (unit_is_structure(u->type[i])) {
+			nvx[i] = nvz[i] = cx[i] = cz[i] = 0.0f;
+			continue;
+		}
 		V2 p = v2(u->px[i], u->pz[i]);
 		V2 desired = v2(0.0f, 0.0f);
-		if (u->order[i] != ORDER_IDLE) {
+		if (u->order[i] == ORDER_BUILD) {
+			V2 to = v2_sub(v2(u->tx[i], u->tz[i]), p);
+			float d = v2_len(to);
+			float reach = BUILD_RANGE + unit_defs[u->build_type[i]].radius;
+			if (d > reach) desired = v2_scale(to, def->speed / d);
+		} else if (u->order[i] != ORDER_IDLE) {
 			V2 to = v2_sub(v2(u->tx[i], u->tz[i]), p);
 			float d = v2_len(to);
 			if (d < ARRIVE_RADIUS) {
@@ -411,7 +567,7 @@ static void move_units(Faction *f, const Terrain *t)
 		nvz[i] = v.z;
 
 		V2 push = v2(0.0f, 0.0f);
-		float reach = def->radius + MAX_UNIT_RADIUS;
+		float reach = def->radius + MAX_RADIUS;
 		CellRange r = grid_range(&grid, p.x - reach, p.z - reach, p.x + reach, p.z + reach);
 		int32_t j;
 		GRID_FOR(&grid, r, j) {
@@ -425,8 +581,10 @@ static void move_units(Faction *f, const Terrain *t)
 				push.x += (i < j ? 0.05f : -0.05f);
 				continue;
 			}
+			// Two movers share the correction; a structure doesn't budge.
+			float share = unit_is_structure(u->type[j]) ? 1.0f : 0.5f;
 			float d = f_sqrt(d2);
-			push = v2_add(push, v2_scale(away, 0.5f * (min_d - d) / d));
+			push = v2_add(push, v2_scale(away, share * (min_d - d) / d));
 		}
 		push = v2_limit(push, SEPARATION_MAX);
 		cx[i] = push.x;
@@ -435,6 +593,7 @@ static void move_units(Faction *f, const Terrain *t)
 
 	for (ptrdiff_t i = 0; i < n; i++) {
 		const UnitDef *def = &unit_defs[u->type[i]];
+		if (unit_is_structure(u->type[i])) continue;
 		u->vx[i] = nvx[i];
 		u->vz[i] = nvz[i];
 		V2 p = v2(u->px[i] + nvx[i] * SIM_DT + cx[i], u->pz[i] + nvz[i] * SIM_DT + cz[i]);
@@ -578,6 +737,7 @@ static void fire_weapons(Faction *f, const EnemyView *v, const Terrain *t, Tick 
 		const UnitDef *def = &unit_defs[u->type[i]];
 		if (u->cooldown[i] > 0) u->cooldown[i]--;
 		u->engaged[i] = 0;
+		if (def->range <= 0.0f) continue;
 
 		V2 p = v2(u->px[i], u->pz[i]);
 		ptrdiff_t e = view_find(v, u->target[i]);
@@ -600,6 +760,175 @@ static void fire_weapons(Faction *f, const EnemyView *v, const Terrain *t, Tick 
 	}
 }
 
+// ---------------------------------------------------------------- economy
+
+bool placement_ok(const Sim *sim, FactionId fid, UnitType type, V2 at)
+{
+	const Terrain *t = &sim->terrain;
+	const Faction *f = &sim->factions[fid.v];
+	const UnitDef *def = &unit_defs[type];
+	if (!unit_is_structure(type)) return false;
+	float margin = def->radius + 2.0f;
+	if (at.x < margin || at.z < margin || at.x > t->size_x - margin || at.z > t->size_z - margin) return false;
+	int32_t spot = spot_at(&sim->spots, at);
+	if (type == UNIT_EXTRACTOR && spot < 0) return false;
+	const Units *u = &f->units;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (!unit_is_structure(u->type[i])) continue;
+		float min_d = def->radius + unit_defs[u->type[i]].radius + 1.0f;
+		if (v2_len2(v2_sub(v2(u->px[i], u->pz[i]), at)) < min_d * min_d) return false;
+		if (type == UNIT_EXTRACTOR && u->type[i] == UNIT_EXTRACTOR && spot_at(&sim->spots, v2(u->px[i], u->pz[i])) == spot)
+			return false;
+	}
+	const Perception *seen = &f->seen;
+	for (ptrdiff_t s = 0; s < seen->cap; s++) {
+		if (!seen->live[s] || !unit_is_structure(seen->type[s])) continue;
+		float min_d = def->radius + unit_defs[seen->type[s]].radius + 1.0f;
+		if (v2_len2(v2_sub(perception_at(seen, s, sim->tick), at)) < min_d * min_d) return false;
+	}
+	return true;
+}
+
+// A builder's part in this tick: whose progress it advances and how much
+// work it offers. Factories build their queue's front item.
+typedef struct {
+	int32_t builder;     // dense index
+	int32_t target;      // structure being built, or -1 for a factory's item
+	UnitType type;       // what the work is for
+	float work;
+} Job;
+
+// An engineer at its site starts the structure, or helps with one already
+// started there. Returns the structure's dense index, or -1.
+static ptrdiff_t engineer_site(Faction *f, const Sim *sim, ptrdiff_t e)
+{
+	Units *u = &f->units;
+	ptrdiff_t s = units_find(u, u->building[e]);
+	if (s >= 0 && u->progress[s] < 1.0f) return s;
+	u->building[e] = NO_UNIT;
+	UnitType type = u->build_type[e];
+	V2 site = v2(u->tx[e], u->tz[e]);
+	if (type == UNIT_EXTRACTOR) {
+		int32_t k = spot_at(&sim->spots, site);
+		if (k >= 0) site = sim->spots.at[k];
+	}
+	if (v2_len(v2_sub(v2(u->px[e], u->pz[e]), site)) > BUILD_RANGE + unit_defs[type].radius) return -1;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] != type || u->progress[i] >= 1.0f) continue;
+		if (v2_len2(v2_sub(v2(u->px[i], u->pz[i]), site)) < 9.0f) {
+			u->building[e] = units_handle(u, i);
+			return i;
+		}
+	}
+	if (u->count == u->cap || !placement_ok(sim, f->id, type, site)) {
+		u->order[e] = ORDER_IDLE; // nothing to do here: report back idle
+		return -1;
+	}
+	s = units_spawn(u, type, site.x, site.z, terrain_height(&sim->terrain, site.x, site.z));
+	u->progress[s] = 0.0f;
+	u->hp[s] = 0.1f * unit_defs[type].hp;
+	f->stats.units_spawned++;
+	u->building[e] = units_handle(u, s);
+	return s;
+}
+
+// Units leave a factory on the side facing the middle of the map.
+static void factory_release(Faction *f, const Sim *sim, ptrdiff_t fac, UnitType type)
+{
+	Units *u = &f->units;
+	if (u->count == u->cap) return;
+	float face = u->px[fac] < sim->terrain.size_x * 0.5f ? 1.0f : -1.0f;
+	float off = unit_defs[UNIT_FACTORY].radius + unit_defs[type].radius + 1.5f;
+	V2 at = clamp_to_map(&sim->terrain, v2(u->px[fac] + off * face, u->pz[fac]), 2.0f);
+	units_spawn(u, type, at.x, at.z, terrain_height(&sim->terrain, at.x, at.z));
+	f->stats.units_spawned++;
+}
+
+// Income, then every builder's work at one shared rate the store can pay for.
+static void run_economy(Faction *f, const Sim *sim)
+{
+	Economy *e = &f->economy;
+	Units *u = &f->units;
+	float income_m = BASE_METAL_INCOME, income_e = BASE_ENERGY_INCOME;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->progress[i] < 1.0f) continue;
+		const UnitDef *def = &unit_defs[u->type[i]];
+		income_e += def->energy_income;
+		if (def->metal_income > 0.0f) {
+			int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
+			if (k >= 0 && (e->spots >> k & 1)) income_m += def->metal_income;
+		}
+	}
+	e->metal = f_min(e->metal + income_m * SIM_DT, e->metal_cap);
+	e->energy = f_min(e->energy + income_e * SIM_DT, e->energy_cap);
+	e->metal_income = income_m;
+	e->energy_income = income_e;
+
+	Job *jobs = PUSH(&f->scratch, Job, u->count);
+	ptrdiff_t n = 0;
+	float want_m = 0.0f, want_e = 0.0f;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		Job j = {(int32_t)i, -1, UNIT_RAIDER, 0.0f};
+		if (u->type[i] == UNIT_ENGINEER && u->order[i] == ORDER_BUILD) {
+			ptrdiff_t s = engineer_site(f, sim, i);
+			if (s < 0) continue;
+			j.target = (int32_t)s;
+			j.type = u->type[s];
+			j.work = unit_defs[UNIT_ENGINEER].build_power * SIM_DT;
+		} else if (u->type[i] == UNIT_FACTORY && u->progress[i] >= 1.0f && u->queue_len[i] > 0) {
+			j.type = queue_front(u, i);
+			j.work = unit_defs[UNIT_FACTORY].build_power * SIM_DT;
+		} else {
+			continue;
+		}
+		const UnitDef *def = &unit_defs[j.type];
+		want_m += def->metal_cost * j.work / def->build_time;
+		want_e += def->energy_cost * j.work / def->build_time;
+		jobs[n++] = j;
+	}
+	float rate_m = want_m > e->metal ? e->metal / want_m : 1.0f;
+	float rate_e = want_e > e->energy ? e->energy / want_e : 1.0f;
+	e->rate = n ? f_min(rate_m, rate_e) : 1.0f;
+	e->metal_wanted = want_m / SIM_DT;
+	e->energy_wanted = want_e / SIM_DT;
+
+	float spent_m = 0.0f, spent_e = 0.0f;
+	for (ptrdiff_t k = 0; k < n; k++) {
+		const Job *j = &jobs[k];
+		const UnitDef *def = &unit_defs[j->type];
+		float rate = 1.0f;
+		if (def->metal_cost > 0.0f) rate = f_min(rate, rate_m);
+		if (def->energy_cost > 0.0f) rate = f_min(rate, rate_e);
+		float step = j->work * rate / def->build_time;
+		if (j->target >= 0) {
+			// Never past done, and never paying for more than was built.
+			step = f_min(step, 1.0f - u->progress[j->target]);
+			u->progress[j->target] += step;
+			u->hp[j->target] += 0.9f * def->hp * step;
+			if (u->progress[j->target] >= 1.0f) {
+				u->progress[j->target] = 1.0f;
+				u->order[j->builder] = ORDER_IDLE;
+				u->building[j->builder] = NO_UNIT;
+			}
+		} else {
+			step = f_min(step, 1.0f - u->work[j->builder]);
+			u->work[j->builder] += step;
+			if (u->work[j->builder] >= 1.0f) {
+				u->work[j->builder] = 0.0f;
+				queue_pop(u, j->builder);
+				if (u->repeat[j->builder]) queue_push(u, j->builder, j->type);
+				factory_release(f, sim, j->builder, j->type);
+			}
+		}
+		spent_m += def->metal_cost * step;
+		spent_e += def->energy_cost * step;
+	}
+	e->metal = f_max(0.0f, e->metal - spent_m);
+	e->energy = f_max(0.0f, e->energy - spent_e);
+	e->metal_spent = spent_m / SIM_DT;
+	e->energy_spent = spent_e / SIM_DT;
+}
+
 static void remove_dead(Faction *f)
 {
 	Units *u = &f->units;
@@ -615,6 +944,7 @@ static void remove_dead(Faction *f)
 static void apply_effects(Faction *f, const FactionEffects *fx, Tick tick)
 {
 	f->outbox_count = 0;
+	f->economy.spots = fx->spots;
 	Projectiles *p = &f->incoming;
 	for (ptrdiff_t k = 0; k < fx->arrived_count; k++) {
 		const Launch *l = &fx->arrived[k];
@@ -700,6 +1030,7 @@ static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const 
 		if (commands[k].faction.v == f->id.v) apply_command(f, &sim->terrain, &commands[k]);
 	spawn(f, sim);
 	move_units(f, &sim->terrain);
+	if (sim->config.economy) run_economy(f, sim);
 	fly_projectiles(f, &sim->terrain);
 	fire_weapons(f, &f->view, &sim->terrain, sim->tick);
 	remove_dead(f);
@@ -713,7 +1044,7 @@ void sim_init(Sim *sim, SimConfig config)
 	ASSERT(config.population <= config.max_units && config.initial_units <= config.population);
 	ASSERT(config.spawn_interval > 0);
 	int32_t weights = 0;
-	for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
+	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) {
 		ASSERT(config.type_weight[k] >= 0 && config.type_weight[k] <= 1000);
 		weights += config.type_weight[k];
 	}
@@ -748,9 +1079,24 @@ void sim_init(Sim *sim, SimConfig config)
 		f->outbox = PUSH(&sim->zone, Launch, f->outbox_cap);
 		f->scratch = arena_create(scratch_names[k], (ptrdiff_t)64 << 20);
 
+		f->economy = (Economy){START_METAL, START_ENERGY, METAL_CAP, ENERGY_CAP, .rate = 1.0f};
+		if (config.economy) {
+			// A factory facing the middle, and two engineers beside it.
+			float face = k == 0 ? 1.0f : -1.0f;
+			V2 at = v2(f->base.x + 10.0f * face, f->base.z);
+			units_spawn(&f->units, UNIT_FACTORY, at.x, at.z, terrain_height(t, at.x, at.z));
+			for (int e = 0; e < 2; e++) {
+				V2 q = v2(at.x + 9.0f * face, at.z + (e ? 6.0f : -6.0f));
+				units_spawn(&f->units, UNIT_ENGINEER, q.x, q.z, terrain_height(t, q.x, q.z));
+			}
+			f->stats.units_spawned += 3;
+			continue;
+		}
 		float spread = 1.6f * f_sqrt((float)config.initial_units);
 		for (int32_t n = 0; n < config.initial_units; n++) spawn_near_base(f, &config, t, spread);
 	}
+	spots_generate(&sim->spots, t, config.seed, bases);
+	for (int k = 0; k < MAX_SPOTS; k++) sim->spot_owner[k] = -1;
 }
 
 void sim_destroy(Sim *sim)
@@ -798,6 +1144,13 @@ static Hash hash_units(Hash h, const Units *u)
 		h = hash_u32(h, u->target[i].index);
 		h = hash_u32(h, u->target[i].generation);
 		h = hash_u32(h, u->engaged[i]);
+		h = hash_f32(h, u->progress[i]);
+		h = hash_u32(h, u->build_type[i]);
+		h = hash_u32(h, u->building[i].index);
+		h = hash_u32(h, u->building[i].generation);
+		h = hash_f32(h, u->work[i]);
+		h = hash_u64(h, u->queue[i]);
+		h = hash_u32(h, (uint32_t)u->queue_len[i] << 8 | u->repeat[i]);
 	}
 	return h;
 }
@@ -856,6 +1209,11 @@ Hash faction_hash(const Faction *f)
 	h = hash_u64(h, (uint64_t)f->stats.units_spawned);
 	h = hash_u64(h, (uint64_t)f->stats.units_lost);
 	h = hash_u64(h, (uint64_t)f->stats.launches_dropped);
+	const Economy *e = &f->economy;
+	float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
+	              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
+	for (int k = 0; k < (int)countof(ef); k++) h = hash_f32(h, ef[k]);
+	h = hash_u64(h, e->spots);
 	return hash_perception(h, &f->seen);
 }
 
@@ -863,6 +1221,7 @@ Hash sim_hash_now(const Sim *sim)
 {
 	Hash h = hash_u64(hash_begin(), (uint64_t)sim->tick.v);
 	for (int k = 0; k < FACTION_COUNT; k++) h = hash_u64(h, faction_hash(&sim->factions[k]).v);
+	for (int k = 0; k < MAX_SPOTS; k++) h = hash_u32(h, (uint32_t)(int32_t)sim->spot_owner[k]);
 	return h;
 }
 
@@ -896,6 +1255,14 @@ void faction_write(const Faction *f, ByteBuf *b)
 		put32(b, u->target[i].index);
 		put32(b, u->target[i].generation);
 		put8(b, u->engaged[i]);
+		putf(b, u->progress[i]);
+		put8(b, u->build_type[i]);
+		put32(b, u->building[i].index);
+		put32(b, u->building[i].generation);
+		putf(b, u->work[i]);
+		put64(b, u->queue[i]);
+		put8(b, u->queue_len[i]);
+		put8(b, u->repeat[i]);
 	}
 	const Projectiles *p = &f->incoming;
 	put32(b, (uint32_t)p->count);
@@ -926,6 +1293,11 @@ void faction_write(const Faction *f, ByteBuf *b)
 	put64(b, (uint64_t)f->stats.units_spawned);
 	put64(b, (uint64_t)f->stats.units_lost);
 	put64(b, (uint64_t)f->stats.launches_dropped);
+	const Economy *e = &f->economy;
+	float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
+	              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
+	for (int k = 0; k < (int)countof(ef); k++) putf(b, ef[k]);
+	put64(b, e->spots);
 	const Perception *seen = &f->seen;
 	uint32_t live = 0;
 	for (ptrdiff_t s = 0; s < seen->cap; s++) live += seen->live[s];
@@ -983,7 +1355,20 @@ bool faction_read(Faction *f, ByteReader *r)
 		u->cooldown[i] = (int32_t)get32(r);
 		u->target[i] = (UnitHandle){get32(r), get32(r)};
 		u->engaged[i] = get8(r);
-		if (type >= UNIT_TYPE_COUNT || order >= ORDER_KIND_COUNT || u->engaged[i] > 1 || u->cooldown[i] < 0) return false;
+		u->progress[i] = getf(r);
+		uint8_t build_type = get8(r);
+		u->building[i] = (UnitHandle){get32(r), get32(r)};
+		u->work[i] = getf(r);
+		u->queue[i] = get64(r);
+		u->queue_len[i] = get8(r);
+		u->repeat[i] = get8(r);
+		if (type >= UNIT_TYPE_COUNT || order >= ORDER_KIND_COUNT || u->engaged[i] > 1 || u->cooldown[i] < 0
+		    || build_type >= UNIT_TYPE_COUNT || u->queue_len[i] > FACTORY_QUEUE || u->repeat[i] > 1
+		    || !(u->progress[i] >= 0.0f && u->progress[i] <= 1.0f) || !(u->work[i] >= 0.0f && u->work[i] < 1.0f))
+			return false;
+		for (int q = 0; q < u->queue_len[i]; q++)
+			if ((u->queue[i] >> (8 * q) & 0xff) >= UNIT_EXTRACTOR) return false;
+		u->build_type[i] = (UnitType)build_type;
 		u->type[i] = (UnitType)type;
 		u->order[i] = (OrderKind)order;
 		float fs[] = {u->px[i], u->py[i], u->pz[i], u->vx[i], u->vz[i], u->hp[i], u->tx[i], u->tz[i]};
@@ -1031,6 +1416,14 @@ bool faction_read(Faction *f, ByteReader *r)
 	f->stats.units_spawned = (int64_t)get64(r);
 	f->stats.units_lost = (int64_t)get64(r);
 	f->stats.launches_dropped = (int64_t)get64(r);
+	Economy *e = &f->economy;
+	float *ef[] = {&e->metal, &e->energy, &e->metal_cap, &e->energy_cap, &e->metal_income, &e->energy_income,
+	               &e->metal_spent, &e->energy_spent, &e->metal_wanted, &e->energy_wanted, &e->rate};
+	for (int k = 0; k < (int)countof(ef); k++) {
+		*ef[k] = getf(r);
+		if (!ok_float(*ef[k])) return false;
+	}
+	e->spots = get64(r);
 	Perception *seen = &f->seen;
 	memset(seen->live, 0, (size_t)seen->cap);
 	uint32_t live = get32(r);

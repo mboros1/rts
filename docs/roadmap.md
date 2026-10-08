@@ -114,6 +114,38 @@ Done, in one spike. The faction split holds at full scale.
   react (no local prediction); own shells are drawn approximately after they
   leave the outbox; the raider sight change rebalanced fights slightly.
 
+## Spike 4 results (2026-10-08)
+
+Done. The economy is faction state, so the faction split carries it unchanged.
+
+- **Units and structures**: engineers build extractors (metal, only on metal
+  spots), generators (energy) and factories; factories queue units, with
+  repeat. Structures are units with no speed: seen, targeted and destroyed by
+  the existing code. A scenario switch (`economy`) keeps old scenarios as
+  they were.
+- **Streaming economy**: builders ask for what their work costs each tick; a
+  short resource slows everyone using it by one factor, and only jobs that
+  use it (a generator still builds in an energy stall).
+- **Metal spots** are shared map data, mirrored per side. One cross-faction
+  rule: a spot belongs to whoever has a finished extractor on it, decided in
+  the interaction phase and sent as an effect (a 64-bit mask).
+- **Players**: in the local game, engineers place structures (E, G, F, with a
+  ghost) and factories queue (1-4, shift to repeat). Scripts gain `build`,
+  `produce` and `queue` (a group works down a build list). Network clients
+  can send build and produce orders; their UI for it isn't built yet.
+- **Bots** open on economy (engineers only until metal flows), keep power
+  ahead of demand, take nearby metal, add factories with surplus, and never
+  send two engineers to the same site. Bot against bot is symmetric and
+  grows to 15-20 extractors and 2-5 factories in four minutes.
+- **Tests**: economy invariants every tick (resources in bounds, spots owned
+  once, ownership earned), the faction split under the economy, scripted
+  build orders. Demo 06 is a four-minute bot game at 8x.
+- **Not yet**: engineer build queues in the sim (scripts queue instead), an
+  economy UI for network clients, balance beyond "both sides grow". A
+  hand-scripted build order loses to the bot: bots react, scripts don't.
+- **CI**: `make check` is 9.3 s, up from 6.5: the economy test (3 s under
+  ASan) and a bigger sanitized build. Next to win back.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

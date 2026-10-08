@@ -108,6 +108,10 @@ void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Are
 	r->unit_mesh[UNIT_RAIDER] = GenMeshCube(1.0f, 1.0f, 1.4f);
 	r->unit_mesh[UNIT_TANK] = GenMeshCube(1.0f, 1.0f, 1.0f);
 	r->unit_mesh[UNIT_ARTILLERY] = GenMeshCone(0.5f, 1.0f, 8);
+	r->unit_mesh[UNIT_ENGINEER] = GenMeshCube(1.0f, 1.0f, 1.0f);
+	r->unit_mesh[UNIT_EXTRACTOR] = GenMeshCylinder(0.5f, 1.0f, 10);
+	r->unit_mesh[UNIT_GENERATOR] = GenMeshCylinder(0.3f, 1.0f, 6);
+	r->unit_mesh[UNIT_FACTORY] = GenMeshCube(1.0f, 1.0f, 1.0f);
 	r->shell_mesh = GenMeshSphere(1.0f, 6, 8);
 	r->terrain = build_terrain(terrain);
 	r->terrain_vertices = r->terrain.meshes[0].vertexCount;
@@ -175,11 +179,11 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		const SceneUnits *u = &scene->units[f];
 		float *heading = r->heading[f];
-		// Two buckets per type: normal and selected.
-		Matrix *bucket[UNIT_TYPE_COUNT][2];
-		ptrdiff_t count[UNIT_TYPE_COUNT][2] = {0};
+		// Three buckets per type: normal, selected, and under construction.
+		Matrix *bucket[UNIT_TYPE_COUNT][3];
+		ptrdiff_t count[UNIT_TYPE_COUNT][3] = {0};
 		for (int t = 0; t < UNIT_TYPE_COUNT; t++)
-			for (int s = 0; s < 2; s++) bucket[t][s] = PUSH(frame, Matrix, u->count);
+			for (int s = 0; s < 3; s++) bucket[t][s] = PUSH(frame, Matrix, u->count);
 
 		for (ptrdiff_t i = 0; i < u->count; i++) {
 			const UnitDef *def = &unit_defs[u->type[i]];
@@ -190,12 +194,21 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 			float d = 2.0f * def->radius;
 			int s = (f == selected_faction && selected && selected[i]) ? 1 : 0;
 			int t = u->type[i];
-			float y = u->py[i] + (t == UNIT_ARTILLERY ? 0.0f : 0.5f * def->height);
-			bucket[t][s][count[t][s]++] = transform(x, y, z, d, def->height, d, heading[slot]);
+			// Structures rise as they're built.
+			float built = u->progress ? u->progress[i] : 1.0f;
+			if (built < 1.0f) s = 2;
+			float h = def->height * f_max(0.15f, built);
+			bool from_base = t == UNIT_ARTILLERY || t == UNIT_EXTRACTOR || t == UNIT_GENERATOR;
+			float y = u->py[i] + (from_base ? 0.0f : 0.5f * h);
+			float yaw = unit_is_structure(u->type[i]) ? 0.0f : heading[slot];
+			if (t == UNIT_ENGINEER) h *= 0.7f;
+			bucket[t][s][count[t][s]++] = transform(x, y, z, d, h, d, yaw);
 		}
+		Color building = ColorLerp(FACTION_COLOR[f], WHITE, 0.55f);
 		for (int t = 0; t < UNIT_TYPE_COUNT; t++) {
 			draw_bucket(r, r->unit_mesh[t], FACTION_COLOR[f], bucket[t][0], count[t][0]);
 			draw_bucket(r, r->unit_mesh[t], SELECTED_COLOR, bucket[t][1], count[t][1]);
+			draw_bucket(r, r->unit_mesh[t], building, bucket[t][2], count[t][2]);
 		}
 	}
 
@@ -212,6 +225,17 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 		}
 	}
 	draw_bucket(r, r->shell_mesh, SHELL_COLOR, m, n);
+
+	// Metal spots: dark discs, ringed in the owner's colour where known.
+	if (scene->economy && scene->spots) {
+		for (int32_t k = 0; k < scene->spots->count; k++) {
+			V2 at = scene->spots->at[k];
+			Vector3 p = {at.x, terrain_height(scene->terrain, at.x, at.z) + 0.05f, at.z};
+			DrawCylinder(p, SPOT_RADIUS, SPOT_RADIUS, 0.12f, 16, (Color){40, 44, 52, 255});
+			int8_t o = scene->spot_owner[k];
+			if (o >= 0) DrawCylinderWires(p, SPOT_RADIUS + 0.6f, SPOT_RADIUS + 0.6f, 0.2f, 16, FACTION_COLOR[o]);
+		}
+	}
 
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		V2 b = scene->base[f];

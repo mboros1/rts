@@ -15,6 +15,7 @@ typedef struct {
 	const float *px, *py, *pz, *vx, *vz;
 	const UnitType *type;
 	const int32_t *slot;        // stable per unit: keys render-only state
+	const float *progress;      // build progress, 1 when finished; may be nullptr
 } SceneUnits;
 
 typedef struct {
@@ -30,6 +31,9 @@ typedef struct {
 	ptrdiff_t max_units;        // slot capacity per faction
 	SceneUnits units[FACTION_COUNT];
 	SceneShells shells[FACTION_COUNT];
+	bool economy;               // draw metal spots
+	const Spots *spots;
+	int8_t spot_owner[MAX_SPOTS]; // -1: nobody, or not known to this view
 } Scene;
 
 // Borrows the sim's arrays; no copying.

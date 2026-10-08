@@ -2,7 +2,7 @@
 
 #include "platform.h"
 
-enum { MAX_TOKENS = 16, MAX_LINE = 512, MAX_GROUPS = 64 };
+enum { MAX_TOKENS = 64, MAX_LINE = 512, MAX_GROUPS = 64 };
 
 // ---------------------------------------------------------------- parsing
 
@@ -150,6 +150,35 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		if (!stop && !parse_point(tok[2], &a->at)) return bad(p, "target is X,Z", tok[2]);
 		return true;
 	}
+	if (!strcmp(verb, "build") || !strcmp(verb, "queue")) {
+		// build|queue GROUP TYPE at X,Z
+		if (n != 5 || strcmp(tok[3], "at")) return bad(p, "build|queue GROUP TYPE at X,Z", nullptr);
+		ActionKind kind = !strcmp(verb, "queue") ? ACTION_QUEUE : ACTION_ORDER;
+		if (!(a = new_action(p, tick, kind, text))) return bad(p, "too many actions", nullptr);
+		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
+		if (!parse_type(tok[2], &a->type, false) || !unit_is_structure((UnitType)a->type))
+			return bad(p, "not a structure", tok[2]);
+		if (!parse_point(tok[4], &a->at)) return bad(p, "target is X,Z", tok[4]);
+		a->command = COMMAND_BUILD;
+		return true;
+	}
+	if (!strcmp(verb, "produce")) {
+		// produce GROUP TYPE [N] [repeat]
+		if (n < 3 || n > 5) return bad(p, "produce GROUP TYPE [N] [repeat]", nullptr);
+		if (!(a = new_action(p, tick, ACTION_ORDER, text))) return bad(p, "too many actions", nullptr);
+		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
+		if (!parse_type(tok[2], &a->type, false) || unit_is_structure((UnitType)a->type))
+			return bad(p, "factories make units, not structures", tok[2]);
+		a->command = COMMAND_PRODUCE;
+		a->limit = 1;
+		for (int i = 3; i < n; i++) {
+			int64_t v;
+			if (!strcmp(tok[i], "repeat")) a->flags = COMMAND_REPEAT;
+			else if (parse_i64(tok[i], &v) && v >= 0 && v <= FACTORY_QUEUE) a->limit = (int32_t)v;
+			else return bad(p, "produce GROUP TYPE [N 0..8] [repeat]", tok[i]);
+		}
+		return true;
+	}
 	if (!strcmp(verb, "spawn")) {
 		// spawn SIDE TYPE N at X,Z [radius R]
 		if (n != 6 && n != 8) return bad(p, "spawn SIDE TYPE N at X,Z [radius R]", nullptr);
@@ -177,12 +206,20 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		// expect (SIDE FIELD | GROUP alive) OP NUMBER
 		if (n != 5) return bad(p, "expect SIDE|GROUP FIELD OP NUMBER", nullptr);
 		if (!(a = new_action(p, tick, ACTION_EXPECT, text))) return bad(p, "too many actions", nullptr);
-		static const char *fields[] = {"units", "lost", "fired", "shells", "spawned", "alive"};
+		static const char *fields[] = {"units", "lost", "fired", "shells", "spawned", "alive",
+		                               "metal", "energy", "metal_income", "energy_income"};
+		static const char *counts[UNIT_TYPE_COUNT] = {"raiders", "tanks", "artillery", "engineers",
+		                                              "extractors", "generators", "factories"};
 		static const char *ops[] = {"<", "<=", ">", ">=", "==", "!="};
 		int f = -1, o = -1;
 		for (int k = 0; k < (int)countof(fields); k++) if (!strcmp(tok[2], fields[k])) f = k;
+		for (int k = 0; k < UNIT_TYPE_COUNT; k++)
+			if (!strcmp(tok[2], counts[k])) {
+				f = FIELD_COUNT;
+				a->type = k;
+			}
 		for (int k = 0; k < (int)countof(ops); k++) if (!strcmp(tok[3], ops[k])) o = k;
-		if (f < 0) return bad(p, "field is units, lost, fired, shells, spawned or alive", tok[2]);
+		if (f < 0) return bad(p, "unknown field (see script.h)", tok[2]);
 		if (o < 0) return bad(p, "operator is < <= > >= == !=", tok[3]);
 		a->field = (ExpectField)f;
 		a->op = (ExpectOp)o;
@@ -254,14 +291,20 @@ static bool parse_line(Parser *p, char *line)
 		return true;
 	}
 	if (!strcmp(key, "weights")) {
-		if (n != 1 + UNIT_TYPE_COUNT) return bad(p, "weights RAIDER TANK ARTILLERY", nullptr);
+		if (n != 1 + COMBAT_TYPE_COUNT) return bad(p, "weights RAIDER TANK ARTILLERY", nullptr);
 		int64_t sum = 0;
-		for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
+		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) {
 			if (!parse_i64(tok[1 + k], &v) || v < 0 || v > 1000) return bad(p, "weight 0..1000", tok[1 + k]);
 			s->config.type_weight[k] = (int32_t)v;
 			sum += v;
 		}
 		if (sum == 0) return bad(p, "weights can't all be zero", nullptr);
+		return true;
+	}
+	if (!strcmp(key, "economy")) {
+		bool on;
+		if (n != 2 || !parse_on(tok[1], &on)) return bad(p, "economy on|off", nullptr);
+		s->config.economy = on;
 		return true;
 	}
 	if (!strcmp(key, "respawn")) {
@@ -298,6 +341,11 @@ static bool parse_line(Parser *p, char *line)
 		    || s->camera_distance < 10.0f)
 			return bad(p, "camera director | camera X,Z DISTANCE", nullptr);
 		s->fixed_camera = true;
+		return true;
+	}
+	if (!strcmp(key, "speed")) {
+		if (n != 2 || !parse_i64(tok[1], &v) || v < 1 || v > 64) return bad(p, "speed N (1..64)", nullptr);
+		s->speed = (int32_t)v;
 		return true;
 	}
 	if (!strcmp(key, "end")) {
@@ -390,8 +438,37 @@ void script_run_init(ScriptRun *r, const Script *s, Arena *arena, FILE *log)
 	r->group_units = PUSH(arena, UnitHandle *, s->group_count);
 	r->group_len = PUSH(arena, ptrdiff_t, s->group_count);
 	r->group_side = PUSH(arena, FactionId, s->group_count);
-	for (ptrdiff_t g = 0; g < s->group_count; g++)
+	r->queued = PUSH(arena, const ScriptAction **, s->group_count);
+	r->queued_head = PUSH(arena, int32_t, s->group_count);
+	r->queued_len = PUSH(arena, int32_t, s->group_count);
+	for (ptrdiff_t g = 0; g < s->group_count; g++) {
 		r->group_units[g] = PUSH(arena, UnitHandle, s->config.max_units);
+		r->queued[g] = PUSH(arena, const ScriptAction *, s->action_count > 0 ? s->action_count : 1);
+	}
+}
+
+static Command build_command(const ScriptRun *r, const ScriptAction *a, Arena *tick_arena)
+{
+	return (Command){
+		.faction = r->group_side[a->group],
+		.kind = COMMAND_BUILD,
+		.unit_type = (UnitType)a->type,
+		.target = a->at,
+		.count = r->group_len[a->group],
+		.units = arena_copy(tick_arena, r->group_units[a->group],
+		                    r->group_len[a->group] * (ptrdiff_t)sizeof(UnitHandle), alignof(UnitHandle)),
+	};
+}
+
+// A group is busy while any living engineer in it is still on a build.
+static bool group_building(const ScriptRun *r, int32_t g, const Sim *sim)
+{
+	const Units *u = &sim->factions[r->group_side[g].v].units;
+	for (ptrdiff_t i = 0; i < r->group_len[g]; i++) {
+		ptrdiff_t d = units_find(u, r->group_units[g][i]);
+		if (d >= 0 && u->order[d] == ORDER_BUILD) return true;
+	}
+	return false;
 }
 
 typedef struct {
@@ -449,6 +526,14 @@ static void run_expect(ScriptRun *r, const ScriptAction *a, const Sim *sim)
 		case FIELD_FIRED: actual = (double)f->stats.shots_fired; break;
 		case FIELD_SHELLS: actual = (double)f->incoming.count; break;
 		case FIELD_SPAWNED: actual = (double)f->stats.units_spawned; break;
+		case FIELD_METAL: actual = (double)f->economy.metal; break;
+		case FIELD_ENERGY: actual = (double)f->economy.energy; break;
+		case FIELD_METAL_INCOME: actual = (double)f->economy.metal_income; break;
+		case FIELD_ENERGY_INCOME: actual = (double)f->economy.energy_income; break;
+		case FIELD_COUNT:
+			for (ptrdiff_t i = 0; i < f->units.count; i++)
+				actual += f->units.type[i] == a->type && f->units.progress[i] >= 1.0f;
+			break;
 		case FIELD_ALIVE: break;
 		}
 	}
@@ -485,6 +570,9 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			out[n++] = (Command){
 				.faction = r->group_side[a->group],
 				.kind = a->command,
+				.unit_type = a->type >= 0 ? (UnitType)a->type : UNIT_RAIDER,
+				.amount = a->limit,
+				.flags = a->flags,
 				.target = a->at,
 				.count = r->group_len[a->group],
 				.units = arena_copy(tick_arena, r->group_units[a->group],
@@ -497,6 +585,9 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			out[n++] = (Command){.faction = a->side, .kind = COMMAND_SPAWN, .target = a->at,
 			                     .unit_type = (UnitType)a->type, .amount = a->limit, .radius = a->radius};
 			break;
+		case ACTION_QUEUE:
+			r->queued[a->group][r->queued_head[a->group] + r->queued_len[a->group]++] = a;
+			break;
 		case ACTION_BOT:
 			r->bots[a->side.v].enabled = a->on;
 			break;
@@ -504,6 +595,13 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			run_expect(r, a, sim);
 			break;
 		}
+	}
+	// Groups that finished their last build start the next queued one.
+	for (ptrdiff_t g = 0; g < s->group_count; g++) {
+		if (r->queued_len[g] == 0 || n == cap || r->group_len[g] == 0 || group_building(r, (int32_t)g, sim)) continue;
+		out[n++] = build_command(r, r->queued[g][r->queued_head[g]], tick_arena);
+		r->queued_head[g]++;
+		r->queued_len[g]--;
 	}
 	for (int k = 0; k < FACTION_COUNT; k++) bot_think(&r->bots[k], sim, tick_arena, out, &n, cap);
 	return n;

@@ -34,11 +34,20 @@ static constexpr float SIM_DT = 1.0f / 30.0f;
 static constexpr float SIM_GRAVITY = 20.0f;
 
 typedef enum : uint8_t {
-	UNIT_RAIDER,
+	UNIT_RAIDER,        // combat units: what the spawner picks from
 	UNIT_TANK,
 	UNIT_ARTILLERY,
+	UNIT_ENGINEER,      // builds structures; unarmed
+	UNIT_EXTRACTOR,     // structures: never move
+	UNIT_GENERATOR,
+	UNIT_FACTORY,
 	UNIT_TYPE_COUNT,
 } UnitType;
+
+enum { COMBAT_TYPE_COUNT = UNIT_ENGINEER };
+
+static inline bool unit_is_structure(UnitType t) { return t >= UNIT_EXTRACTOR; }
+static inline bool unit_is_combat(UnitType t) { return (int)t < (int)COMBAT_TYPE_COUNT; }
 
 // What a unit type is. Content, not state: never changes during a run.
 typedef struct {
@@ -57,6 +66,12 @@ typedef struct {
 	float spread;       // aim jitter at the target point, units
 	bool high_arc;      // lob shells (artillery) instead of firing flat
 	int32_t weight;     // default spawn weight; scenarios override it
+	// Economy. Building takes build_time work, done by builders at their
+	// build_power per second, and costs metal and energy as the work is done.
+	float metal_cost, energy_cost;
+	float build_time;
+	float build_power;  // engineers and factories
+	float metal_income, energy_income; // per second, once built
 } UnitDef;
 
 extern const UnitDef unit_defs[UNIT_TYPE_COUNT];
@@ -65,6 +80,7 @@ typedef enum : uint8_t {
 	ORDER_IDLE,
 	ORDER_MOVE,
 	ORDER_ATTACK_MOVE,
+	ORDER_BUILD,        // engineers: go to the site, then place or assist
 	ORDER_KIND_COUNT,
 } OrderKind;
 
@@ -75,10 +91,23 @@ typedef struct {
 	int32_t spawn_interval;   // ticks between spawns per faction
 	int32_t max_units;        // unit pool capacity per faction
 	int32_t max_projectiles;  // incoming projectile capacity per faction
-	int32_t type_weight[UNIT_TYPE_COUNT]; // relative spawn chance per type
+	int32_t type_weight[COMBAT_TYPE_COUNT]; // relative spawn chance per type
+	// With an economy, factions start with a factory and engineers and build
+	// everything else; the spawner and initial_units are unused.
+	bool economy;
 } SimConfig;
 
 SimConfig sim_config_default(void);
+
+// Field by field: the struct has padding, so memcmp would compare garbage.
+static inline bool sim_config_equal(const SimConfig *a, const SimConfig *b)
+{
+	bool same = a->seed == b->seed && a->initial_units == b->initial_units && a->population == b->population
+	         && a->spawn_interval == b->spawn_interval && a->max_units == b->max_units
+	         && a->max_projectiles == b->max_projectiles && a->economy == b->economy;
+	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) same = same && a->type_weight[k] == b->type_weight[k];
+	return same;
+}
 
 // One faction's units, struct-of-arrays, addressed by handles.
 //
@@ -108,7 +137,17 @@ typedef struct {
 	int32_t *cooldown;     // ticks until the weapon can fire
 	UnitHandle *target;    // enemy handle, may be stale
 	uint8_t *engaged;      // had a target in range last tick
+	// Economy. progress is 1 for anything finished; structures start at 0.
+	float *progress;
+	UnitType *build_type;  // engineers: what they're ordered to build
+	UnitHandle *building;  // engineers: the structure they're working on
+	float *work;           // factories: progress of the item at the front
+	uint64_t *queue;       // factories: up to 8 unit types, a byte each
+	uint8_t *queue_len;
+	uint8_t *repeat;       // factories: finished items go to the back
 } Units;
+
+enum { FACTORY_QUEUE = 8 };
 
 // Shells flying toward a faction, simulated by that faction.
 // Unordered; removal is swap-remove. 0 <= count <= cap.
@@ -226,6 +265,31 @@ typedef struct {
 	int64_t launches_dropped;  // arriving shells this faction's pool had no room for
 } FactionStats;
 
+// A faction's resources. Income and spending stream: each tick builders ask
+// for what their work costs. If the store can't cover a resource, everyone
+// using it slows by the same factor (a stall) rather than some stopping, and
+// a job slows only for resources it uses: a generator, needing no energy,
+// still gets built in an energy stall.
+typedef struct {
+	float metal, energy;
+	float metal_cap, energy_cap;
+	float metal_income, energy_income;  // last tick, per second
+	float metal_spent, energy_spent;    // last tick, per second
+	float metal_wanted, energy_wanted;  // last tick, per second: before stalls
+	float rate;                         // last tick's worst stall factor, 0..1
+	uint64_t spots;                     // metal spots it extracts from (an effect)
+} Economy;
+
+// Metal spots: shared map data. An extractor only earns on a spot its
+// faction owns; who owns contested spots is decided between factions.
+enum { MAX_SPOTS = 32 };
+static constexpr float SPOT_RADIUS = 2.5f;
+
+typedef struct {
+	int32_t count;
+	V2 at[MAX_SPOTS];
+} Spots;
+
 // Everything a faction's phase takes from outside the faction in one tick,
 // besides its commands. Built by the interaction phase on the server; sent to
 // the faction's client, which feeds it to faction_tick.
@@ -234,6 +298,7 @@ typedef struct {
 	SeenEntry *seen;
 	ptrdiff_t arrived_count;   // shells arriving, in delivery order
 	Launch *arrived;
+	uint64_t spots;            // metal spots this faction owns now
 } FactionEffects;
 
 typedef struct {
@@ -243,6 +308,7 @@ typedef struct {
 	Units units;
 	Projectiles incoming;
 	Perception seen;           // its enemies, as it perceives them
+	Economy economy;
 	EnemyView view;            // built from `seen` each tick, in scratch
 	Launch *outbox;            // launches fired this tick, delivered next tick
 	ptrdiff_t outbox_count;
@@ -258,15 +324,20 @@ typedef enum : uint8_t {
 	COMMAND_MOVE,
 	COMMAND_ATTACK_MOVE,
 	COMMAND_SPAWN,
+	COMMAND_BUILD,      // engineers build unit_type at target
+	COMMAND_PRODUCE,    // factories queue `amount` of unit_type (0 clears)
 	COMMAND_KIND_COUNT,
 } CommandKind;
+
+enum : uint8_t { COMMAND_REPEAT = 1 }; // PRODUCE: finished items requeue
 
 static constexpr int32_t SPAWN_MAX = 4096;      // units per spawn command
 static constexpr float SPAWN_MAX_RADIUS = 200.0f;
 
 // An input to the sim for one faction. Handles that are stale or not that
 // faction's are ignored. Spawn uses unit_type, amount and radius around
-// target, and no handles.
+// target, and no handles. Build uses unit_type and target; produce uses
+// unit_type, amount and flags.
 typedef struct {
 	FactionId faction;
 	CommandKind kind;
@@ -276,12 +347,15 @@ typedef struct {
 	UnitType unit_type;
 	int32_t amount;
 	float radius;
+	uint8_t flags;
 } Command;
 
 typedef struct {
 	SimConfig config;
 	Tick tick;
 	Terrain terrain;
+	Spots spots;
+	int8_t spot_owner[MAX_SPOTS];         // -1: nobody. Interaction state.
 	Faction factions[FACTION_COUNT];
 	FactionEffects effects[FACTION_COUNT]; // this tick's, until the next step
 	Arena zone;                // zone lifetime: pools and terrain
@@ -325,6 +399,13 @@ static inline void shell_advance(V3 *pos, V3 *vel)
 	*pos = v3(pos->x + vel->x * dt, pos->y + vel->y * dt - drop, pos->z + vel->z * dt);
 	vel->y -= SIM_GRAVITY * dt;
 }
+
+// Can faction f start a structure of this type here? Uses only what f
+// knows: its own units, its perception of enemy structures, the spots.
+bool placement_ok(const Sim *sim, FactionId f, UnitType type, V2 at);
+
+// The metal spot at a position, or -1.
+int32_t spot_at(const Spots *spots, V2 at);
 
 // Ballistic aim: the launch velocity that carries a shell from `from` to `to`
 // at `speed` under gravity. Lob picks the high arc. False if out of reach.

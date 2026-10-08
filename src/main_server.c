@@ -132,8 +132,14 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 {
 	uint8_t kind = get8(r);
 	V2 target = {getf(r), getf(r)};
+	uint8_t unit_type = get8(r);
+	int32_t amount = (int32_t)get32(r);
+	uint8_t flags = get8(r);
 	uint32_t n = get32(r);
-	bool ok = !r->bad && c->faction < FACTION_COUNT && kind <= COMMAND_ATTACK_MOVE
+	// Players order, build and produce; spawning is for scripts only.
+	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE;
+	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && unit_type < UNIT_TYPE_COUNT
+	       && amount >= 0 && amount <= FACTORY_QUEUE && flags <= COMMAND_REPEAT
 	       && n <= (uint32_t)s->sim.config.max_units && (ptrdiff_t)n * 8 == r->len - r->pos
 	       && s->queued_count < MAX_COMMANDS;
 	if (!ok) {
@@ -143,7 +149,8 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	UnitHandle *h = PUSH(&s->tick, UnitHandle, n);
 	for (uint32_t i = 0; i < n; i++) h[i] = (UnitHandle){get32(r), get32(r)};
 	s->queued[s->queued_count++] = (Command){.faction = {c->faction}, .kind = (CommandKind)kind,
-	                                         .target = target, .count = n, .units = h};
+	                                         .target = target, .count = n, .units = h,
+	                                         .unit_type = (UnitType)unit_type, .amount = amount, .flags = flags};
 	c->commands++;
 	s->commands_admitted++;
 }

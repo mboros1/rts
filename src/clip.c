@@ -408,7 +408,9 @@ int clip_run(const ClipRequest *req)
 		if (sim.tick.v > from - 90) director_update(&director, &scene);
 		if (sim.tick.v <= from) continue;
 
-		bool sample = out_wants_sample(&out, sim.tick.v - from - 1, to - from);
+		int speed = req->speed > 1 ? req->speed : script.speed > 1 ? script.speed : 1;
+		if ((sim.tick.v - from - 1) % speed != 0) continue;
+		bool sample = out_wants_sample(&out, (sim.tick.v - from - 1) / speed, (to - from) / speed);
 		if (!out.video && !sample) continue;
 
 		Camera3D cam;
@@ -426,7 +428,7 @@ int clip_run(const ClipRequest *req)
 		EndMode3D();
 		DrawText(caption(name, &now), 16 * SUPERSAMPLE, rh - 30 * SUPERSAMPLE, 18 * SUPERSAMPLE,
 		         (Color){230, 230, 230, 200});
-		if (title[0]) draw_title_card(title, about, req->label, sim.tick.v - from, rw, rh);
+		if (title[0]) draw_title_card(title, about, req->label, (sim.tick.v - from) / speed, rw, rh);
 		if (sample) samples[out.taken] = now;
 		out_end(&out, sample, TextFormat("t%lld  %td v %td  shells %td", (long long)now.tick,
 		                                 now.units[0], now.units[1], now.shells));
@@ -658,7 +660,7 @@ int clip_netlog(const ClipRequest *req)
 	const char *paths[2] = {req->netlog, req->compare};
 	for (int k = 0; k < count; k++)
 		if (!playback_open(&views[k], paths[k], &work)) return fail("cannot replay netlog", paths[k]);
-	if (count == 2 && memcmp(&views[0].config, &views[1].config, sizeof views[0].config) != 0)
+	if (count == 2 && !sim_config_equal(&views[0].config, &views[1].config))
 		return fail("netlogs are from different matches", req->compare);
 
 	double t_start = views[0].t_start, t_end = views[0].t_end;
@@ -763,6 +765,7 @@ static void usage(void)
 	        "  --title TEXT --about TEXT  title card for --netlog clips\n"
 	        "  --compare NETLOG         a second netlog beside the first, same clock and camera\n"
 	        "  --crf N                  video quality, 0..51, lower is bigger (default 26)\n"
+	        "  --speed N                time-lapse: one frame every N ticks\n"
 	        "  --list                   list scenarios\n");
 }
 
@@ -792,6 +795,7 @@ int clip_main(int argc, char **argv)
 		else if (!strcmp(a, "--title")) req.title = v;
 		else if (!strcmp(a, "--about")) req.about = v;
 		else if (!strcmp(a, "--label")) req.label = v;
+		else if (!strcmp(a, "--speed")) req.speed = atoi(v);
 		else if (!strcmp(a, "--crf")) {
 			req.crf = atoi(v);
 			if (req.crf < 0 || req.crf > 51) return fail("--crf is 0..51", v);

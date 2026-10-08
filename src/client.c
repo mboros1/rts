@@ -144,7 +144,7 @@ static void client_welcome(Client *c, ByteReader *r)
 		return;
 	}
 	if (c->have_world) {
-		if (memcmp(&config, &c->config, sizeof config) != 0) fatal("server changed its config on reconnect");
+		if (!sim_config_equal(&config, &c->config)) fatal("server changed its config on reconnect");
 		return;
 	}
 	c->config = config;
@@ -218,20 +218,29 @@ static void client_frames(Client *c)
 	}
 }
 
-static void client_send_command(Client *c, CommandKind kind, V2 target, const UnitHandle *units, ptrdiff_t n)
+static void client_send_order(Client *c, CommandKind kind, V2 target, UnitType type, int32_t amount, uint8_t flags,
+                              const UnitHandle *units, ptrdiff_t n)
 {
 	if (!c->conn.open || n == 0) return;
 	arena_reset(&c->out);
-	ByteBuf b = bytebuf_make(&c->out, 16 + n * 8);
+	ByteBuf b = bytebuf_make(&c->out, 24 + n * 8);
 	put8(&b, kind);
 	putf(&b, target.x);
 	putf(&b, target.z);
+	put8(&b, type);
+	put32(&b, (uint32_t)amount);
+	put8(&b, flags);
 	put32(&b, (uint32_t)n);
 	for (ptrdiff_t i = 0; i < n; i++) {
 		put32(&b, units[i].index);
 		put32(&b, units[i].generation);
 	}
 	if (conn_send(&c->conn, MSG_COMMAND, b.data, b.len, client_now(c))) c->commands_sent++;
+}
+
+static void client_send_command(Client *c, CommandKind kind, V2 target, const UnitHandle *units, ptrdiff_t n)
+{
+	client_send_order(c, kind, target, UNIT_RAIDER, 0, 0, units, n);
 }
 
 // A stand-in player for tests and demos: every three seconds, own units with

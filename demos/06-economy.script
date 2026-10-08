@@ -1,0 +1,19 @@
+title Spike 4: an economy
+about Two bots from a factory and two engineers each: metal, power, factories, armies. 4 minutes at 8x.
+
+scenario economy
+clip 0..7200                 # four minutes
+speed 8                      # time-lapse: 30 s of video
+camera 256,256 470
+
+# Observed: at 3600, 11 and 9 extractors and 34 and 28 metal/s; by 7200
+# blue has pulled ahead (15 extractors and 5 factories to red's 6 and 2),
+# with 96 and 94 units made. Thresholds leave room for balance changes.
+at 3600 expect blue extractors >= 6
+at 3600 expect red extractors >= 6
+at 3600 expect blue metal_income >= 20
+at 3600 expect red metal_income >= 20
+at 7200 expect blue factories >= 2
+at 7200 expect red factories >= 2
+at 7200 expect blue spawned >= 50
+at 7200 expect red spawned >= 50
