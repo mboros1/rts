@@ -26,6 +26,8 @@
 //                                     #   point; unpaired: say so (no server to decide)
 //   at 50  arrive blue tank 10        # as if through blue's transporter (tests)
 //   at 40  produce plant raider 2 repeat    # factories: queue N (0 clears)
+//   at 70  entrench line              # combat units dig in as turrets (paid, takes time);
+//   at 90  mobilize line              #   mobilize turns entrenched turrets back
 //   at 60  bot red on
 //   at 600 expect red lost > 50       # side fields: units lost fired shells spawned
 //                                     #   metal energy metal_income energy_income

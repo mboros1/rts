@@ -235,11 +235,11 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		return true;
 	}
 	if (!strcmp(verb, "entrench") || !strcmp(verb, "mobilize")) {
-		// entrench SIDE | mobilize SIDE: what logging out and back in do
-		if (n != 2) return bad(p, "entrench|mobilize SIDE", nullptr);
-		if (!(a = new_action(p, tick, ACTION_SPAWN, text))) return bad(p, "too many actions", nullptr);
-		if (!parse_side(tok[1], &a->side)) return bad(p, "side is blue or red", tok[1]);
-		a->flags = !strcmp(verb, "entrench") ? 0xfe : 0xfd;
+		// entrench GROUP | mobilize GROUP: an order, paid for as it goes
+		if (n != 2) return bad(p, "entrench|mobilize GROUP", nullptr);
+		if (!(a = new_action(p, tick, ACTION_ORDER, text))) return bad(p, "too many actions", nullptr);
+		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
+		a->command = !strcmp(verb, "entrench") ? COMMAND_ENTRENCH : COMMAND_MOBILIZE;
 		return true;
 	}
 	if (!strcmp(verb, "spawn")) {
@@ -666,10 +666,6 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			break;
 		case ACTION_SPAWN:
 			if (n == cap) break;
-			if (a->flags == 0xfe || a->flags == 0xfd) {
-				out[n++] = (Command){.faction = a->side, .kind = a->flags == 0xfe ? COMMAND_ENTRENCH : COMMAND_MOBILIZE};
-				break;
-			}
 			if (a->flags == 0xff) {
 				out[n++] = (Command){.faction = a->side, .kind = COMMAND_ARRIVE, .unit_type = (UnitType)a->type,
 				                     .amount = a->limit, .target = sim->factions[a->side.v].base};

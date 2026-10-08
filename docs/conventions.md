@@ -10,7 +10,8 @@ review), browser-rts `AGENTS.md`, and what the Recoil survey showed.
   with GCC (`gcc-15`) and never rely on extensions only one compiler has. Use
   `static_assert`, `typeof`, `constexpr`, `nullptr`, `[[nodiscard]]`, and
   `<stdckdint.h>` for size arithmetic. Not `<stdbit.h>`: macOS libc lacks it,
-  so bit operations use compiler builtins.
+  so bit operations use compiler builtins. One `constexpr` per declaration:
+  GCC rejects `constexpr float A = 1, B = 2;` where clang accepts it.
 - Feature macros: `base.h` defines `_DEFAULT_SOURCE` before any system
   header, because strict `-std=c23` hides POSIX in glibc and musl.
 - **Unity build**: one translation unit per executable; a full rebuild stays

@@ -217,10 +217,11 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	uint8_t flags = get8(r);
 	Route route = get32(r);
 	uint32_t n = get32(r);
-	// Players order, build, produce and send; spawning is for scripts only.
+	// Players order, build, produce, send and entrench; spawning is for scripts only.
 	// Arriving comes from the coordinator, never players. Whether a send is
 	// paired is the server's to say (route_send).
-	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE || kind == COMMAND_SEND;
+	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE || kind == COMMAND_SEND
+	            || kind == COMMAND_ENTRENCH || kind == COMMAND_MOBILIZE;
 	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && unit_type < UNIT_TYPE_COUNT
 	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : ZONE_MAX)
 	       && flags <= COMMAND_REPEAT && route_ok(route)

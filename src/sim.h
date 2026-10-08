@@ -84,6 +84,7 @@ typedef enum : uint8_t {
 	ORDER_ATTACK_MOVE,
 	ORDER_BUILD,        // engineers: go to the site, then place or assist
 	ORDER_SEND,         // go to a transporter and leave through it when it fires
+	ORDER_TRANSFORM,    // entrenching or mobilizing: still, silent, paying (work: progress)
 	ORDER_KIND_COUNT,
 } OrderKind;
 
@@ -152,6 +153,7 @@ typedef struct {
 	uint8_t *dest;         // units on a send order: the zone of their next hop
 	uint32_t *route;       // ... and the hops after it (a Route), | ROUTE_UNPAIRED
 	uint8_t *seeded;       // turrets: an entrenched unit, of type build_type
+	                       // (entrenching or mobilizing: order TRANSFORM, work the progress)
 } Units;
 
 // Zones are numbered by the world's zone list, 0 to ZONE_MAX - 1.
@@ -378,8 +380,8 @@ typedef enum : uint8_t {
 	                    // then `route`; UNPAIRED: no transporter there, land at target
 	COMMAND_ARRIVE,     // `amount` of unit_type come in: around our transporter nearest
 	                    // target, or (UNPAIRED) spread around target; then on to `route`
-	COMMAND_ENTRENCH,   // the faction's combat units dig in as turrets where they stand
-	COMMAND_MOBILIZE,   // entrenched turrets become the units they were
+	COMMAND_ENTRENCH,   // these combat units dig in as turrets where they stand
+	COMMAND_MOBILIZE,   // these entrenched turrets become the units they were
 	COMMAND_KIND_COUNT,
 } CommandKind;
 
@@ -412,6 +414,16 @@ static constexpr float STRIP = 0.25f;
 
 // Where an unpaired send for f lands: at, moved into f's strip.
 V2 sim_strip_point(const Terrain *t, FactionId f, V2 at);
+
+// Entrenching and mobilizing take time and are paid for as they go, from the
+// economy at its shared rate, like building. Meanwhile the unit can't move or
+// fire: caught in the open, it's a target.
+static constexpr float ENTRENCH_TIME = 6.0f;
+static constexpr float ENTRENCH_METAL = 40.0f;
+static constexpr float ENTRENCH_ENERGY = 300.0f;
+static constexpr float MOBILIZE_TIME = 4.0f;
+static constexpr float MOBILIZE_METAL = 0.0f;
+static constexpr float MOBILIZE_ENERGY = 150.0f;
 
 static constexpr int32_t SPAWN_MAX = 4096;      // units per spawn command
 static constexpr float SPAWN_MAX_RADIUS = 200.0f;

@@ -481,25 +481,42 @@ static ptrdiff_t nearest_transporter(const Faction *f, V2 at, float within)
 	return best;
 }
 
-// Logging out and back in: combat units become turrets where they stand, or
-// entrenched turrets become what they were. In place, so handles survive and
-// a returning player's selections still work. Health keeps its proportion.
-static void entrench(Faction *f, bool dig_in)
+// A finished transform: a combat unit becomes a turret where it stands, or
+// an entrenched turret becomes what it was. In place, so handles survive and
+// selections still work. Health keeps its proportion.
+static void finish_transform(Units *u, ptrdiff_t i)
+{
+	UnitType from = u->type[i];
+	bool dig_in = unit_is_combat(from);
+	UnitType to = dig_in ? UNIT_TURRET : u->build_type[i];
+	u->hp[i] *= unit_defs[to].hp / unit_defs[from].hp;
+	u->type[i] = to;
+	u->build_type[i] = dig_in ? from : UNIT_EXTRACTOR;
+	u->seeded[i] = dig_in;
+	u->order[i] = ORDER_IDLE;
+	u->work[i] = 0.0f;
+	u->vx[i] = u->vz[i] = 0.0f;
+	u->cooldown[i] = 0;
+	u->tx[i] = u->px[i];
+	u->tz[i] = u->pz[i];
+}
+
+// Entrench: these combat units start digging in. Mobilize: these entrenched
+// turrets start packing up. Either way the economy pays as it goes.
+static void apply_transform(Faction *f, const Command *c)
 {
 	Units *u = &f->units;
-	for (ptrdiff_t i = 0; i < u->count; i++) {
-		UnitType from = u->type[i];
-		bool unit = dig_in && unit_is_combat(from);
-		bool turret = !dig_in && from == UNIT_TURRET && u->seeded[i];
-		if (!unit && !turret) continue;
-		UnitType to = unit ? UNIT_TURRET : u->build_type[i];
-		u->hp[i] *= unit_defs[to].hp / unit_defs[from].hp;
-		u->type[i] = to;
-		u->build_type[i] = unit ? from : UNIT_EXTRACTOR;
-		u->seeded[i] = unit;
-		u->order[i] = ORDER_IDLE;
-		u->vx[i] = u->vz[i] = 0.0f;
-		u->cooldown[i] = 0;
+	bool dig_in = c->kind == COMMAND_ENTRENCH;
+	for (ptrdiff_t k = 0; k < c->count; k++) {
+		ptrdiff_t d = units_find(u, c->units[k]);
+		if (d < 0 || u->order[d] == ORDER_TRANSFORM) continue;
+		bool can = dig_in ? unit_is_combat(u->type[d]) : u->type[d] == UNIT_TURRET && u->seeded[d];
+		if (!can) continue;
+		u->order[d] = ORDER_TRANSFORM;
+		u->work[d] = 0.0f;
+		u->building[d] = NO_UNIT;
+		u->tx[d] = u->px[d];
+		u->tz[d] = u->pz[d];
 	}
 }
 
@@ -615,7 +632,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		return;
 	}
 	if (c->kind == COMMAND_ENTRENCH || c->kind == COMMAND_MOBILIZE) {
-		entrench(f, c->kind == COMMAND_ENTRENCH);
+		apply_transform(f, c);
 		return;
 	}
 	if (c->kind == COMMAND_BUILD && !unit_is_structure(c->unit_type)) return;
@@ -704,7 +721,9 @@ static void move_units(Faction *f, const Terrain *t)
 		}
 		V2 p = v2(u->px[i], u->pz[i]);
 		V2 desired = v2(0.0f, 0.0f);
-		if (u->order[i] == ORDER_BUILD || u->order[i] == ORDER_SEND) {
+		if (u->order[i] == ORDER_TRANSFORM) {
+			// Digging in: stands still (the desired velocity stays zero).
+		} else if (u->order[i] == ORDER_BUILD || u->order[i] == ORDER_SEND) {
 			V2 to = v2_sub(v2(u->tx[i], u->tz[i]), p);
 			float d = v2_len(to);
 			float reach = u->order[i] == ORDER_SEND ? unit_defs[UNIT_TRANSPORTER].radius + SEND_REACH - 1.0f
@@ -896,7 +915,7 @@ static void fire_weapons(Faction *f, const EnemyView *v, const Terrain *t, Tick 
 		const UnitDef *def = &unit_defs[u->type[i]];
 		if (u->cooldown[i] > 0) u->cooldown[i]--;
 		u->engaged[i] = 0;
-		if (def->range <= 0.0f) continue;
+		if (def->range <= 0.0f || u->order[i] == ORDER_TRANSFORM) continue; // transforming: no firing
 
 		V2 p = v2(u->px[i], u->pz[i]);
 		ptrdiff_t e = view_find(v, u->target[i]);
@@ -1104,6 +1123,14 @@ static void run_economy(Faction *f, const Sim *sim)
 		charge_cost[i] = unpaired ? UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER * (float)waiting : PAIRED_ENERGY * (float)waiting;
 		want_e += charge_cost[i] * charge_step[i];
 	}
+	// Transforms, at their own time and price.
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->order[i] != ORDER_TRANSFORM) continue;
+		bool dig_in = unit_is_combat(u->type[i]);
+		float step = SIM_DT / (dig_in ? ENTRENCH_TIME : MOBILIZE_TIME);
+		want_m += (dig_in ? ENTRENCH_METAL : MOBILIZE_METAL) * step;
+		want_e += (dig_in ? ENTRENCH_ENERGY : MOBILIZE_ENERGY) * step;
+	}
 	float rate_m = want_m > e->metal ? e->metal / want_m : 1.0f;
 	float rate_e = want_e > e->energy ? e->energy / want_e : 1.0f;
 	e->rate = n ? f_min(rate_m, rate_e) : 1.0f;
@@ -1140,6 +1167,16 @@ static void run_economy(Faction *f, const Sim *sim)
 		}
 		spent_m += def->metal_cost * step;
 		spent_e += def->energy_cost * step;
+	}
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->order[i] != ORDER_TRANSFORM) continue;
+		bool dig_in = unit_is_combat(u->type[i]);
+		float rate = f_min(dig_in && ENTRENCH_METAL > 0.0f ? rate_m : 1.0f, rate_e);
+		float step = f_min(SIM_DT / (dig_in ? ENTRENCH_TIME : MOBILIZE_TIME) * rate, 1.0f - u->work[i]);
+		u->work[i] += step;
+		spent_m += (dig_in ? ENTRENCH_METAL : MOBILIZE_METAL) * step;
+		spent_e += (dig_in ? ENTRENCH_ENERGY : MOBILIZE_ENERGY) * step;
+		if (u->work[i] >= 1.0f) finish_transform(u, i);
 	}
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (charge_step[i] <= 0.0f) continue;
@@ -1309,6 +1346,13 @@ static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const 
 		fire_transporters(f);
 	} else {
 		f->departure_count = 0;
+		// No economy to pay from: transforms just take their time.
+		Units *u = &f->units;
+		for (ptrdiff_t i = 0; i < u->count; i++) {
+			if (u->order[i] != ORDER_TRANSFORM) continue;
+			u->work[i] = f_min(1.0f, u->work[i] + SIM_DT / (unit_is_combat(u->type[i]) ? ENTRENCH_TIME : MOBILIZE_TIME));
+			if (u->work[i] >= 1.0f) finish_transform(u, i);
+		}
 	}
 	fly_projectiles(f, &sim->terrain);
 	fire_weapons(f, &f->view, &sim->terrain, sim->tick);

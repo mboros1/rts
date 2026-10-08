@@ -109,7 +109,8 @@ Scene remote_scene(const Remote *r, const V2 base[FACTION_COUNT], Arena *arena)
 	for (int k = 0; k < MAX_SPOTS; k++) s.spot_owner[k] = (int8_t)(f->economy.spots >> k & 1 ? (int)me.v : -1);
 
 	const Units *u = &f->units;
-	s.units[me.v] = (SceneUnits){u->count, u->px, u->py, u->pz, u->vx, u->vz, u->type, u->dense_slot, u->progress};
+	s.units[me.v] = (SceneUnits){u->count, u->px, u->py, u->pz, u->vx, u->vz, u->type, u->dense_slot, u->progress,
+	                             u->order, u->work};
 	const Projectiles *p = &f->incoming;
 	s.shells[me.v] = (SceneShells){p->count, p->px, p->py, p->pz, p->vx, p->vy, p->vz, p->weapon};
 
@@ -133,7 +134,7 @@ Scene remote_scene(const Remote *r, const V2 base[FACTION_COUNT], Arena *arena)
 		slot[n] = (int32_t)k;
 		n++;
 	}
-	s.units[them.v] = (SceneUnits){n, px, py, pz, vx, vz, type, slot, nullptr};
+	s.units[them.v] = (SceneUnits){n, px, py, pz, vx, vz, type, slot, nullptr, nullptr, nullptr};
 	const OutgoingShells *o = &r->outgoing;
 	s.shells[them.v] = (SceneShells){o->count, o->px, o->py, o->pz, o->vx, o->vy, o->vz, o->weapon};
 	return s;

@@ -9,6 +9,8 @@
 //   factory or transporter (shift keeps placing; right-click or esc cancels)
 //   factories: 1-4 queue raider, tank, artillery, engineer (shift: repeat),
 //   0 clears
+//   V: selected combat units entrench as turrets; selected entrenched turrets
+//   mobilize (both paid for as they go, and helpless while they do)
 //   T then a zone's number: send the selection there through our nearest
 //   transporter. Where we have no transporter (a neighbouring zone, only
 //   raiders and engineers), click where in our strip they should land.

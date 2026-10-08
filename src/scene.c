@@ -10,7 +10,8 @@ Scene scene_from_sim(const Sim *sim)
 		const Units *u = &fa->units;
 		const Projectiles *p = &fa->incoming;
 		s.base[f] = fa->base;
-		s.units[f] = (SceneUnits){u->count, u->px, u->py, u->pz, u->vx, u->vz, u->type, u->dense_slot, u->progress};
+		s.units[f] = (SceneUnits){u->count, u->px, u->py, u->pz, u->vx, u->vz, u->type, u->dense_slot, u->progress,
+		                          u->order, u->work};
 		s.shells[f] = (SceneShells){p->count, p->px, p->py, p->pz, p->vx, p->vy, p->vz, p->weapon};
 	}
 	return s;
@@ -42,7 +43,7 @@ Scene scene_from_mirror(const Mirror *m, const Terrain *t, const V2 base[FACTION
 			slot[n] = (int32_t)k;
 			n++;
 		}
-		s.units[f] = (SceneUnits){n, px, py, pz, vx, vz, type, slot, nullptr};
+		s.units[f] = (SceneUnits){n, px, py, pz, vx, vz, type, slot, nullptr, nullptr, nullptr};
 		const MirrorShells *sh = &m->shells[f];
 		s.shells[f] = (SceneShells){sh->count, sh->px, sh->py, sh->pz, sh->vx, sh->vy, sh->vz, sh->weapon};
 	}

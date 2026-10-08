@@ -130,6 +130,11 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 	Vector2 mouse = GetMousePosition();
 	bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 	if (IsKeyPressed(KEY_X)) order(c, frame, out, cap, &n, (Order){.kind = COMMAND_STOP});
+	if (IsKeyPressed(KEY_V)) {
+		// Both at once: the sim takes the combat units for one, turrets for the other.
+		order(c, frame, out, cap, &n, (Order){.kind = COMMAND_ENTRENCH});
+		order(c, frame, out, cap, &n, (Order){.kind = COMMAND_MOBILIZE});
+	}
 	if (send_input(c, sim, view, frame, out, cap, &n)) return n;
 
 	if (sim->config.economy) {
@@ -234,11 +239,18 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 		ptrdiff_t d = units_find(u, c->selection[k]);
 		if (d >= 0) counts[u->type[d]]++;
 	}
+	int transforming = 0;
+	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
+		ptrdiff_t d = units_find(u, c->selection[k]);
+		transforming += d >= 0 && u->order[d] == ORDER_TRANSFORM;
+	}
 	char sel[256] = "nothing selected";
 	int used = 0;
 	for (int t = 0; t < UNIT_TYPE_COUNT; t++)
 		if (counts[t] && used < (int)sizeof sel)
 			used += snprintf(sel + used, sizeof sel - (size_t)used, "%s%d %s", used ? ", " : "", counts[t], unit_defs[t].name);
+	if (transforming && used < (int)sizeof sel)
+		snprintf(sel + used, sizeof sel - (size_t)used, "  (%d transforming)", transforming);
 	if (c->placing >= 0) snprintf(sel, sizeof sel, "placing a %s: click to build, esc to cancel", unit_defs[c->placing].name);
 	const SendTargets *z = &c->targets;
 	if (c->sending) {
@@ -255,8 +267,8 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 		snprintf(sel, sizeof sel, "landing in %s: click where, in your strip (esc cancels)", z->name[c->landing_for]);
 	DrawText(sel, 14, y + 26, 18, RAYWHITE);
 	DrawText(sim->config.economy
-	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | engineers: E G F R | factories: 1-4, 0 clear | T send"
-	                                 : "drag select | right attack-move | ctrl+right move | X stop | engineers: E G F R | factories: 1-4, shift repeat, 0 clear")
-	             : "drag select | right attack-move | ctrl+right move | X stop",
+	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-4, 0 clear | T send"
+	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-4, 0 clear")
+	             : "drag select | right attack-move | ctrl+right move | X stop | V entrench",
 	         14, y + 50, 14, GRAY);
 }

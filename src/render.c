@@ -200,6 +200,12 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 			float built = u->progress ? u->progress[i] : 1.0f;
 			if (built < 1.0f) s = 2;
 			float h = def->height * f_max(0.15f, built);
+			// Transforming: pale, and sinking as it digs in (or rising as it packs up).
+			if (u->order && u->order[i] == ORDER_TRANSFORM) {
+				s = 2;
+				float w = u->work[i];
+				h *= unit_is_combat(u->type[i]) ? 1.0f - 0.6f * w : 0.4f + 0.6f * w;
+			}
 			bool from_base = t == UNIT_ARTILLERY || t == UNIT_EXTRACTOR || t == UNIT_GENERATOR || t == UNIT_TRANSPORTER
 			              || t == UNIT_TURRET;
 			float y = u->py[i] + (from_base ? 0.0f : 0.5f * h);

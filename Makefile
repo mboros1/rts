@@ -217,7 +217,8 @@ demos/%.mp4: demos/%.sh | $(B)/rts $(B)/rts-server $(B)/rts-headless
 demos-restore: $(B)/rts
 	@for v in demos/*.mp4; do \
 		if head -c 40 "$$v" | grep -q '^version https://git-lfs'; then \
-			d=$$(basename "$$v" .mp4); echo "restoring $$d"; \
+			d=$$(basename "$$v" .mp4); [ -f demos/$$d.script ] || { echo "skipping $$d (a run or retired)"; continue; }; \
+			echo "restoring $$d"; \
 			$(call DEMO_RENDER,$$d) || exit 1; \
 		fi; \
 	done

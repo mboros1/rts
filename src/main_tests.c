@@ -719,7 +719,8 @@ static void test_ledger(void)
 //   - a relay arrival goes on through the transporter it came in at;
 //   - an unpaired arrival lands in our strip;
 //   - a batch is at most PAIRED_BATCH: the rest goes next charge;
-//   - one transporter is one queue: sends go in turn.
+//   - one transporter is one queue: sends go in turn;
+//   - (and entrenching and mobilizing, under the same split.)
 static void test_transporters(void)
 {
 	const char *text =
@@ -733,10 +734,14 @@ static void test_transporters(void)
 		"at 0 spawn blue tank 6 at 140,256 radius 5\n"
 		"at 0 spawn blue raider 10 at 140,300 radius 5\n"
 		"at 0 spawn blue engineer 2 at 140,300 radius 3\n"
-		"at 1 select blue tank as tanks\n"
+		"at 0 spawn blue tank 4 at 300,100 radius 3\n"
+		"at 1 select blue tank within 15 of 140,256 as tanks\n"
 		"at 1 select blue any within 15 of 140,300 as mixed\n"
+		"at 1 select blue tank within 10 of 300,100 as guard\n"
+		"at 3 entrench guard\n"
+		"at 900 mobilize guard\n"
 		"at 2 send tanks to beta\n"
-		"at 700 select blue tank as tanks\n"
+		"at 700 select blue tank within 30 of 140,256 as tanks\n"
 		"at 700 send mixed to beta at 60,300 unpaired\n"
 		"at 701 send tanks to beta at 60,300 unpaired\n";
 	Arena a = arena_create("transporters", 64 << 20);
@@ -927,25 +932,32 @@ static void test_snapshot(void)
 	arena_destroy(&a);
 }
 
-// Logging out and in: units entrench as turrets, which hold a line, and
-// mobilize back into what they were.
+// Entrenching: an order for some units, paid for as it goes and taking
+// ENTRENCH_TIME, during which they hold still and don't fire; then turrets,
+// which hold a line; mobilizing turns them back.
 static void test_entrench(void)
 {
 	const char *text =
-		"scenario skirmish\n"
-		"units 0\n"
+		"scenario economy\n"
+		"bases none\n"
 		"bot blue off\n"
 		"bot red off\n"
 		"at 0 spawn blue tank 10 at 200,256 radius 6\n"
+		"at 0 spawn blue tank 3 at 120,256 radius 3\n"   // not ordered: they stay tanks
 		"at 0 spawn red raider 20 at 236,256 radius 6\n"  // inside a turret's reach, outside a raider's
-		"at 1 entrench blue\n"
-		"at 2 expect blue turrets == 10\n"
-		"at 2 expect blue tanks == 0\n"
-		"at 600 expect red lost >= 10\n"
-		"at 600 expect blue lost == 0\n"
-		"at 601 mobilize blue\n"
-		"at 602 expect blue turrets == 0\n"
-		"at 602 expect blue tanks == 10\n";
+		"at 0 spawn blue generator 10 at 40,150 radius 10\n"  // entrenching ten takes all the starting energy
+		"at 1 select blue tank within 12 of 200,256 as line\n"
+		"at 2 entrench line\n"
+		"at 120 expect blue turrets == 0\n"               // still digging in
+		"at 200 expect blue turrets == 10\n"
+		"at 200 expect blue tanks == 3\n"
+		"at 700 expect red lost >= 10\n"
+		"at 700 expect blue lost == 0\n"
+		"at 701 select blue turret as dug\n"
+		"at 702 mobilize dug\n"
+		"at 760 expect blue turrets == 10\n"              // still packing up
+		"at 830 expect blue turrets == 0\n"
+		"at 830 expect blue tanks == 13\n";
 	Arena a = arena_create("entrench", 32 << 20);
 	Script sc;
 	char err[512];
@@ -953,15 +965,27 @@ static void test_entrench(void)
 	Sim sim;
 	sim_init(&sim, sc.config);
 	ScriptRun run;
-	script_run_init(&run, &sc, &a, stderr);
+	script_run_init(&run, &sc, &a, nullptr);
 	Arena tick = arena_create("tick", 8 << 20);
 	Command cmds[32];
-	while (sim.tick.v < 610) {
+	int64_t fired_at_start = -1, fired_digging = -1;
+	float metal_before = 0.0f, metal_after = 0.0f;
+	while (sim.tick.v < 840) {
 		arena_reset(&tick);
+		if (sim.tick.v == 2) metal_before = sim.factions[0].economy.metal; // before the order
+		if (sim.tick.v == 3) fired_at_start = sim.factions[0].stats.shots_fired;
+		if (sim.tick.v == 170) fired_digging = sim.factions[0].stats.shots_fired;
+		if (sim.tick.v == 200) metal_after = sim.factions[0].economy.metal;
 		ptrdiff_t n = script_tick(&run, &sim, &tick, cmds, countof(cmds));
 		sim_step(&sim, cmds, n);
 	}
-	CHECK(run.expects == 6 && run.failures == 0);
+	if (run.failures) fprintf(stderr, "entrench: %d of %d expectations failed\n", run.failures, run.expects);
+	CHECK(run.expects == 8 && run.failures == 0);
+	CHECK(fired_digging == fired_at_start);     // silent while transforming
+	// Paid: ten units' worth of metal, less what came in meanwhile.
+	float income = (200.0f - 2.0f) * SIM_DT * 1.0f;
+	float diff = metal_before + income - 10.0f * ENTRENCH_METAL - metal_after;
+	CHECK(diff > -2.0f && diff < 2.0f);
 	sim_destroy(&sim);
 	arena_destroy(&tick);
 	arena_destroy(&a);

@@ -318,6 +318,32 @@ Done. Expansion goes through transporters, along the zone graph.
   and scripts expand. The client's send keys are only tried by hand. The map
   still shows both sides' strength everywhere.
 
+## Spike 9 results (2026-10-08)
+
+Done. Entrenching is an order, not something logging out does.
+
+- **Entrench** (V in the client, `entrench GROUP` in scripts) turns the
+  selected combat units into turrets where they stand: 6 s, 40 metal and
+  300 energy a unit, paid as it goes from the economy at its shared rate
+  like building. **Mobilize** (V on entrenched turrets) turns them back: 4 s,
+  150 energy. While transforming a unit can't move or fire, and is drawn
+  pale, sinking as it digs in. Without an economy (the battle scenarios) it
+  only takes the time.
+- **Away**: since spike 8, a side's bot plays it while no player is in the
+  zone (unless the zone's setup turned that bot off), and stands down when
+  one joins.
+- **Evidence**: `test_entrench` (only the units ordered transform, nothing
+  until 6 s, silent meanwhile, the metal paid, turrets holding a line, and
+  mobilizing; energy runs out without generators, and it slows to what the
+  economy can pay); the transporter test entrenches and mobilizes under the
+  faction split. Demo 11 is blue's view of a line digging in, breaking an
+  assault, and pushing.
+- **Formats**: replay v7, wire v4 (entrench and mobilize carry units). Demo
+  08 (logout entrench) is retired.
+- **Not yet**: the bot never entrenches; nor does anything decay, so an
+  entrenched line holds forever (later: upkeep). The prices are first
+  guesses.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.
