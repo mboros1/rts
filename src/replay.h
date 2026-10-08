@@ -3,15 +3,15 @@
 // tick that does not is the divergence.
 //
 // Format, all little-endian:
-//   header  "RTSR" u32 version (5), config (u64 seed, 5 x i32,
-//           COMBAT_TYPE_COUNT x i32 spawn weights, u32 economy),
+//   header  "RTSR" u32 version (6), config (u64 seed, 5 x i32,
+//           COMBAT_TYPE_COUNT x i32 spawn weights, u32 economy, u32 bases),
 //           u32 snapshot length, snapshot (sim_save; empty: from the config)
 //
 // A replay with a snapshot is a segment: a resumed zone's run from where it
 // picked up, verifiable on its own.
 //   tick    u64 tick, u32 command count, commands, u64 hash after the step
 //   command u32 faction, u32 kind, f32 x, f32 z, u32 unit type, u32 amount,
-//           f32 radius, u32 flags, u32 n, n x (u32 index, u32 gen)
+//           f32 radius, u32 flags, u32 route, u32 n, n x (u32 index, u32 gen)
 #pragma once
 
 #include "arena.h"

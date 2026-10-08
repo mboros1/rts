@@ -335,6 +335,7 @@ static void client_send_order(Client *c, CommandKind kind, V2 target, UnitType t
 	put8(&b, type);
 	put32(&b, (uint32_t)amount);
 	put8(&b, flags);
+	put32(&b, 0); // route: the server works it out
 	put32(&b, (uint32_t)n);
 	for (ptrdiff_t i = 0; i < n; i++) {
 		put32(&b, units[i].index);
@@ -373,9 +374,28 @@ static void client_auto_orders(Client *c)
 
 // ---------------------------------------------------------------- window
 
+// Where a send could go, from the directory: our transporters, and the
+// zones linked to this one.
+static void client_targets(Client *c)
+{
+	SendTargets *t = &c->controls.targets;
+	*t = (SendTargets){.here = c->zone_at};
+	if (!c->opt.coord || !c->player) return;
+	const Directory *d = &c->dir;
+	for (int k = 0; k < d->zone_count && k < (int)countof(t->name); k++) {
+		t->name[k] = d->zones[k].name;
+		t->transporter[k] = d->zones[k].reported && d->zones[k].status.transporters[c->opt.faction] > 0;
+		for (int l = 0; l < d->link_count; l++)
+			t->neighbour[k] = t->neighbour[k] || (d->links[l][0] == k && d->links[l][1] == c->zone_at)
+			                                  || (d->links[l][1] == k && d->links[l][0] == c->zone_at);
+		t->count = k + 1;
+	}
+}
+
 static void client_input(Client *c)
 {
 	if (!c->player) return;
+	client_targets(c);
 	Order orders[16];
 	ptrdiff_t n = controls_input(&c->controls, &c->remote.sim, &c->view, &c->frame, orders, countof(orders));
 	for (ptrdiff_t k = 0; k < n; k++)
@@ -603,8 +623,9 @@ static int client_main(int argc, char **argv)
 			c.rate_bytes = c.conn.bytes_received;
 			c.rate_since = now;
 		}
-		if (c.on_map && now >= c.next_directory) {
-			c.next_directory = now + 1.0;
+		if (c.opt.coord && now >= c.next_directory) {
+			// The map refreshes every second; in a zone, for sends, every few.
+			c.next_directory = now + (c.on_map ? 1.0 : 3.0);
 			client_directory(&c);
 		}
 		if (c.opt.quit_at >= 0 && client_tick(&c) >= c.opt.quit_at) break;

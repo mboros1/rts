@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 5;
+static constexpr uint32_t REPLAY_VERSION = 6;
 
 // ---------------------------------------------------------------- writing
 
@@ -52,6 +52,7 @@ void replay_begin_from(ReplayWriter *w, Arena *buf, SimConfig c, Str snapshot)
 	put_u32(w, (uint32_t)c.max_projectiles);
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) put_u32(w, (uint32_t)c.type_weight[k]);
 	put_u32(w, c.economy);
+	put_u32(w, c.bases);
 	put_u32(w, (uint32_t)snapshot.len);
 	if (snapshot.len) put(w, snapshot.ptr, snapshot.len);
 }
@@ -78,6 +79,7 @@ void replay_tick(ReplayWriter *w, Tick tick, const Command *cmds, ptrdiff_t coun
 		put_u32(w, (uint32_t)c->amount);
 		put_f32(w, c->radius);
 		put_u32(w, c->flags);
+		put_u32(w, c->route);
 		put_u32(w, (uint32_t)c->count);
 		for (ptrdiff_t i = 0; i < c->count; i++) {
 			put_u32(w, c->units[i].index);
@@ -170,10 +172,11 @@ ReplayStatus replay_open(ReplayReader *r, Str data)
 		weights_ok = weights_ok && c->type_weight[k] >= 0 && c->type_weight[k] <= 1000;
 		weights += ok && weights_ok ? c->type_weight[k] : 0;
 	}
-	uint32_t economy;
-	if (!ok || !get_u32(r, &economy)) return REPLAY_TRUNCATED;
-	if (!weights_ok || weights <= 0 || economy > 1) return REPLAY_BAD_CONFIG;
+	uint32_t economy, bases;
+	if (!ok || !get_u32(r, &economy) || !get_u32(r, &bases)) return REPLAY_TRUNCATED;
+	if (!weights_ok || weights <= 0 || economy > 1 || bases >= 1u << FACTION_COUNT) return REPLAY_BAD_CONFIG;
 	c->economy = economy;
+	c->bases = (uint8_t)bases;
 	// sim_init asserts on these; a file must not be able to trip an assert.
 	if (c->max_units <= 0 || c->max_projectiles <= 0 || c->spawn_interval <= 0
 	    || c->population > c->max_units || c->initial_units > c->population
@@ -194,20 +197,20 @@ ReplayStatus replay_next(ReplayReader *r, Arena *arena, Tick *tick,
 	uint64_t t;
 	uint32_t n;
 	if (!get_u64(r, &t) || !get_u32(r, &n)) return REPLAY_TRUNCATED;
-	// Each command takes at least 36 bytes, which bounds n before allocating.
-	if ((ptrdiff_t)n > (r->data.len - r->pos) / 36) return REPLAY_TRUNCATED;
+	// Each command takes at least 40 bytes, which bounds n before allocating.
+	if ((ptrdiff_t)n > (r->data.len - r->pos) / 40) return REPLAY_TRUNCATED;
 	Command *out = arena_try_push(arena, (ptrdiff_t)n * (ptrdiff_t)sizeof(Command), alignof(Command));
 	if (n && !out) return REPLAY_TOO_LARGE;
 	for (uint32_t k = 0; k < n; k++) {
-		uint32_t faction, kind, unit_type, amount, flags, units;
+		uint32_t faction, kind, unit_type, amount, flags, route, units;
 		V2 target;
 		float radius;
 		if (!get_u32(r, &faction) || !get_u32(r, &kind) || !get_f32(r, &target.x)
 		    || !get_f32(r, &target.z) || !get_u32(r, &unit_type) || !get_u32(r, &amount)
-		    || !get_f32(r, &radius) || !get_u32(r, &flags) || !get_u32(r, &units))
+		    || !get_f32(r, &radius) || !get_u32(r, &flags) || !get_u32(r, &route) || !get_u32(r, &units))
 			return REPLAY_TRUNCATED;
 		if (faction >= FACTION_COUNT || kind >= COMMAND_KIND_COUNT || unit_type >= UNIT_TYPE_COUNT
-		    || amount > SPAWN_MAX || flags > 0xff)
+		    || amount > SPAWN_MAX || flags > 0xff || !route_ok(route))
 			return REPLAY_BAD_COMMAND;
 		if ((ptrdiff_t)units > (r->data.len - r->pos) / 8) return REPLAY_TRUNCATED;
 		UnitHandle *h = arena_try_push(arena, (ptrdiff_t)units * (ptrdiff_t)sizeof(UnitHandle), alignof(UnitHandle));
@@ -215,7 +218,7 @@ ReplayStatus replay_next(ReplayReader *r, Arena *arena, Tick *tick,
 		for (uint32_t i = 0; i < units; i++)
 			if (!get_u32(r, &h[i].index) || !get_u32(r, &h[i].generation)) return REPLAY_TRUNCATED;
 		out[k] = (Command){(FactionId){faction}, (CommandKind)kind, target, (ptrdiff_t)units, h,
-		                   (UnitType)unit_type, (int32_t)amount, radius, (uint8_t)flags};
+		                   (UnitType)unit_type, (int32_t)amount, radius, (uint8_t)flags, route};
 	}
 	uint64_t hash;
 	if (!get_u64(r, &hash)) return REPLAY_TRUNCATED;

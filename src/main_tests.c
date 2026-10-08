@@ -675,37 +675,35 @@ static void test_ledger(void)
 	Ledger *l = PUSH(&a, Ledger, 1);
 	l->log = log;
 	int32_t tanks[UNIT_TYPE_COUNT] = {[UNIT_TANK] = 10}, raiders[UNIT_TYPE_COUNT] = {[UNIT_RAIDER] = 4};
-	Transfer *t0 = ledger_depart(l, "alpha", 1, "beta", 0, false, tanks);
-	Transfer *t1 = ledger_depart(l, "alpha", 2, "pool", 0, false, raiders);
-	CHECK(ledger_depart(l, "alpha", 2, "pool", 0, false, raiders) == nullptr); // re-sent: already had it
-	CHECK(!t0->delivered && t1->delivered);        // the pool takes them at once
-	CHECK(l->pool[0][UNIT_RAIDER] == 4);
-	int32_t want[UNIT_TYPE_COUNT] = {[UNIT_RAIDER] = 6, [UNIT_TANK] = 1};
-	Transfer *t2 = ledger_draw(l, 0, "gamma", want);  // asks for more than there is
-	CHECK(t2 && t2->counts[UNIT_RAIDER] == 4 && t2->counts[UNIT_TANK] == 0);
-	CHECK(l->pool[0][UNIT_RAIDER] == 0);
-	CHECK(ledger_draw(l, 0, "gamma", want) == nullptr); // nothing left
+	Leg relay = {.route = route_push_front(0, 2)}, open = {.unpaired = true, .landing = v2(40.5f, 300.25f)};
+	Transfer *t0 = ledger_depart(l, "alpha", 1, "beta", 0, &relay, tanks);
+	Transfer *t1 = ledger_depart(l, "alpha", 2, "beta", 0, &open, raiders);
+	CHECK(t0 && t1 && !t0->delivered && !t1->delivered);
+	CHECK(ledger_depart(l, "alpha", 2, "beta", 0, &open, raiders) == nullptr); // re-sent: already had it
 	ledger_delivered(l, t0->id);
 	ledger_delivered(l, t0->id);                    // again: no second line
-	CHECK(ledger_pending(l) == 1);                  // the draw is still owed
+	CHECK(ledger_pending(l) == 1);
 	fclose(log);
 
-	// A fresh ledger from the log alone has the same transfers and pool.
+	// A fresh ledger from the log alone has the same transfers, legs and all.
 	Str text;
 	CHECK(platform_read_file(&a, path, &text));
 	Ledger *again = PUSH(&a, Ledger, 1);
 	int32_t bad;
 	CHECK(ledger_replay(again, text, &bad));
-	CHECK(again->transfer_count == 3 && ledger_pending(again) == 1);
-	CHECK(again->pool[0][UNIT_RAIDER] == 0 && again->next_id == 3);
-	CHECK(ledger_find(again, 0)->delivered && !ledger_find(again, 2)->delivered);
-	CHECK(ledger_depart(again, "alpha", 2, "pool", 0, false, raiders) == nullptr); // remembered across a restart
+	CHECK(again->transfer_count == 2 && ledger_pending(again) == 1 && again->next_id == 2);
+	const Transfer *r0 = ledger_find(again, 0), *r1 = ledger_find(again, 1);
+	CHECK(r0 && r0->delivered && !r0->leg.unpaired && r0->leg.route == relay.route && r0->counts[UNIT_TANK] == 10);
+	CHECK(r1 && !r1->delivered && r1->leg.unpaired && r1->leg.landing.x == 40.5f && r1->leg.landing.z == 300.25f);
+	CHECK(ledger_depart(again, "alpha", 2, "beta", 0, &open, raiders) == nullptr); // remembered across a restart
 	int lines = 0;
 	for (ptrdiff_t i = 0; i < text.len; i++) lines += text.ptr[i] == '\n';
-	CHECK(lines == 4);
+	CHECK(lines == 3);
 
-	const char *broken[] = {"transfer 9 a b 7 units 1 tank:1\n", "delivered 42\n", "draw 1 0 z tank:5\n",
-	                        "transfer 1 a b 0 units 1 nonsense:3\n", "explode 1\n", "transfer 1 a b 0 units\n"};
+	const char *broken[] = {"transfer 9 a b 7 paired 1 0 0,0 tank:1\n", "delivered 42\n",
+	                        "transfer 1 a b 0 paired 1 0 0,0 nonsense:3\n", "explode 1\n", "transfer 1 a b 0 paired\n",
+	                        "transfer 1 a b 0 sideways 1 0 0,0 tank:1\n", "transfer 1 a b 0 unpaired 1 3 0,0 tank:1\n",
+	                        "transfer 1 a b 0 paired 1 0 nowhere tank:1\n", "draw 1 0 z tank:5\n"};
 	for (int k = 0; k < (int)countof(broken); k++) {
 		Ledger *x = PUSH(&a, Ledger, 1);
 		CHECK(!ledger_replay(x, (Str){broken[k], (ptrdiff_t)strlen(broken[k])}, &bad));
@@ -714,24 +712,39 @@ static void test_ledger(void)
 	arena_destroy(&a);
 }
 
-// Gates under the faction split: departures, arrivals and a seed unfolding
-// are all faction state, so clients fed only their streams still match.
-static void test_gates(void)
+// Transporters under the faction split: sends, relays and arrivals are all
+// faction state, so a client fed only its stream still matches.
+//   - a paired send of tanks leaves after its 10 s charge, paying 30 a unit;
+//   - an unpaired send takes only the raiders and engineers, 8 at most;
+//   - a relay arrival goes on through the transporter it came in at;
+//   - an unpaired arrival lands in our strip;
+//   - a batch is at most PAIRED_BATCH: the rest goes next charge;
+//   - one transporter is one queue: sends go in turn.
+static void test_transporters(void)
 {
 	const char *text =
 		"scenario economy\n"
+		"bases none\n"
 		"bot blue off\n"
 		"bot red off\n"
-		"zones alpha beta\n"
-		"at 0 spawn blue gate 1 at 100,256 radius 0\n"
+		"zones alpha beta gamma\n"
+		"at 0 spawn blue transporter 1 at 100,256 radius 0\n"
+		"at 0 spawn blue generator 40 at 40,150 radius 30\n"
 		"at 0 spawn blue tank 6 at 140,256 radius 5\n"
-		"at 1 select blue tank as army\n"
-		"at 2 gate army to beta via 100,256\n";
-	Arena a = arena_create("gates", 64 << 20);
-	Arena tick = arena_create("gates tick", 16 << 20);
+		"at 0 spawn blue raider 10 at 140,300 radius 5\n"
+		"at 0 spawn blue engineer 2 at 140,300 radius 3\n"
+		"at 1 select blue tank as tanks\n"
+		"at 1 select blue any within 15 of 140,300 as mixed\n"
+		"at 2 send tanks to beta\n"
+		"at 700 select blue tank as tanks\n"
+		"at 700 send mixed to beta at 60,300 unpaired\n"
+		"at 701 send tanks to beta at 60,300 unpaired\n";
+	Arena a = arena_create("transporters", 64 << 20);
+	Arena tick = arena_create("transporters tick", 16 << 20);
 	Script sc;
 	char err[512];
 	CHECK(script_parse(&sc, &a, (Str){text, (ptrdiff_t)strlen(text)}, "t.script", err, sizeof err));
+	if (!sc.action_count) fprintf(stderr, "%s\n", err);
 	Sim server, client;
 	sim_init(&server, sc.config);
 	sim_init(&client, sc.config);
@@ -743,17 +756,39 @@ static void test_gates(void)
 	ScriptRun run;
 	script_run_init(&run, &sc, &a, nullptr);
 	bool matched = true;
-	int64_t departed = 0;
+	Departure left[64];
+	int64_t left_at[64];
+	int left_count = 0;
+	int32_t raiders_in_strip = 0, relayed = 0;
 	Command cmds[64];
-	for (int t = 0; t < 1500; t++) {
+	for (int t = 0; t < 4600; t++) {
 		arena_reset(&tick);
-		ptrdiff_t n = script_tick(&run, &server, &tick, cmds, countof(cmds) - 2);
-		// What the coordinator would do: send the tanks back, and a seed.
-		if (t == 600) cmds[n++] = (Command){.faction = {0}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_RAIDER, .amount = 3};
-		if (t == 650) cmds[n++] = (Command){.faction = {0}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_GATE, .amount = 1,
-		                                    .flags = COMMAND_SEED_GATE, .target = v2(100, 360)};
+		ptrdiff_t n = script_tick(&run, &server, &tick, cmds, countof(cmds) - 3);
+		// What the coordinator would bring: tanks to relay on to gamma, raiders
+		// unpaired into our strip, and 70 raiders at once to go on to gamma.
+		if (t == 2000)
+			cmds[n++] = (Command){.faction = {0}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_TANK, .amount = 5,
+			                      .target = v2(100, 256), .route = route_push_front(0, 2)};
+		if (t == 2000)
+			cmds[n++] = (Command){.faction = {0}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_RAIDER, .amount = 4,
+			                      .target = v2(300, 200), .flags = COMMAND_UNPAIRED};
+		if (t == 2600)
+			cmds[n++] = (Command){.faction = {0}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_RAIDER, .amount = 70,
+			                      .target = v2(100, 256), .route = route_push_front(0, 2)};
 		sim_step(&server, cmds, n);
-		for (ptrdiff_t k = 0; k < server.factions[0].departure_count; k++) departed += server.factions[0].departures[k].count;
+		const Faction *f = &server.factions[0];
+		for (ptrdiff_t k = 0; k < f->departure_count && left_count < 64; k++) {
+			left_at[left_count] = server.tick.v;
+			left[left_count++] = f->departures[k];
+		}
+		if (t == 2001) {
+			const Units *u = &f->units;
+			for (ptrdiff_t i = 0; i < u->count; i++) {
+				raiders_in_strip += u->type[i] == UNIT_RAIDER && u->order[i] != ORDER_SEND
+				                    && u->px[i] < server.terrain.size_x * STRIP;
+				relayed += u->type[i] == UNIT_TANK && u->order[i] == ORDER_SEND && u->dest[i] == 2;
+			}
+		}
 		buf.len = 0;
 		wire_encode_faction_tick(&server, (FactionId){0}, cmds, n, true, 1000, &buf);
 		r = byte_reader(buf.data, buf.len);
@@ -762,17 +797,35 @@ static void test_gates(void)
 		if (ok) faction_tick(&client, (FactionId){0}, &ft.effects, ft.commands, ft.command_count);
 		matched = matched && ok && faction_hash(&client.factions[0]).v == ft.hash.v;
 	}
-	const Units *u = &server.factions[0].units;
-	int gates = 0, raiders = 0;
-	for (ptrdiff_t i = 0; i < u->count; i++) {
-		gates += u->type[i] == UNIT_GATE && u->progress[i] >= 1.0f;
-		raiders += u->type[i] == UNIT_RAIDER;
+	// 0: the six tanks, paired, after a 10 s charge (and the walk over).
+	CHECK(left_count >= 6);
+	CHECK(left[0].type == UNIT_TANK && left[0].count == 6 && !left[0].unpaired && left[0].dest == 1);
+	CHECK(left_at[0] >= (int64_t)(PAIRED_CHARGE * SIM_HZ) && left_at[0] < 700);
+	// Then the unpaired send: raiders and engineers only (the tanks were
+	// turned away), 8 at most, landing where asked; the other 4 next charge.
+	int32_t unpaired_units = 0, unpaired_tanks = 0, first_batch = 0;
+	int64_t first_unpaired = -1;
+	for (int k = 0; k < left_count; k++) {
+		if (!left[k].unpaired) continue;
+		if (first_unpaired < 0) first_unpaired = left_at[k];
+		if (left_at[k] == first_unpaired) first_batch += left[k].count;
+		unpaired_units += left[k].count;
+		unpaired_tanks += left[k].type == UNIT_TANK ? left[k].count : 0;
+		CHECK(left[k].landing.x == 60.0f && left[k].landing.z == 300.0f && left[k].route == 0);
 	}
-	CHECK(departed == 6);                    // all six tanks left, as one departure
-	CHECK(server.factions[0].stats.units_arrived == 3 && raiders == 3);
-	CHECK(gates == 2);                       // the seed unfolded beside the first
+	CHECK(unpaired_tanks == 0 && unpaired_units == 12 && first_batch == UNPAIRED_BATCH);
+	CHECK(first_unpaired >= 700 + (int64_t)(UNPAIRED_CHARGE * SIM_HZ));
+	// The relay: the five tanks went on to gamma; unpaired raiders came in in our strip.
+	CHECK(relayed == 5 && raiders_in_strip == 4);
+	int32_t to_gamma = 0, biggest = 0;
+	for (int k = 0; k < left_count; k++)
+		if (left[k].dest == 2) {
+			to_gamma += left[k].count;
+			biggest = left[k].count > biggest ? left[k].count : biggest;
+		}
+	CHECK(to_gamma == 75 && biggest <= PAIRED_BATCH);
 	CHECK(matched);
-	// A zone with gates (charged ones included) saves and loads.
+	// A zone with transporters (charged ones included) saves and loads.
 	ByteBuf snap = bytebuf_make(&a, 4 << 20);
 	sim_save(&server, &snap);
 	Sim loaded;
@@ -932,7 +985,7 @@ static const Test tests[] = {
 	{"economy", test_economy},
 	{"build_orders", test_build_orders},
 	{"ledger", test_ledger},
-	{"gates", test_gates},
+	{"transporters", test_transporters},
 	{"snapshot", test_snapshot},
 	{"entrench", test_entrench},
 };

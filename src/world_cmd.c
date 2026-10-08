@@ -18,10 +18,10 @@
 //   --faction F      who you play (blue, the default, or red)
 //   anything else goes to the client: --journey, --bot, --netlog ...
 //
-// Each zone runs the economy scenario (on its own terrain, seeded from its
-// name: DIR/live/ZONE.script) with bots on both sides; when you
-// launch into a zone, its bot for your side stands down, and takes over
-// again when you leave (logout policy "bot").
+// Each zone runs the economy scenario on its own terrain, seeded from its
+// name (DIR/live/ZONE.script); only a side's home zone starts with its base.
+// Bots play both sides; when you launch into a zone, its bot for your side
+// stands down, and takes over again when you leave.
 //
 // In DIR/live: world.txt (the world file it was made from), coord.log and
 // ZONE.state (the persistent state), ZONE-NNN.replay (one segment per run of
@@ -108,9 +108,8 @@ static void world_start(WorldCmd *w)
 		start_process(w, "coord", argv);
 		printf("world: started the coordinator on port %s\n", port);
 	}
-	char zones[COORD_MAX_ZONES * ZONE_NAME] = "";
-	for (int k = 0; k < w->world.zone_count; k++)
-		snprintf(zones + strlen(zones), sizeof zones - strlen(zones), "%s%s", k ? "," : "", w->world.zones[k].name);
+	char world[WORLD_PATH];
+	snprintf(world, sizeof world, "%s", live_path(w, "world.txt"));
 	for (int k = 0; k < w->world.zone_count; k++) {
 		const char *name = w->world.zones[k].name;
 		if (running(w, name)) continue;
@@ -123,8 +122,8 @@ static void world_start(WorldCmd *w)
 		snprintf(record, sizeof record, "%s", live_path(w, fmt("%s-%03d.replay", name, seg)));
 		snprintf(stats, sizeof stats, "%s", live_path(w, fmt("%s.txt", name)));
 		snprintf(script, sizeof script, "%s", live_path(w, fmt("%s.script", name)));
-		const char *argv[] = {fmt("%srts-server", bin), "--script", script, "--zone", name, "--zones", zones,
-		                      "--coord", coord, "--port", port, "--state", state, "--logout", "bot",
+		const char *argv[] = {fmt("%srts-server", bin), "--script", script, "--zone", name, "--world", world,
+		                      "--coord", coord, "--port", port, "--state", state,
 		                      "--record", record, "--stats", stats, "--speed", speed, nullptr};
 		start_process(w, name, argv);
 		printf("world: started zone %s on port %s\n", name, port);
@@ -245,7 +244,10 @@ int world_main(int argc, char **argv)
 			for (int k = 0; k < check.zone_count; k++) {
 				uint64_t seed = 1469598103934665603u;
 				for (const char *c = check.zones[k].name; *c; c++) seed = (seed ^ (uint8_t)*c) * 1099511628211u;
-				const char *script = fmt("scenario economy\nseed %llu\n", (unsigned long long)(seed % 1000000007u));
+				// Only a side's home zone starts with its base; elsewhere it has to get in.
+				int8_t home = check.zones[k].home;
+				const char *script = fmt("scenario economy\nseed %llu\nbases %s\n", (unsigned long long)(seed % 1000000007u),
+				                         home == 0 ? "blue" : home == 1 ? "red" : "none");
 				if (!platform_write_file(live_path(&w, fmt("%s.script", check.zones[k].name)), script, (ptrdiff_t)strlen(script)))
 					fatal("cannot write the zone scripts");
 			}

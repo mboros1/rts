@@ -45,7 +45,7 @@ typedef struct {
 	int64_t tick;
 	uint16_t units[FACTION_COUNT];       // combat units
 	uint16_t structures[FACTION_COUNT];  // everything that doesn't move
-	uint8_t gates[FACTION_COUNT];        // finished gates
+	uint8_t transporters[FACTION_COUNT]; // finished transporters
 } ZoneStatus;
 
 typedef struct {
@@ -82,7 +82,7 @@ void put_directory(ByteBuf *b, const Directory *d);
 bool get_directory(ByteReader *r, Directory *d);
 
 // The map as text, for terminals and tests:
-//   west    up   blue's home  0:12:31   blue 23 units 5 bldg 1 gate | red 0 units 0 bldg
+//   west    up   blue's home  0:12:31   blue 23 units 5 bldg 1 transporters | red 0 units 0 bldg
 //   links: west-middle middle-east
 //   transit: blue 12 west->middle
 void directory_print(const Directory *d, FILE *out);

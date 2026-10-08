@@ -73,7 +73,16 @@ void director_update(Director *d, const Scene *scene)
 	}
 	V2 focus;
 	float spread;
-	if (n >= 12) {
+	const SceneUnits *own = d->side >= 0 ? &scene->units[d->side] : nullptr;
+	if (own && own->count) {
+		// A player's view: its own units, spread as they are.
+		V2 s = v2(0.0f, 0.0f);
+		for (ptrdiff_t i = 0; i < own->count; i++) s = v2_add(s, v2(own->px[i], own->pz[i]));
+		focus = v2_scale(s, 1.0f / (float)own->count);
+		float total = 0.0f;
+		for (ptrdiff_t i = 0; i < own->count; i++) total += v2_len(v2_sub(v2(own->px[i], own->pz[i]), focus));
+		spread = total / (float)own->count;
+	} else if (n >= 12) {
 		focus = v2_scale(sum, 1.0f / (float)n);
 		float total = 0.0f;
 		for (int f = 0; f < FACTION_COUNT; f++) {
@@ -98,7 +107,7 @@ void director_update(Director *d, const Scene *scene)
 	}
 	float distance = f_clamp(spread * 2.4f + 70.0f, 80.0f, 360.0f);
 	if (!d->primed) {
-		*d = (Director){focus, distance, true};
+		*d = (Director){focus, distance, true, d->side};
 		return;
 	}
 	d->focus = v2_add(d->focus, v2_scale(v2_sub(focus, d->focus), 0.05f));
@@ -379,7 +388,7 @@ int clip_run(const ClipRequest *req)
 	int rw = out.w * SUPERSAMPLE, rh = out.h * SUPERSAMPLE;
 	Sample *samples = PUSH(&work, Sample, out.frames > 0 ? out.frames : 1);
 
-	Director director = {0};
+	Director director = {.side = -1};
 	Command bot_cmds[256];
 	while (sim.tick.v < to) {
 		arena_reset(&decode);
@@ -514,7 +523,7 @@ static bool playback_open(Playback *p, const char *path, Arena *work)
 		p->t_end = rec.t;
 		if (rec.kind == MSG_WELCOME && !welcomed) {
 			ByteReader r = byte_reader(rec.data, rec.len);
-			get32(&r);
+			if (get32(&r) != WIRE_VERSION) return false; // recorded by an older client
 			get8(&r);
 			if (!wire_get_config(&r, &p->config)) return false;
 			for (int f = 0; f < FACTION_COUNT; f++) p->base[f] = v2(getf(&r), getf(&r));
@@ -760,7 +769,7 @@ int clip_netlog(const ClipRequest *req)
 	                    &view_at[1].z, &view_d[1]) != 6)
 		return fail("--views X,Z,D;X,Z,D", req->views);
 
-	Director director = {0};
+	Director director = {.side = count == 1 && views[0].player ? views[0].faction : -1};
 	int64_t frames = (int64_t)((t_end - t_start) * CLIP_FPS) + 1;
 	for (int64_t k = 0; k < frames; k++) {
 		double t = t_start + (double)k / CLIP_FPS;
@@ -770,7 +779,7 @@ int clip_netlog(const ClipRequest *req)
 			renderer_unload(&renderer);
 			renderer_init(&renderer, &views[0].terrain, views[0].config.max_units, &work);
 			views[0].world_changed = false;
-			director = (Director){0};
+			director = (Director){.side = director.side};
 		}
 		bool map = count == 1 && views[0].on_map && views[0].have_dir;
 		if (!map && (!views[0].have_state || (count == 2 && !views[1].have_state))) continue;

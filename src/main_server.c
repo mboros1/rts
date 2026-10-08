@@ -1,8 +1,8 @@
 // rts-server: runs the sim headless, in real time, and streams it to clients.
 //
 //   rts-server [--scenario NAME | --script PATH] [--port N] [--ticks N]
-//              [--zone NAME --zones A,B,... --coord HOST:PORT]
-//              [--state PATH] [--save-every SECONDS] [--logout hold|entrench|bot]
+//              [--zone NAME (--world PATH | --zones A,B,...) --coord HOST:PORT]
+//              [--state PATH] [--save-every SECONDS]
 //              [--record PATH] [--stats PATH] [--bot blue|red on|off]
 //              [--latency MS] [--jitter MS] [--dilation F] [--speed X]
 //
@@ -18,18 +18,28 @@
 // --speed runs the clock X times faster than real time, for tests.
 //
 // With --coord, this is one zone of a larger match (coord.h): units leaving
-// through its gates are reported to the coordinator, and units it delivers
-// come in through this zone's gates as ARRIVE commands, so the zone's replay
-// still verifies on its own. --zones names the match's zones, in the order
-// gate commands number them.
+// through its transporters are reported to the coordinator, and units it
+// delivers come in as ARRIVE commands, so the zone's replay still verifies on
+// its own. --world (world.h) names the zones, in the order sends number them,
+// and the links between them; --zones only names them (tests).
+//
+// With a world, every send is routed here before the step, whoever ordered
+// it (a player, a script, a bot), from the world's links and the
+// coordinator's directory (which zones have our transporters):
+//   - to a zone with our transporter: paired, hop by hop along the route
+//     given or the shortest one through our transporters;
+//   - to an adjacent zone without one: unpaired, landing in our strip;
+//   - otherwise refused.
+// Arrivals wait while their landing area is full (LANDING_ROOM).
+//
+// When a side's last player leaves, its bot takes over, unless the zone's
+// setup turned that bot off; a player joining sends it back.
+//
+// In a world, setup scripts only set up: spawning after tick 0 is refused.
 //
 // --state makes the zone durable: it resumes from PATH if it exists, saves
 // there every --save-every seconds, after any tick where units left or
 // arrived (before telling the coordinator), and on SIGTERM.
-//
-// --logout: when a faction's last player leaves, its combat units entrench
-// as turrets (and mobilize when a player returns), or its bot takes over,
-// or nothing happens (hold, the default).
 //
 // Unity build: this file is the whole program.
 #include "base.h"
@@ -60,7 +70,7 @@ typedef struct {
 	uint64_t seq;
 	uint8_t faction;
 	char dst[ZONE_NAME];
-	uint8_t seed;
+	Leg leg;
 	int32_t counts[UNIT_TYPE_COUNT];
 } Outgoing;
 
@@ -102,6 +112,12 @@ typedef struct {
 	const char *zone_name;
 	char zones[COORD_MAX_ZONES][ZONE_NAME];
 	int zone_count;
+	World world;                 // with --world; zone_count 0 without
+	int here;                    // this zone's index in the world
+	Directory dir;               // the coordinator's, refreshed every few seconds
+	bool have_dir;
+	double next_dir;
+	int64_t sends_routed, sends_refused, arrivals_held;
 	char coord_host[64];
 	int coord_port, port;
 	Conn coord;
@@ -111,9 +127,8 @@ typedef struct {
 	int outgoing_count;
 	uint64_t applied[1024];      // transfers recently brought in
 	int applied_count;
-	// Logging out (spike 6): what a faction does when its last player leaves.
-	enum { LOGOUT_HOLD, LOGOUT_ENTRENCH, LOGOUT_BOT } logout;
 	int players[FACTION_COUNT];
+	bool bot_allowed[FACTION_COUNT];   // the bot plays a side nobody's playing
 	// Persistence (spike 6).
 	const char *state_path;
 	double save_every, next_save;
@@ -146,26 +161,15 @@ static void send_or_drop(Server *s, Client *c, uint8_t kind, const ByteBuf *b, d
 	(void)s;
 }
 
-// Logging out and back in, as commands in the next tick so replays have them.
-static void queue_faction_command(Server *s, uint8_t faction, CommandKind kind)
-{
-	if (s->queued_count < MAX_COMMANDS) s->queued[s->queued_count++] = (Command){.faction = {faction}, .kind = kind};
-}
-
+// Away from the keyboard: the bot plays the side, if the zone allows it.
 static void last_player_leaves(Server *s, uint8_t faction)
 {
-	if (s->logout == LOGOUT_ENTRENCH) queue_faction_command(s, faction, COMMAND_ENTRENCH);
-	if (s->logout == LOGOUT_BOT) s->run.bots[faction].enabled = true;
-	if (s->logout != LOGOUT_HOLD)
-		printf("server %s: %s's last player left: %s\n", s->zone_name, faction ? "red" : "blue",
-		       s->logout == LOGOUT_ENTRENCH ? "entrenching" : "the bot takes over");
+	s->run.bots[faction].enabled = s->bot_allowed[faction];
+	if (s->bot_allowed[faction])
+		printf("server %s: %s's last player left: the bot takes over\n", s->zone_name, faction ? "red" : "blue");
 }
 
-static void player_returns(Server *s, uint8_t faction)
-{
-	if (s->logout == LOGOUT_ENTRENCH) queue_faction_command(s, faction, COMMAND_MOBILIZE);
-	if (s->logout == LOGOUT_BOT) s->run.bots[faction].enabled = false;
-}
+static void player_returns(Server *s, uint8_t faction) { s->run.bots[faction].enabled = false; }
 
 static void handle_hello(Server *s, Client *c, ByteReader *r, double now)
 {
@@ -211,14 +215,15 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	uint8_t unit_type = get8(r);
 	int32_t amount = (int32_t)get32(r);
 	uint8_t flags = get8(r);
+	Route route = get32(r);
 	uint32_t n = get32(r);
-	// Players order, build and produce; spawning is for scripts only.
-	// Arriving and spawning come from the coordinator and scripts, never players.
-	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE
-	            || kind == COMMAND_GATE || kind == COMMAND_SEED || kind == COMMAND_DRAW;
+	// Players order, build, produce and send; spawning is for scripts only.
+	// Arriving comes from the coordinator, never players. Whether a send is
+	// paired is the server's to say (route_send).
+	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE || kind == COMMAND_SEND;
 	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && unit_type < UNIT_TYPE_COUNT
-	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : kind == COMMAND_DRAW ? SPAWN_MAX : ZONE_POOL)
-	       && flags <= COMMAND_REPEAT
+	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : ZONE_MAX)
+	       && flags <= COMMAND_REPEAT && route_ok(route)
 	       && n <= (uint32_t)s->sim.config.max_units && (ptrdiff_t)n * 8 == r->len - r->pos
 	       && s->queued_count < MAX_COMMANDS;
 	if (!ok) {
@@ -229,7 +234,8 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	for (uint32_t i = 0; i < n; i++) h[i] = (UnitHandle){get32(r), get32(r)};
 	s->queued[s->queued_count++] = (Command){.faction = {c->faction}, .kind = (CommandKind)kind,
 	                                         .target = target, .count = n, .units = h,
-	                                         .unit_type = (UnitType)unit_type, .amount = amount, .flags = flags};
+	                                         .unit_type = (UnitType)unit_type, .amount = amount, .flags = flags,
+	                                         .route = route};
 	c->commands++;
 	s->commands_admitted++;
 }
@@ -286,7 +292,7 @@ static void send_departure(Server *s, const Outgoing *o, double now)
 	put64(&b, o->seq);
 	put8(&b, o->faction);
 	put_name(&b, o->dst);
-	put8(&b, o->seed);
+	put_leg(&b, &o->leg);
 	put_counts(&b, o->counts);
 	conn_send(&s->coord, COORD_DEPART, b.data, b.len, now);
 	arena_rewind(m);
@@ -320,15 +326,29 @@ static void remember_applied(Server *s, uint64_t id)
 	s->applied[s->applied_count++] = id;
 }
 
-// Units for this zone: through the faction's gate, as ARRIVE commands in the
-// next tick. A seed lands near the faction's base. No gate yet: hold. The
-// arrival is confirmed only once the zone has saved a state that holds it.
+// How many of a faction's units stand within LANDING_RADIUS of at.
+static int32_t landing_crowd(const Faction *f, V2 at)
+{
+	const Units *u = &f->units;
+	int32_t n = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (!unit_is_structure(u->type[i]) && v2_len2(v2_sub(v2(u->px[i], u->pz[i]), at)) <= LANDING_RADIUS * LANDING_RADIUS)
+			n++;
+	return n;
+}
+
+// Units for this zone, as ARRIVE commands in the next tick: paired ones at
+// one of the faction's transporters with room, unpaired ones at their point
+// in its strip. No transporter, or no room: hold, and the coordinator offers
+// them again later. The arrival is confirmed only once the zone has saved a
+// state that holds it.
 static void on_deliver(Server *s, ByteReader *r, double now)
 {
 	uint64_t id = get64(r);
-	uint8_t faction = get8(r), seed = get8(r);
+	uint8_t faction = get8(r);
+	Leg leg;
 	int32_t counts[UNIT_TYPE_COUNT];
-	if (!get_counts(r, counts) || faction >= FACTION_COUNT) return;
+	if (!get_leg(r, &leg) || !get_counts(r, counts) || faction >= FACTION_COUNT) return;
 	if (was_applied(s, id)) {
 		// Already in: confirm (again) unless it's still waiting for its tick.
 		for (int k = 0; k < s->applied_count; k++)
@@ -336,27 +356,37 @@ static void on_deliver(Server *s, ByteReader *r, double now)
 		return;
 	}
 	const Faction *f = &s->sim.factions[faction];
-	V2 at = f->base;
-	bool has_gate = false;
-	for (ptrdiff_t i = 0; i < f->units.count && !has_gate; i++)
-		if (f->units.type[i] == UNIT_GATE && f->units.progress[i] >= 1.0f) {
-			has_gate = true;
+	int32_t batch = 0;
+	for (int k = 0; k < UNIT_TYPE_COUNT; k++) batch += counts[k];
+	V2 at = v2(0.0f, 0.0f);
+	bool room = false, has_landing = false;
+	if (leg.unpaired) {
+		at = sim_strip_point(&s->sim.terrain, (FactionId){faction}, leg.landing);
+		room = landing_crowd(f, at) + batch <= LANDING_ROOM;
+	} else {
+		for (ptrdiff_t i = 0; i < f->units.count && !room; i++) {
+			if (f->units.type[i] != UNIT_TRANSPORTER || f->units.progress[i] < 1.0f) continue;
+			has_landing = true;
 			at = v2(f->units.px[i], f->units.pz[i]);
+			room = landing_crowd(f, at) + batch <= LANDING_ROOM;
 		}
-	if (!seed && !has_gate) {
+	}
+	if (!room || s->confirm_count == (int)countof(s->confirm)) {
+		if (s->arrivals_held++ == 0)
+			printf("server %s: transfer %llu waits: %s\n", s->zone_name, (unsigned long long)id,
+			       leg.unpaired || has_landing ? "no room where they'd land" : "no transporter here");
 		send_id(s, COORD_HOLD, id, now);
 		return;
 	}
-	if (s->confirm_count == (int)countof(s->confirm)) return; // busy: the coordinator will offer again
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
 		if (!counts[k] || s->queued_count == MAX_COMMANDS) continue;
 		s->queued[s->queued_count++] = (Command){.faction = {faction}, .kind = COMMAND_ARRIVE, .target = at,
-		                                         .unit_type = (UnitType)k, .amount = counts[k],
-		                                         .flags = seed ? COMMAND_SEED_GATE : 0};
+		                                         .unit_type = (UnitType)k, .amount = counts[k], .route = leg.route,
+		                                         .flags = leg.unpaired ? COMMAND_UNPAIRED : 0};
 	}
 	s->confirm[s->confirm_count++] = id;
-	printf("server %s: transfer %llu arrives (%s)\n", s->zone_name, (unsigned long long)id,
-	       seed ? "a gate seed" : faction ? "red" : "blue");
+	printf("server %s: transfer %llu arrives (%s, %s%s)\n", s->zone_name, (unsigned long long)id, faction ? "red" : "blue",
+	       leg.unpaired ? "unpaired" : "paired", leg.route ? ", going on" : "");
 }
 
 static void on_depart_ack(Server *s, uint64_t seq)
@@ -388,21 +418,26 @@ static void coord_service(Server *s, double now)
 		}
 	}
 	if (!s->coord.open) return;
+	if (s->world.zone_count && now >= s->next_dir) {
+		// Where our transporters are, for routing sends.
+		s->next_dir = now + 0.5;
+		conn_send(&s->coord, COORD_DIRECTORY_ASK, "", 0, now);
+	}
 	if (now >= s->next_status) {
 		// For the strategic map: who's here, in what strength.
 		s->next_status = now + 1.0;
 		ZoneStatus st = {.tick = s->sim.tick.v};
 		for (int f = 0; f < FACTION_COUNT; f++) {
 			const Units *u = &s->sim.factions[f].units;
-			int32_t units = 0, structures = 0, gates = 0;
+			int32_t units = 0, structures = 0, transporters = 0;
 			for (ptrdiff_t i = 0; i < u->count; i++) {
 				if (unit_defs[u->type[i]].speed > 0.0f) units += unit_is_combat(u->type[i]);
 				else structures++;
-				gates += u->type[i] == UNIT_GATE && u->progress[i] >= 1.0f;
+				transporters += u->type[i] == UNIT_TRANSPORTER && u->progress[i] >= 1.0f;
 			}
 			st.units[f] = (uint16_t)(units < 65535 ? units : 65535);
 			st.structures[f] = (uint16_t)(structures < 65535 ? structures : 65535);
-			st.gates[f] = (uint8_t)(gates < 255 ? gates : 255);
+			st.transporters[f] = (uint8_t)(transporters < 255 ? transporters : 255);
 		}
 		ArenaMark m = arena_mark(&s->encode);
 		ByteBuf b = bytebuf_make(&s->encode, 64);
@@ -416,6 +451,7 @@ static void coord_service(Server *s, double now)
 		ByteReader r = byte_reader(f.data, f.len);
 		if (f.kind == COORD_DELIVER) on_deliver(s, &r, now);
 		else if (f.kind == COORD_DEPART_ACK) on_depart_ack(s, get64(&r));
+		else if (f.kind == COORD_DIRECTORY) s->have_dir = get_directory(&r, &s->dir) || s->have_dir;
 	}
 }
 
@@ -424,14 +460,14 @@ static void coord_service(Server *s, double now)
 //   "RTSZ" u32 version, config (wire_put_config), u64 last departure number,
 //   u32 n, n x outgoing departure, u32 m, m x u64 applied transfer, sim_save
 
-enum { ZONE_STATE_VERSION = 1 };
+enum { ZONE_STATE_VERSION = 2 };
 
 static void put_outgoing(ByteBuf *b, const Outgoing *o)
 {
 	put64(b, o->seq);
 	put8(b, o->faction);
 	put_name(b, o->dst);
-	put8(b, o->seed);
+	put_leg(b, &o->leg);
 	put_counts(b, o->counts);
 }
 
@@ -479,8 +515,7 @@ static bool load_zone(Server *s, Arena *scratch)
 		Outgoing *o = &s->outgoing[k];
 		o->seq = get64(&r);
 		o->faction = get8(&r);
-		if (!get_name(&r, o->dst)) fatal("%s: bad departure", s->state_path);
-		o->seed = get8(&r);
+		if (!get_name(&r, o->dst) || !get_leg(&r, &o->leg)) fatal("%s: bad departure", s->state_path);
 		if (!get_counts(&r, o->counts) || o->faction >= FACTION_COUNT) fatal("%s: bad departure", s->state_path);
 	}
 	s->outgoing_count = (int)n;
@@ -495,31 +530,36 @@ static bool load_zone(Server *s, Arena *scratch)
 // After a step: what left goes into the outbox, applied arrivals become
 // remembered; if either happened the zone saves before telling anyone, so a
 // crash can't lose units or bring them twice. Then the coordinator hears.
-static void report_to_coord(Server *s, const Command *cmds, ptrdiff_t n, double now)
+static bool same_leg(const Departure *a, const Departure *b)
+{
+	return a->dest == b->dest && a->route == b->route && a->unpaired == b->unpaired && a->landing.x == b->landing.x
+	    && a->landing.z == b->landing.z;
+}
+
+static void report_to_coord(Server *s, double now)
 {
 	if (!s->coord_port) return;
 	int first_new = s->outgoing_count;
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		const Faction *fa = &s->sim.factions[f];
-		// One departure per destination, and one per seed.
+		// One departure per destination and leg (units of every type together).
 		for (ptrdiff_t k = 0; k < fa->departure_count; k++) {
 			const Departure *d = &fa->departures[k];
-			bool seed = d->type == UNIT_GATE, first = true;
-			for (ptrdiff_t j = 0; j < k && first; j++)
-				first = fa->departures[j].dest != d->dest || (fa->departures[j].type == UNIT_GATE) != seed;
+			bool first = true;
+			for (ptrdiff_t j = 0; j < k && first; j++) first = !same_leg(&fa->departures[j], d);
 			if (!first) continue;
-			const char *dst = d->dest == ZONE_POOL ? "pool" : d->dest < s->zone_count ? s->zones[d->dest] : nullptr;
+			const char *dst = d->dest < s->zone_count ? s->zones[d->dest] : nullptr;
 			if (!dst) {
-				fprintf(stderr, "server %s: units left for zone %d, which isn't in --zones\n", s->zone_name, d->dest);
+				fprintf(stderr, "server %s: units left for zone %d, which isn't in the world\n", s->zone_name, d->dest);
 				continue;
 			}
 			if (s->outgoing_count == (int)countof(s->outgoing)) fatal("server %s: departure outbox full", s->zone_name);
 			Outgoing *o = &s->outgoing[s->outgoing_count++];
-			*o = (Outgoing){.seq = ++s->depart_seq, .faction = (uint8_t)f, .seed = seed};
-			snprintf(o->dst, sizeof o->dst, "%s", dst);
+			*o = (Outgoing){.seq = ++s->depart_seq, .faction = (uint8_t)f,
+			                .leg = {.unpaired = d->unpaired, .route = d->route, .landing = d->landing}};
+			memcpy(o->dst, dst, strlen(dst) + 1); // zone names fit: world_parse saw to that
 			for (ptrdiff_t j = k; j < fa->departure_count; j++)
-				if (fa->departures[j].dest == d->dest && (fa->departures[j].type == UNIT_GATE) == seed)
-					o->counts[fa->departures[j].type] += fa->departures[j].count;
+				if (same_leg(&fa->departures[j], d)) o->counts[fa->departures[j].type] += fa->departures[j].count;
 		}
 	}
 	int confirmed = s->confirm_count;
@@ -529,30 +569,120 @@ static void report_to_coord(Server *s, const Command *cmds, ptrdiff_t n, double 
 
 	for (int k = first_new; k < s->outgoing_count; k++) send_departure(s, &s->outgoing[k], now);
 	for (int k = 0; k < confirmed; k++) send_id(s, COORD_DELIVERED, s->applied[s->applied_count - confirmed + k], now);
-	for (ptrdiff_t k = 0; k < n; k++) {
-		if (cmds[k].kind != COMMAND_DRAW || cmds[k].unit_type >= UNIT_TYPE_COUNT || !s->coord.open) continue;
-		int32_t counts[UNIT_TYPE_COUNT] = {0};
-		counts[cmds[k].unit_type] = cmds[k].amount;
-		ArenaMark m = arena_mark(&s->encode);
-		ByteBuf b = bytebuf_make(&s->encode, 64);
-		put8(&b, (uint8_t)cmds[k].faction.v);
-		put_counts(&b, counts);
-		conn_send(&s->coord, COORD_DRAW, b.data, b.len, now);
-		arena_rewind(m);
+}
+
+// ---------------------------------------------------------------- routing sends
+
+// Does faction f have a finished transporter in zone z? Here, from the sim;
+// elsewhere, as the coordinator last heard.
+static bool has_transporter(const Server *s, int z, uint8_t f)
+{
+	if (z == s->here) {
+		const Units *u = &s->sim.factions[f].units;
+		for (ptrdiff_t i = 0; i < u->count; i++)
+			if (u->type[i] == UNIT_TRANSPORTER && u->progress[i] >= 1.0f) return true;
+		return false;
 	}
+	for (int k = 0; s->have_dir && k < s->dir.zone_count; k++)
+		if (!strcmp(s->dir.zones[k].name, s->world.zones[z].name))
+			return s->dir.zones[k].reported && s->dir.zones[k].status.transporters[f] > 0;
+	return false;
+}
+
+// The shortest way from a to b along links, every zone on the way (not a,
+// not b) one with our transporter. The zones after a go to path; 0 if none.
+static int shortest(const Server *s, int a, int b, uint8_t f, int path[ZONE_MAX])
+{
+	int from[COORD_MAX_ZONES], queue[COORD_MAX_ZONES], head = 0, tail = 0;
+	for (int k = 0; k < s->world.zone_count; k++) from[k] = -1;
+	from[a] = a;
+	queue[tail++] = a;
+	while (head < tail && from[b] < 0) {
+		int z = queue[head++];
+		if (z != a && !has_transporter(s, z, f)) continue; // can't relay through here
+		for (int k = 0; k < s->world.zone_count; k++)
+			if (from[k] < 0 && world_adjacent(&s->world, z, k)) {
+				from[k] = z;
+				queue[tail++] = k;
+			}
+	}
+	if (from[b] < 0) return 0;
+	int n = 0;
+	for (int z = b; z != a; z = from[z]) n++;
+	int k = n;
+	for (int z = b; z != a; z = from[z]) path[--k] = z;
+	return n;
+}
+
+// A send as ordered (amount: the first zone asked for, route: the rest, the
+// last being the destination) becomes the send the sim carries out: the
+// next hop, the hops after it, paired or not. False: it can't be done.
+static bool route_send(Server *s, Command *c)
+{
+	if (!s->world.zone_count) return true; // no world (tests): as given
+	uint8_t f = (uint8_t)c->faction.v;
+	int asked[ROUTE_HOPS + 1], n = 0;
+	if (c->amount < 0 || c->amount >= s->world.zone_count) return false;
+	asked[n++] = c->amount;
+	for (Route r = c->route; route_first(r) >= 0; r = route_rest(r)) {
+		if (n == ROUTE_HOPS + 1 || route_first(r) >= s->world.zone_count) return false;
+		asked[n++] = route_first(r);
+	}
+	int dst = asked[n - 1];
+	if (dst == s->here) return false;
+	int path[ZONE_MAX * (ROUTE_HOPS + 1)], len = 0;
+	bool paired = has_transporter(s, dst, f);
+	if (!paired) {
+		// Without a transporter there: one hop, to a neighbour, and only
+		// raiders and engineers go (the sim sees to that).
+		if (n != 1 || !world_adjacent(&s->world, s->here, dst)) return false;
+		path[len++] = dst;
+	} else {
+		for (int k = 0, at = s->here; k < n; at = asked[k++]) {
+			if (k < n - 1 && !has_transporter(s, asked[k], f)) return false; // a relay needs our transporter
+			int m = shortest(s, at, asked[k], f, path + len);
+			if (m == 0) return false;
+			len += m;
+			if (len > ROUTE_HOPS + 1) return false;
+		}
+	}
+	c->amount = path[0];
+	c->route = 0;
+	for (int k = len - 1; k >= 1; k--) c->route = route_push_front(c->route, path[k]);
+	c->flags = paired ? 0 : COMMAND_UNPAIRED;
+	if (!paired && c->target.x == 0.0f && c->target.z == 0.0f) {
+		// No landing point given: the middle of our strip.
+		const Terrain *t = &s->sim.terrain;
+		c->target = v2(f == 0 ? t->size_x * STRIP * 0.5f : t->size_x * (1.0f - STRIP * 0.5f), t->size_z * 0.5f);
+	}
+	return true;
 }
 
 static void step(Server *s, double now)
 {
 	ptrdiff_t n = s->queued_count;
 	n += script_tick(&s->run, &s->sim, &s->tick, s->queued + n, MAX_COMMANDS - n);
+	// Every send, whoever ordered it, goes the way the world allows, or not at all.
+	ptrdiff_t kept = 0;
+	for (ptrdiff_t k = 0; k < n; k++) {
+		Command c = s->queued[k];
+		if (c.kind == COMMAND_SEND) {
+			if (!route_send(s, &c)) {
+				s->sends_refused++;
+				continue;
+			}
+			s->sends_routed++;
+		}
+		s->queued[kept++] = c;
+	}
+	n = kept;
 	Tick tick = s->sim.tick;
 	double t0 = platform_seconds();
 	sim_step(&s->sim, s->queued, n);
 	double ms = 1e3 * (platform_seconds() - t0);
 	s->step_ms_avg = s->step_ms_avg == 0.0 ? ms : s->step_ms_avg * 0.95 + ms * 0.05;
 	if (s->recording) replay_tick(&s->writer, tick, s->queued, n, sim_hash_now(&s->sim));
-	report_to_coord(s, s->queued, n, now);
+	report_to_coord(s, now);
 
 	// Time dilation: if a step takes more than 80% of the tick budget, slow
 	// the clock so the server stays responsive instead of falling behind.
@@ -652,13 +782,16 @@ int main(int argc, char **argv)
 		} else if (!strcmp(a, "--zone")) s.zone_name = v;
 		else if (!strcmp(a, "--state")) s.state_path = v;
 		else if (!strcmp(a, "--save-every")) s.save_every = arg_f(v, 0.1, 3600, "save-every");
-		else if (!strcmp(a, "--logout")) {
-			if (!strcmp(v, "hold")) s.logout = LOGOUT_HOLD;
-			else if (!strcmp(v, "entrench")) s.logout = LOGOUT_ENTRENCH;
-			else if (!strcmp(v, "bot")) s.logout = LOGOUT_BOT;
-			else fatal("--logout hold|entrench|bot");
-		}
-		else if (!strcmp(a, "--zones")) {
+		else if (!strcmp(a, "--world")) {
+			Str text;
+			char err[256];
+			static Arena world_text;
+			world_text = arena_create("world file", 1 << 20);
+			if (!platform_read_file(&world_text, v, &text)) fatal("cannot read %s", v);
+			if (!world_parse(&s.world, text, v, err, sizeof err)) fatal("%s", err);
+			for (int k = 0; k < s.world.zone_count; k++) snprintf(s.zones[k], ZONE_NAME, "%s", s.world.zones[k].name);
+			s.zone_count = s.world.zone_count;
+		} else if (!strcmp(a, "--zones")) {
 			for (const char *z = v; *z && s.zone_count < COORD_MAX_ZONES;) {
 				const char *comma = strchr(z, ',');
 				size_t len = comma ? (size_t)(comma - z) : strlen(z);
@@ -685,7 +818,17 @@ int main(int argc, char **argv)
 	s.tick = arena_create("tick", (ptrdiff_t)64 << 20);
 	s.encode = arena_create("encode", (ptrdiff_t)64 << 20);
 	s.replay = arena_create("replay", (ptrdiff_t)4 << 30);
+	if (s.world.zone_count) {
+		if (!s.zone_name || (s.here = world_zone(&s.world, s.zone_name)) < 0) fatal("--world needs --zone, one of its zones");
+	}
 	load_driver(&s, scenario, script);
+	if (s.world.zone_count) {
+		// Fixtures set up; after that, only what a player could do.
+		for (ptrdiff_t k = 0; k < s.script.action_count; k++)
+			if (s.script.actions[k].kind == ACTION_SPAWN && s.script.actions[k].tick > 0)
+				fatal("%s:%d: in a world, a script spawns only at tick 0 (it sets up; it doesn't play)",
+				      s.script.path ? s.script.path : "script", s.script.actions[k].line);
+	}
 	sim_init(&s.sim, s.script.config);
 	bool resumed = load_zone(&s, &s.encode);
 	arena_reset(&s.encode);
@@ -693,8 +836,10 @@ int main(int argc, char **argv)
 		printf("server %s: resumed %s at tick %lld (%d departures to confirm)\n", s.zone_name ? s.zone_name : "zone",
 		       s.state_path, (long long)s.sim.tick.v, s.outgoing_count);
 	script_run_init(&s.run, &s.script, &s.program, stdout);
-	for (int f = 0; f < FACTION_COUNT; f++)
+	for (int f = 0; f < FACTION_COUNT; f++) {
 		if (bot_override[f] >= 0) s.run.bots[f].enabled = bot_override[f];
+		s.bot_allowed[f] = s.run.bots[f].enabled;
+	}
 	mirror_init(&s.mirror, &s.program, s.sim.config.max_units, s.sim.config.max_projectiles);
 	{
 		// Bring the mirror to tick 0 so the first snapshot has the starting armies.
@@ -786,21 +931,23 @@ int main(int argc, char **argv)
 		        s.save_ms, (long long)s.sim.tick.v);
 		int64_t outbox = 0;
 		for (int k = 0; k < s.outgoing_count; k++)
-			for (int t = 0; t < UNIT_TYPE_COUNT; t++) outbox += s.outgoing[k].seed ? 0 : s.outgoing[k].counts[t];
+			for (int t = 0; t < UNIT_TYPE_COUNT; t++) outbox += s.outgoing[k].counts[t];
 		fprintf(f, "outbox_units %lld\n", (long long)outbox);
 		// Each unacknowledged departure: it may already be in the coordinator's
 		// log (the ack was lost), so a checker needs the sequence numbers.
 		for (int k = 0; k < s.outgoing_count; k++) {
 			int64_t n = 0;
-			for (int t = 0; t < UNIT_TYPE_COUNT; t++) n += s.outgoing[k].seed ? 0 : s.outgoing[k].counts[t];
+			for (int t = 0; t < UNIT_TYPE_COUNT; t++) n += s.outgoing[k].counts[t];
 			fprintf(f, "outbox %llu %lld\n", (unsigned long long)s.outgoing[k].seq, (long long)n);
 		}
 		for (int k = 0; k < FACTION_COUNT; k++) {
 			const Units *u = &s.sim.factions[k].units;
-			int gates = 0;
-			for (ptrdiff_t i = 0; i < u->count; i++) gates += u->type[i] == UNIT_GATE && u->progress[i] >= 1.0f;
-			fprintf(f, "gates_%s %d\n", k ? "red" : "blue", gates);
+			int transporters = 0;
+			for (ptrdiff_t i = 0; i < u->count; i++) transporters += u->type[i] == UNIT_TRANSPORTER && u->progress[i] >= 1.0f;
+			fprintf(f, "transporters_%s %d\n", k ? "red" : "blue", transporters);
 		}
+		fprintf(f, "sends_routed %lld\nsends_refused %lld\narrivals_held %lld\n", (long long)s.sends_routed,
+		        (long long)s.sends_refused, (long long)s.arrivals_held);
 		fclose(f);
 	}
 	return 0;

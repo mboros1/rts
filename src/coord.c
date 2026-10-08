@@ -36,6 +36,25 @@ bool get_counts(ByteReader *r, int32_t counts[UNIT_TYPE_COUNT])
 	return !r->bad;
 }
 
+void put_leg(ByteBuf *b, const Leg *l)
+{
+	put8(b, l->unpaired);
+	put32(b, l->route);
+	putf(b, l->landing.x);
+	putf(b, l->landing.z);
+}
+
+bool get_leg(ByteReader *r, Leg *l)
+{
+	uint8_t unpaired = get8(r);
+	l->route = get32(r);
+	l->landing = v2(getf(r), getf(r));
+	l->unpaired = unpaired;
+	// Comparisons are false for NaN, so this refuses those too.
+	bool sane = l->landing.x >= -1e5f && l->landing.x <= 1e5f && l->landing.z >= -1e5f && l->landing.z <= 1e5f;
+	return !r->bad && unpaired <= 1 && route_ok(l->route) && !(unpaired && l->route) && sane;
+}
+
 // ---------------------------------------------------------------- the log
 
 static void log_line(Ledger *l, const char *line)
@@ -81,21 +100,16 @@ static uint64_t *seq_of(Ledger *l, const char *zone)
 	return &l->seq_max[l->seq_zones++];
 }
 
-static Transfer *add_transfer(Ledger *l, uint64_t id, const char *src, const char *dst, uint8_t faction, bool seed,
+static Transfer *add_transfer(Ledger *l, uint64_t id, const char *src, const char *dst, uint8_t faction, const Leg *leg,
                               const int32_t counts[UNIT_TYPE_COUNT])
 {
 	if (l->transfer_count == COORD_MAX_TRANSFERS) fatal("coordinator: too many transfers");
 	Transfer *t = &l->transfers[l->transfer_count++];
-	*t = (Transfer){.id = id, .faction = faction, .seed = seed};
+	*t = (Transfer){.id = id, .faction = faction, .leg = *leg};
 	snprintf(t->src, sizeof t->src, "%s", src);
 	snprintf(t->dst, sizeof t->dst, "%s", dst);
 	memcpy(t->counts, counts, sizeof t->counts);
 	if (id >= l->next_id) l->next_id = id + 1;
-	// Into the pool: arrived the moment it's recorded.
-	if (!strcmp(dst, "pool")) {
-		for (int k = 0; k < UNIT_TYPE_COUNT; k++) l->pool[faction][k] += counts[k];
-		t->delivered = true;
-	}
 	return t;
 }
 
@@ -135,27 +149,22 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 		if (!strcmp(verb, "transfer")) {
 			char *src = strtok_r(nullptr, " ", &save), *dst = strtok_r(nullptr, " ", &save);
 			char *fac = strtok_r(nullptr, " ", &save), *kind = strtok_r(nullptr, " ", &save);
-			char *seq_s = strtok_r(nullptr, " ", &save);
-			if (!src || !dst || !fac || !kind || !seq_s || !parse_counts(&save, counts)) return false;
+			char *seq_s = strtok_r(nullptr, " ", &save), *route_s = strtok_r(nullptr, " ", &save);
+			char *at_s = strtok_r(nullptr, " ", &save);
+			if (!src || !dst || !fac || !kind || !seq_s || !route_s || !at_s || !parse_counts(&save, counts)) return false;
 			long faction = strtol(fac, nullptr, 10);
 			if (faction < 0 || faction >= FACTION_COUNT) return false;
+			Leg leg = {.unpaired = !strcmp(kind, "unpaired"), .route = (Route)strtoul(route_s, nullptr, 16)};
+			if (!leg.unpaired && strcmp(kind, "paired")) return false;
+			if (sscanf(at_s, "%f,%f", &leg.landing.x, &leg.landing.z) != 2) return false;
+			if (!route_ok(leg.route) || (leg.unpaired && leg.route)) return false;
 			uint64_t seq = strtoull(seq_s, nullptr, 10), *max = seq_of(l, src);
 			if (seq > *max) *max = seq;
-			add_transfer(l, id, src, dst, (uint8_t)faction, !strcmp(kind, "seed"), counts);
+			add_transfer(l, id, src, dst, (uint8_t)faction, &leg, counts);
 		} else if (!strcmp(verb, "delivered")) {
 			Transfer *t = ledger_find(l, id);
 			if (!t) return false;
 			t->delivered = true;
-		} else if (!strcmp(verb, "draw")) {
-			char *fac = strtok_r(nullptr, " ", &save), *zone = strtok_r(nullptr, " ", &save);
-			if (!fac || !zone || !parse_counts(&save, counts)) return false;
-			long faction = strtol(fac, nullptr, 10);
-			if (faction < 0 || faction >= FACTION_COUNT) return false;
-			for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
-				if (counts[k] > l->pool[faction][k]) return false; // the log can't overdraw
-				l->pool[faction][k] -= counts[k];
-			}
-			add_transfer(l, id, "pool", zone, (uint8_t)faction, false, counts);
 		} else {
 			return false;
 		}
@@ -163,7 +172,7 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 	return true;
 }
 
-Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *dst, uint8_t faction, bool seed,
+Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *dst, uint8_t faction, const Leg *leg,
                         const int32_t counts[UNIT_TYPE_COUNT])
 {
 	uint64_t *max = seq_of(l, src);
@@ -171,27 +180,11 @@ Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *ds
 	*max = seq;
 	char line[512], list[384];
 	format_counts(list, sizeof list, counts);
-	snprintf(line, sizeof line, "transfer %llu %s %s %u %s %llu%s", (unsigned long long)l->next_id, src, dst, faction,
-	         seed ? "seed" : "units", (unsigned long long)seq, list);
+	snprintf(line, sizeof line, "transfer %llu %s %s %u %s %llu %x %.9g,%.9g%s", (unsigned long long)l->next_id, src, dst,
+	         faction, leg->unpaired ? "unpaired" : "paired", (unsigned long long)seq, leg->route, (double)leg->landing.x,
+	         (double)leg->landing.z, list);
 	log_line(l, line);
-	return add_transfer(l, l->next_id, src, dst, faction, seed, counts);
-}
-
-Transfer *ledger_draw(Ledger *l, uint8_t faction, const char *zone, const int32_t want[UNIT_TYPE_COUNT])
-{
-	int32_t take_n[UNIT_TYPE_COUNT];
-	int32_t total = 0;
-	for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
-		take_n[k] = want[k] < l->pool[faction][k] ? want[k] : l->pool[faction][k];
-		total += take_n[k];
-	}
-	if (total == 0) return nullptr;
-	char line[512], list[384];
-	format_counts(list, sizeof list, take_n);
-	snprintf(line, sizeof line, "draw %llu %u %s%s", (unsigned long long)l->next_id, faction, zone, list);
-	log_line(l, line);
-	for (int k = 0; k < UNIT_TYPE_COUNT; k++) l->pool[faction][k] -= take_n[k];
-	return add_transfer(l, l->next_id, "pool", zone, faction, false, take_n);
+	return add_transfer(l, l->next_id, src, dst, faction, leg, counts);
 }
 
 void ledger_delivered(Ledger *l, uint64_t id)

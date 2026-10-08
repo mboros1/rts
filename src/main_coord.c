@@ -1,5 +1,5 @@
 // rts-coord: the coordinator (coord.h). Zones register here, report units
-// leaving through their gates, and receive units arriving; players ask it
+// leaving through their transporters, and receive units arriving; players ask it
 // which zones exist. Its log is its memory: kill it, restart it, and it
 // picks up every transfer still owed.
 //
@@ -77,7 +77,7 @@ static void deliver(Coord *c, double now)
 		ByteBuf b = bytebuf_make(&c->out, 256);
 		put64(&b, t->id);
 		put8(&b, t->faction);
-		put8(&b, t->seed);
+		put_leg(&b, &t->leg);
 		put_counts(&b, t->counts);
 		send_to(c, &c->peers[z->peer], COORD_DELIVER, &b, now);
 		t->retry_at = now + c->retry;
@@ -162,24 +162,18 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 		uint64_t seq = get64(&r);
 		uint8_t faction = get8(&r);
 		bool ok = get_name(&r, name);
-		uint8_t seed = get8(&r);
-		if (!from || !ok || faction >= FACTION_COUNT || !get_counts(&r, counts)) break;
-		Transfer *t = ledger_depart(&c->ledger, from->name, seq, name, faction, seed, counts);
-		if (t) printf("coord: transfer %llu %s -> %s (faction %u%s)\n", (unsigned long long)t->id, from->name, name,
-		              faction, seed ? ", a gate seed" : "");
+		Leg leg;
+		if (!from || !ok || faction >= FACTION_COUNT || !get_leg(&r, &leg) || !get_counts(&r, counts)) break;
+		if (!zone_named(c, name)) printf("coord: %s sent units to %s, which isn't a zone here\n", from->name, name);
+		Transfer *t = ledger_depart(&c->ledger, from->name, seq, name, faction, &leg, counts);
+		if (t) printf("coord: transfer %llu %s -> %s (faction %u, %s)\n", (unsigned long long)t->id, from->name, name,
+		              faction, leg.unpaired ? "unpaired" : "paired");
 		else printf("coord: %s re-sent departure %llu, already logged\n", from->name, (unsigned long long)seq);
 		// Logged now, or before: either way the zone can forget it.
 		arena_reset(&c->out);
 		ByteBuf b = bytebuf_make(&c->out, 16);
 		put64(&b, seq);
 		send_to(c, p, COORD_DEPART_ACK, &b, now);
-		break;
-	}
-	case COORD_DRAW: {
-		uint8_t faction = get8(&r);
-		if (!from || faction >= FACTION_COUNT || !get_counts(&r, counts)) break;
-		Transfer *t = ledger_draw(&c->ledger, faction, from->name, counts);
-		if (t) printf("coord: draw %llu from faction %u's pool to %s\n", (unsigned long long)t->id, faction, from->name);
 		break;
 	}
 	case COORD_DELIVERED: {
@@ -190,7 +184,7 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 	}
 	case COORD_HOLD: {
 		Transfer *t = ledger_find(&c->ledger, get64(&r));
-		if (t) t->retry_at = now + c->retry; // no gate there yet: ask again later
+		if (t) t->retry_at = now + c->retry; // it can't take them yet: ask again later
 		break;
 	}
 	case COORD_ZONE_STATUS: {

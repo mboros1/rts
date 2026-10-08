@@ -96,7 +96,7 @@ void put_zone_status(ByteBuf *b, const ZoneStatus *s)
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		put16(b, s->units[f]);
 		put16(b, s->structures[f]);
-		put8(b, s->gates[f]);
+		put8(b, s->transporters[f]);
 	}
 }
 
@@ -106,7 +106,7 @@ bool get_zone_status(ByteReader *r, ZoneStatus *s)
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		s->units[f] = get16(r);
 		s->structures[f] = get16(r);
-		s->gates[f] = get8(r);
+		s->transporters[f] = get8(r);
 	}
 	return !r->bad && s->tick >= 0;
 }
@@ -193,8 +193,8 @@ void directory_print(const Directory *d, FILE *out)
 			int64_t secs = z->status.tick / (int64_t)SIM_HZ;
 			fprintf(out, " %lld:%02lld:%02lld ", (long long)(secs / 3600), (long long)(secs / 60 % 60), (long long)(secs % 60));
 			for (int f = 0; f < FACTION_COUNT; f++)
-				fprintf(out, "%s %s %d units %d bldg %d gates", f ? " |" : "", f ? "red" : "blue", z->status.units[f],
-				        z->status.structures[f], z->status.gates[f]);
+				fprintf(out, "%s %s %d units %d bldg %d transporters", f ? " |" : "", f ? "red" : "blue", z->status.units[f],
+				        z->status.structures[f], z->status.transporters[f]);
 		}
 		fprintf(out, "\n");
 	}

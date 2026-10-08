@@ -93,13 +93,9 @@ static bool parse_on(const char *t, bool *out)
 	return true;
 }
 
-// A zone by name, as numbered by the script's `zones` line, or the pool.
+// A zone by name, as numbered by the script's `zones` line.
 static bool parse_zone(Parser *p, const char *name, int32_t *out)
 {
-	if (!strcmp(name, "pool")) {
-		*out = ZONE_POOL;
-		return true;
-	}
 	for (int32_t k = 0; k < p->s->zone_count; k++)
 		if (!strcmp(p->s->zones[k], name)) {
 			*out = k;
@@ -194,18 +190,35 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		}
 		return true;
 	}
-	if (!strcmp(verb, "gate") || !strcmp(verb, "seed")) {
-		// gate GROUP to ZONE via X,Z | seed GROUP to ZONE
-		bool gate = !strcmp(verb, "gate");
-		if (n != (gate ? 6 : 4) || strcmp(tok[2], "to") || (gate && strcmp(tok[4], "via")))
-			return bad(p, gate ? "gate GROUP to ZONE via X,Z" : "seed GROUP to ZONE", nullptr);
+	if (!strcmp(verb, "send")) {
+		// send GROUP to ZONE [via Z1,Z2,...] [at X,Z] [unpaired]
+		static const char *usage = "send GROUP to ZONE [via ZONE,ZONE...] [at X,Z] [unpaired]";
+		if (n < 4 || strcmp(tok[2], "to")) return bad(p, usage, nullptr);
 		if (!(a = new_action(p, tick, ACTION_ORDER, text))) return bad(p, "too many actions", nullptr);
 		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
-		if (!parse_zone(p, tok[3], &a->limit)) return bad(p, "unknown zone (list them with: zones A B ...)", tok[3]);
-		if (!gate && a->limit == ZONE_POOL) return bad(p, "a seed needs a zone, not the pool", nullptr);
-		if (gate && !parse_point(tok[5], &a->at)) return bad(p, "via X,Z", tok[5]);
-		a->command = gate ? COMMAND_GATE : COMMAND_SEED;
-		a->type = UNIT_GATE;
+		// The path: the via zones, then the destination. The first hop is
+		// the command's amount, the rest its route.
+		int32_t path[ROUTE_HOPS + 1], hops = 0;
+		for (int i = 4; i < n; i++) {
+			if (!strcmp(tok[i], "via") && i + 1 < n) {
+				char list[MAX_LINE], *save;
+				snprintf(list, sizeof list, "%s", tok[++i]);
+				for (char *z = strtok_r(list, ",", &save); z; z = strtok_r(nullptr, ",", &save)) {
+					if (hops == ROUTE_HOPS) return bad(p, "too many hops", tok[i]);
+					if (!parse_zone(p, z, &path[hops++])) return bad(p, "unknown zone (list them with: zones A B ...)", z);
+				}
+			} else if (!strcmp(tok[i], "at") && i + 1 < n) {
+				if (!parse_point(tok[++i], &a->at)) return bad(p, "at X,Z", tok[i]);
+			} else if (!strcmp(tok[i], "unpaired")) {
+				a->flags = COMMAND_UNPAIRED;
+			} else {
+				return bad(p, usage, tok[i]);
+			}
+		}
+		if (!parse_zone(p, tok[3], &path[hops++])) return bad(p, "unknown zone (list them with: zones A B ...)", tok[3]);
+		a->limit = path[0];
+		for (int32_t k = hops - 1; k >= 1; k--) a->route = route_push_front(a->route, path[k]);
+		a->command = COMMAND_SEND;
 		return true;
 	}
 	if (!strcmp(verb, "arrive")) {
@@ -260,7 +273,7 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		                               "metal", "energy", "metal_income", "energy_income",
 		                               "", "departed", "arrived"};
 		static const char *counts[UNIT_TYPE_COUNT] = {"raiders", "tanks", "artillery", "engineers",
-		                                              "extractors", "generators", "factories", "gates",
+		                                              "extractors", "generators", "factories", "transporters",
 		                                              "turrets"};
 		static const char *ops[] = {"<", "<=", ">", ">=", "==", "!="};
 		int f = -1, o = -1;
@@ -364,6 +377,15 @@ static bool parse_line(Parser *p, char *line)
 		bool on;
 		if (n != 2 || !parse_on(tok[1], &on)) return bad(p, "economy on|off", nullptr);
 		s->config.economy = on;
+		return true;
+	}
+	if (!strcmp(key, "bases")) {
+		// Who starts with a base: in a world, only a side's home zone has one.
+		static const char *names[] = {"none", "blue", "red", "both"};
+		int k = 0;
+		while (k < 4 && (n != 2 || strcmp(tok[1], names[k]))) k++;
+		if (k == 4) return bad(p, "bases none|blue|red|both", nullptr);
+		s->config.bases = (uint8_t)k;
 		return true;
 	}
 	if (!strcmp(key, "respawn")) {
@@ -628,22 +650,13 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			break;
 		case ACTION_ORDER:
 			if (n == cap || r->group_len[a->group] == 0) break;
-			if (a->command == COMMAND_SEED) {
-				// The seed fires from the gate the group's first live unit is.
-				const Units *u = &sim->factions[r->group_side[a->group].v].units;
-				ptrdiff_t d = -1;
-				for (ptrdiff_t i = 0; i < r->group_len[a->group] && d < 0; i++) d = units_find(u, r->group_units[a->group][i]);
-				if (d < 0) break;
-				out[n++] = (Command){.faction = r->group_side[a->group], .kind = COMMAND_SEED,
-				                     .target = v2(u->px[d], u->pz[d]), .amount = a->limit};
-				break;
-			}
 			out[n++] = (Command){
 				.faction = r->group_side[a->group],
 				.kind = a->command,
 				.unit_type = a->type >= 0 ? (UnitType)a->type : UNIT_RAIDER,
 				.amount = a->limit,
 				.flags = a->flags,
+				.route = a->route,
 				.target = a->at,
 				.count = r->group_len[a->group],
 				.units = arena_copy(tick_arena, r->group_units[a->group],
@@ -659,7 +672,7 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			}
 			if (a->flags == 0xff) {
 				out[n++] = (Command){.faction = a->side, .kind = COMMAND_ARRIVE, .unit_type = (UnitType)a->type,
-				                     .amount = a->limit};
+				                     .amount = a->limit, .target = sim->factions[a->side.v].base};
 				break;
 			}
 			out[n++] = (Command){.faction = a->side, .kind = COMMAND_SPAWN, .target = a->at,

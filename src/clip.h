@@ -42,10 +42,13 @@ bool camera_track_read(const char *path, Arena *arena, CameraTrack *out);
 
 // Follows the action: in-flight shells if there are enough, otherwise the
 // ground between the armies. Smoothed so it drifts rather than jumps.
+// With a side (a player's view), it frames that side's own units instead:
+// a player sees little of the other.
 typedef struct {
 	V2 focus;
 	float distance;
 	bool primed;
+	int side;               // -1: both
 } Director;
 
 void director_update(Director *d, const Scene *scene);

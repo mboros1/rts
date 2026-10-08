@@ -26,17 +26,17 @@
 //
 // Frames (net.h) carry: u32 length, u8 kind, payload. Payloads, little-endian:
 //   HELLO     u32 version, u8 faction (0, 1, or SPECTATOR)
-//   WELCOME   u32 version, u8 faction, config: u64 seed, 5 x i32, 3 x i32 weights, u8 economy,
+//   WELCOME   u32 version, u8 faction, config: u64 seed, 5 x i32, 3 x i32 weights, u8 economy, u8 bases,
 //             per faction: f32 base x, f32 base z
 //   SNAPSHOT  body; replaces the client's mirror
 //   DELTA     body for exactly the next tick
 //   COMMAND   u8 kind, f32 x, f32 z, u8 unit type, i32 amount, u8 flags,
-//             u32 n, n x (u32 slot, u32 generation)
+//             u32 route, u32 n, n x (u32 slot, u32 generation)
 //   FACTION_SNAPSHOT  i64 tick, faction_write
 //   FACTION_TICK      i64 tick, u16 dilation, u8 has hash, [u64 hash],
 //             u64 spots owned,
 //             u32 n, n x command: u8 kind, f32 x, f32 z, u8 unit type,
-//                                 i32 amount, f32 radius, u8 flags, u32 m, m x handle
+//                                 i32 amount, f32 radius, u8 flags, u32 route, u32 m, m x handle
 //             u32 n, n x seen: u8 tag, u16 slot, then ENTER: u32 gen, u8 type,
 //                              u16 x, u16 z, i16 vx, i16 vz; MOVE: the last 4
 //             u32 n, n x arrival: f32 x, y, z, vx, vy, vz, u8 weapon
@@ -59,7 +59,7 @@
 #include "quant.h"
 #include "sim.h"
 
-enum { WIRE_VERSION = 2, DIGEST_EVERY = 30 };
+enum { WIRE_VERSION = 3, DIGEST_EVERY = 30 };
 static constexpr uint8_t SPECTATOR = 255;
 
 typedef enum : uint8_t {

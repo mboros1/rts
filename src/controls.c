@@ -6,7 +6,7 @@
 
 void controls_init(Controls *c, FactionId me, Arena *a, ptrdiff_t max_units)
 {
-	*c = (Controls){.me = me, .selection = PUSH(a, UnitHandle, max_units), .placing = -1};
+	*c = (Controls){.me = me, .selection = PUSH(a, UnitHandle, max_units), .placing = -1, .landing_for = -1};
 }
 
 void controls_clear(Controls *c)
@@ -14,6 +14,8 @@ void controls_clear(Controls *c)
 	c->selection_count = 0;
 	c->dragging = false;
 	c->placing = -1;
+	c->sending = false;
+	c->landing_for = -1;
 }
 
 static const Units *own_units(const Controls *c, const Sim *sim) { return &sim->factions[c->me.v].units; }
@@ -87,18 +89,55 @@ static void order(Controls *c, Arena *frame, Order *out, ptrdiff_t cap, ptrdiff_
 	out[(*n)++] = o;
 }
 
+// T, then a number: the zone. Paired goes at once; unpaired waits for a
+// landing point. The server decides the route.
+static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *frame, Order *out, ptrdiff_t cap,
+                       ptrdiff_t *n)
+{
+	const SendTargets *z = &c->targets;
+	if (z->count == 0) return false;
+	if (IsKeyPressed(KEY_T) && c->selection_count) {
+		c->sending = true;
+		c->landing_for = -1;
+		return true;
+	}
+	if (c->sending) {
+		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->sending = false;
+		for (int k = 0; k < z->count && k < 9; k++) {
+			if (!IsKeyPressed(KEY_ONE + k) || k == z->here) continue;
+			c->sending = false;
+			if (z->transporter[k]) order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = k});
+			else if (z->neighbour[k]) c->landing_for = k;
+		}
+		return true;
+	}
+	if (c->landing_for >= 0) {
+		V2 at;
+		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->landing_for = -1;
+		else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && pick_ground(view, &sim->terrain, GetMousePosition(), &at)) {
+			at = sim_strip_point(&sim->terrain, c->me, at);
+			order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = c->landing_for, .target = at});
+			c->landing_for = -1;
+		}
+		return true;
+	}
+	return false;
+}
+
 ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *frame, Order *out, ptrdiff_t cap)
 {
 	ptrdiff_t n = 0;
 	Vector2 mouse = GetMousePosition();
 	bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 	if (IsKeyPressed(KEY_X)) order(c, frame, out, cap, &n, (Order){.kind = COMMAND_STOP});
+	if (send_input(c, sim, view, frame, out, cap, &n)) return n;
 
 	if (sim->config.economy) {
 		if (selection_has(c, sim, UNIT_ENGINEER)) {
 			if (IsKeyPressed(KEY_E)) c->placing = UNIT_EXTRACTOR;
 			if (IsKeyPressed(KEY_G)) c->placing = UNIT_GENERATOR;
 			if (IsKeyPressed(KEY_F)) c->placing = UNIT_FACTORY;
+			if (IsKeyPressed(KEY_R)) c->placing = UNIT_TRANSPORTER;
 		}
 		if (selection_has(c, sim, UNIT_FACTORY)) {
 			const UnitType keys[] = {UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_ENGINEER};
@@ -146,6 +185,20 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 
 void controls_draw_world(const Controls *c, const Sim *sim, const View *view)
 {
+	if (c->landing_for >= 0) {
+		// Where an unpaired send may land: our strip, its edge traced on the ground.
+		const Terrain *t = &sim->terrain;
+		float edge = c->me.v == 0 ? t->size_x * STRIP : t->size_x * (1.0f - STRIP);
+		Color line = {120, 255, 140, 220};
+		for (float z = 0.0f; z + 4.0f <= t->size_z; z += 4.0f)
+			DrawLine3D((Vector3){edge, terrain_height(t, edge, z) + 0.5f, z},
+			           (Vector3){edge, terrain_height(t, edge, z + 4.0f) + 0.5f, z + 4.0f}, line);
+		V2 at;
+		if (pick_ground(view, t, GetMousePosition(), &at)) {
+			at = sim_strip_point(t, c->me, at);
+			DrawCircle3D((Vector3){at.x, terrain_height(t, at.x, at.z) + 0.6f, at.z}, 8.0f, (Vector3){1, 0, 0}, 90.0f, line);
+		}
+	}
 	V2 ghost;
 	if (c->placing < 0 || !pick_ground(view, &sim->terrain, GetMousePosition(), &ghost)) return;
 	UnitType type = (UnitType)c->placing;
@@ -187,9 +240,23 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 		if (counts[t] && used < (int)sizeof sel)
 			used += snprintf(sel + used, sizeof sel - (size_t)used, "%s%d %s", used ? ", " : "", counts[t], unit_defs[t].name);
 	if (c->placing >= 0) snprintf(sel, sizeof sel, "placing a %s: click to build, esc to cancel", unit_defs[c->placing].name);
+	const SendTargets *z = &c->targets;
+	if (c->sending) {
+		// The zones, by number, and how a send there would go.
+		used = snprintf(sel, sizeof sel, "send to:");
+		for (int k = 0; k < z->count && k < 9 && used < (int)sizeof sel; k++)
+			used += snprintf(sel + used, sizeof sel - (size_t)used, "   %d %s%s", k + 1, z->name[k],
+			                 k == z->here          ? " (here)"
+			                 : z->transporter[k]   ? ""
+			                 : z->neighbour[k]     ? " (no transporter: raiders, engineers)"
+			                                       : " (no way)");
+	}
+	if (c->landing_for >= 0)
+		snprintf(sel, sizeof sel, "landing in %s: click where, in your strip (esc cancels)", z->name[c->landing_for]);
 	DrawText(sel, 14, y + 26, 18, RAYWHITE);
 	DrawText(sim->config.economy
-	             ? "drag select | right attack-move | ctrl+right move | X stop | engineers: E G F | factories: 1-4, shift repeat, 0 clear"
+	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | engineers: E G F R | factories: 1-4, 0 clear | T send"
+	                                 : "drag select | right attack-move | ctrl+right move | X stop | engineers: E G F R | factories: 1-4, shift repeat, 0 clear")
 	             : "drag select | right attack-move | ctrl+right move | X stop",
 	         14, y + 50, 14, GRAY);
 }

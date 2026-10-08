@@ -1,70 +1,113 @@
 #!/bin/sh
-# tools/zone-smoke BIN_DIR OUT_DIR: three zones and a coordinator, as real
-# processes. Checks that:
-#   - units leaving alpha for beta while beta is down wait at the
-#     coordinator, through a coordinator restart (from its log), and arrive
-#     once beta is up;
-#   - a gate seed fired from alpha opens gamma, where blue had nothing;
+# tools/zone-smoke BIN_DIR OUT_DIR: a world of three zones on a line, alpha -
+# beta - gamma, and a coordinator, as real processes. Checks that:
+#   - an unpaired send (engineers and raiders) from alpha to beta, which is
+#     down, waits at the coordinator through a coordinator restart (from its
+#     log), and lands in blue's strip once beta is up;
+#   - a send from alpha to gamma is refused while beta has no transporter of
+#     ours to relay through;
+#   - the crew builds one in beta, and tanks go alpha -> beta -> gamma, beta
+#     relaying them;
+#   - gamma holds them while its landing area is full, and takes them once
+#     it's clear;
 #   - a player switches zones and keeps simulating its faction correctly.
 set -eu
 bin=$1; out=$2
 mkdir -p "$out"; rm -f "$out"/*.log "$out"/*.txt "$out"/*.out 2>/dev/null || true
 base=$((25000 + ($$ % 2500) * 4)); coord=$base; alpha=$((base + 1)); beta=$((base + 2)); gamma=$((base + 3))
-zones="--zones alpha,beta,gamma --coord 127.0.0.1:$coord"
+cat > "$out/line.world" <<WORLD
+port $coord
+zone alpha 0.2 0.5 home blue
+zone beta  0.5 0.5
+zone gamma 0.8 0.5 home red
+link alpha beta
+link beta gamma
+WORLD
+zones="--world $out/line.world --coord 127.0.0.1:$coord"
+speed=15
 
-# Alpha: blue has a gate, ten tanks to send to beta, and the power for a seed.
+# Alpha: a transporter, power, tanks, and a crew to open beta.
 cat > "$out/alpha.script" <<SCRIPT
 scenario economy
+bases none
 bot blue off
 bot red off
 zones alpha beta gamma
-at 0 spawn blue gate 1 at 100,256 radius 0
+at 0 spawn blue transporter 1 at 100,256 radius 0
+at 0 spawn blue generator 40 at 40,150 radius 30
 at 0 spawn blue tank 10 at 140,256 radius 5
-at 0 spawn blue generator 30 at 40,150 radius 30
+at 0 spawn blue engineer 4 at 140,300 radius 3
+at 0 spawn blue raider 2 at 140,300 radius 3
+at 1 select blue any within 12 of 140,300 as crew
 at 1 select blue tank as army
-at 1 select blue gate as gates
-at 2 gate army to beta via 100,256
-at 620 seed gates to gamma
+at 30 send crew to beta at 60,300
+at 100 send army to gamma
+at 2800 send army to gamma
 SCRIPT
-# Beta: blue has a gate for them to come through. Gamma: blue has nothing.
-printf 'scenario economy\nbot blue off\nbot red off\nat 0 spawn blue gate 1 at 100,256 radius 0\n' > "$out/beta.script"
-printf 'scenario economy\nbot blue off\nbot red off\n' > "$out/gamma.script"
+# Beta: power for blue, nothing else. The crew builds the transporter.
+cat > "$out/beta.script" <<SCRIPT
+scenario economy
+bases none
+bot blue off
+bot red off
+zones alpha beta gamma
+at 0 spawn blue generator 40 at 40,150 radius 30
+at 60 select blue engineer as crew
+at 61 build crew transporter at 70,256
+SCRIPT
+# Gamma: a transporter, its landing area full of parked tanks until 4000.
+cat > "$out/gamma.script" <<SCRIPT
+scenario economy
+bases none
+bot blue off
+bot red off
+zones alpha beta gamma
+at 0 spawn blue transporter 1 at 100,256 radius 0
+at 0 spawn blue tank 60 at 100,256 radius 9
+at 1 select blue tank as parked
+at 4000 move parked 300,256
+SCRIPT
 
-start_coord() { "$bin/rts-coord" --port "$coord" --log "$out/coord.log" --retry 0.2 >> "$out/coord.out" 2>&1 & echo $!; }
+start_coord() { "$bin/rts-coord" --port "$coord" --log "$out/coord.log" --retry 0.1 --world "$out/line.world" >> "$out/coord.out" 2>&1 & echo $!; }
 pids=""
 cleanup() { kill $pids 2>/dev/null || true; }
 trap cleanup EXIT
-fail() { echo "zone-smoke: $1"; tail -20 "$out/coord.out"; exit 1; }
+fail() { echo "zone-smoke: $1"; tail -20 "$out/coord.out"; for z in alpha beta gamma; do echo "== $z"; tail -5 "$out/$z.out"; done; exit 1; }
 
 c=$(start_coord); pids="$pids $c"; sleep 0.3
-"$bin/rts-server" --script "$out/alpha.script" --zone alpha $zones --port "$alpha" --ticks 800 --speed 8 \
+"$bin/rts-server" --script "$out/alpha.script" --zone alpha $zones --port "$alpha" --ticks 3500 --speed $speed \
 	--stats "$out/alpha.txt" > "$out/alpha.out" 2>&1 &
 a=$!; pids="$pids $a"
-"$bin/rts-server" --script "$out/gamma.script" --zone gamma $zones --port "$gamma" --ticks 1500 --speed 8 \
+"$bin/rts-server" --script "$out/gamma.script" --zone gamma $zones --port "$gamma" --ticks 4800 --speed $speed \
 	--stats "$out/gamma.txt" > "$out/gamma.out" 2>&1 &
 g=$!; pids="$pids $g"
 
-# Wait for the tanks to leave alpha: a transfer to beta, which is down.
-for i in $(seq 100); do grep -q ' alpha beta ' "$out/coord.log" 2>/dev/null && break; sleep 0.1; done
-grep -q ' alpha beta ' "$out/coord.log" || fail "no transfer logged from alpha to beta"
+# Wait for the crew to leave alpha: an unpaired transfer to beta, which is down.
+for i in $(seq 150); do grep -q ' alpha beta 0 unpaired ' "$out/coord.log" 2>/dev/null && break; sleep 0.1; done
+grep -q ' alpha beta 0 unpaired ' "$out/coord.log" || fail "no unpaired transfer logged from alpha to beta"
 # Kill the coordinator with that transfer pending, and start it again.
 kill "$c"; sleep 0.3
 c=$(start_coord); pids="$pids $c"; sleep 0.3
 grep -q 'replayed .* 1 pending' "$out/coord.out" || fail "the restarted coordinator didn't replay the pending transfer"
 
 # Now beta comes up, with a player who starts there and switches to gamma.
-"$bin/rts-server" --script "$out/beta.script" --zone beta $zones --port "$beta" --ticks 700 --speed 8 \
+"$bin/rts-server" --script "$out/beta.script" --zone beta $zones --port "$beta" --ticks 3100 --speed $speed \
 	--stats "$out/beta.txt" > "$out/beta.out" 2>&1 &
 b=$!; pids="$pids $b"
 sleep 0.2
 "$bin/rts" --coord "127.0.0.1:$coord" --zone beta --faction blue --headless --switch-to gamma --switch-at 250 \
-	--quit-after 400 --stats "$out/player.txt" > "$out/player.out" 2>&1 || fail "the player failed: $(tail -3 "$out/player.out")"
+	--quit-after 500 --stats "$out/player.txt" > "$out/player.out" 2>&1 || fail "the player failed: $(tail -3 "$out/player.out")"
 wait "$a" "$b" "$g"
 
-grep -q '^units_in 10$' "$out/beta.txt" || fail "beta didn't receive the ten tanks: $(grep units_in "$out/beta.txt")"
-grep -q 'seed' "$out/coord.log" || fail "no gate seed was logged"
-grep -q '^gates_blue 1$' "$out/gamma.txt" || fail "the seed didn't unfold into a gate in gamma"
+get() { awk -v k="$2" '$1 == k { print $2 }' "$out/$1.txt"; }
+[ "$(get alpha sends_refused)" -ge 1 ] || fail "alpha's early send to gamma wasn't refused"
+[ "$(get beta transporters_blue)" = 1 ] || fail "the crew didn't build a transporter in beta"
+[ "$(get beta units_in)" = 16 ] || fail "beta took in $(get beta units_in) units, not the crew of 6 and 10 tanks"
+[ "$(get beta units_out)" = 10 ] || fail "beta relayed $(get beta units_out) units, not 10"
+[ "$(get gamma units_in)" = 10 ] || fail "gamma took in $(get gamma units_in) units, not 10"
+[ "$(get gamma arrivals_held)" -ge 1 ] || fail "gamma never held an arrival for its full landing area"
+grep -q 'no room where' "$out/gamma.out" || fail "gamma held them for the wrong reason"
 grep -q '^digest_mismatches 0$' "$out/player.txt" || fail "the player's faction hashes mismatched"
 grep -q '^zones_visited 2$' "$out/player.txt" || fail "the player didn't switch zones"
-[ "$(grep -c '^delivered' "$out/coord.log")" -ge 2 ] || fail "transfers weren't both delivered"
+[ "$(grep -c '^delivered' "$out/coord.log")" -ge 3 ] || fail "transfers weren't all delivered"
 echo "zone-smoke: ok"

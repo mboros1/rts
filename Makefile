@@ -118,10 +118,11 @@ $(CHECK)/rts-server:
 $(CHECK)/rts-coord:
 	@$(S) "build coordinator (clang -O2)" $(CC) $(BASE) -Werror $(RELEASE) src/main_coord.c -o $@
 
-# Three zones and a coordinator: a held transfer survives a coordinator
-# restart, a seed opens a zone, a player switches zones.
+# Three zones on a line and a coordinator: an unpaired send waits through a
+# coordinator restart, a crew builds a transporter, tanks relay two hops and
+# wait for room to land, a player switches zones.
 check-zones: $(CHECK)/rts $(CHECK)/rts-server $(CHECK)/rts-coord
-	@$(S) "zones: transfer, restart, seed, switch" tools/zone-smoke $(CHECK) $(CHECK)/zones > $(CHECK)/zones.log 2>&1 \
+	@$(S) "zones: unpaired, restart, relay, push-back, switch" tools/zone-smoke $(CHECK) $(CHECK)/zones > $(CHECK)/zones.log 2>&1 \
 		|| { cat $(CHECK)/zones.log; exit 1; }
 
 # The game through `rts world`: start, a player's journey across the map and
@@ -195,7 +196,8 @@ clips: $(B)/rts
 # git so history shows each change without building anything. Rendered only
 # when the script changes, never because the binary did.
 DEMO_SCRIPTS := $(wildcard demos/*.script)
-DEMO_RUNS := $(wildcard demos/*.sh)
+# Retired demos (a "RETIRED" line at the top) keep their video and sheet.
+DEMO_RUNS := $(shell grep -L "^. RETIRED" demos/*.sh)
 demos: $(DEMO_SCRIPTS:.script=.mp4) $(DEMO_RUNS:.sh=.mp4)
 
 DEMO_RENDER = $(B)/rts clip --script demos/$(1).script --out demos/$(1).mp4 \
@@ -230,7 +232,7 @@ demos-restore: $(B)/rts
 demos-rerender: $(B)/rts $(B)/rts-server $(B)/rts-headless
 	@for s in demos/*.script; do d=$$(basename $$s .script); \
 		$(S) "rerender $$d" sh -c '$(call DEMO_RENDER,'"$$d"') > /dev/null' || exit 1; done
-	@for s in demos/*.sh; do d=$$(basename $$s .sh); \
+	@for s in demos/*.sh; do d=$$(basename $$s .sh); grep -q '^# RETIRED' $$s && continue; \
 		$(S) "rerender $$d" sh -c "B=$(B) OUT=demos/$$d SIZE=960x540 CRF=30 LABEL=$$d RENDER_ONLY=1 sh $$s > /dev/null && \
 			ffmpeg -loglevel error -y -i $(B)/demo-$$d.png -q:v 6 demos/$$d.jpg" || exit 1; done
 

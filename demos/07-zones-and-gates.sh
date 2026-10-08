@@ -1,4 +1,8 @@
 #!/bin/sh
+# RETIRED in spike 8: gate seeds and the pool are gone, and this run's
+# netlogs are an older wire version. The video and sheet stay as the record
+# of spike 5; this script no longer runs.
+echo "demos/07-zones-and-gates.sh is retired (spike 8)"; exit 0
 # Spike 5 demo: two zones as separate processes, a coordinator between them.
 # In alpha, blue fires a gate seed into beta, where blue has no gate; it
 # lands by blue's base there and unfolds. Blue's army walks into alpha's gate and leaves; the

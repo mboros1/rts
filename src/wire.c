@@ -444,6 +444,7 @@ void wire_encode_faction_tick(const Sim *sim, FactionId f, const Command *cmds, 
 		put32(out, (uint32_t)c->amount);
 		putf(out, c->radius);
 		put8(out, c->flags);
+		put32(out, c->route);
 		put32(out, (uint32_t)c->count);
 		for (ptrdiff_t i = 0; i < c->count; i++) {
 			put32(out, c->units[i].index);
@@ -511,8 +512,10 @@ bool wire_read_faction_tick(ByteReader *r, Arena *a, const SimConfig *c, Faction
 		cmd->amount = (int32_t)get32(r);
 		cmd->radius = getf(r);
 		cmd->flags = get8(r);
+		cmd->route = get32(r);
 		uint32_t m = get32(r);
 		if (r->bad || kind >= COMMAND_KIND_COUNT || type >= UNIT_TYPE_COUNT || m > (uint32_t)c->max_units
+		    || !route_ok(cmd->route)
 		    || (ptrdiff_t)m * 8 > r->len - r->pos)
 			return false;
 		cmd->faction = f;
@@ -577,6 +580,7 @@ void wire_put_config(ByteBuf *b, const SimConfig *c)
 	put32(b, (uint32_t)c->max_projectiles);
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) put32(b, (uint32_t)c->type_weight[k]);
 	put8(b, c->economy);
+	put8(b, c->bases);
 }
 
 bool wire_get_config(ByteReader *r, SimConfig *c)
@@ -593,9 +597,10 @@ bool wire_get_config(ByteReader *r, SimConfig *c)
 		if (c->type_weight[k] < 0 || c->type_weight[k] > 1000) return false;
 		sum += c->type_weight[k];
 	}
-	uint8_t economy = get8(r);
-	if (economy > 1) return false;
+	uint8_t economy = get8(r), bases = get8(r);
+	if (economy > 1 || bases >= 1u << FACTION_COUNT) return false;
 	c->economy = economy;
+	c->bases = bases;
 	return !r->bad && sum > 0 && c->max_units > 0 && c->max_units <= 1 << 16
 	    && c->max_projectiles > 0 && c->max_projectiles <= 1 << 20 && c->spawn_interval > 0
 	    && c->initial_units >= 0 && c->initial_units <= c->population && c->population <= c->max_units;

@@ -267,6 +267,57 @@ Done. `make play` (or `build/rts world`) is the game.
   both sides' strength everywhere, ignoring fog. Units only cross zones
   through spike 5's gates, which the client can't order yet.
 
+## Spike 8 results (2026-10-08)
+
+Done. Expansion goes through transporters, along the zone graph.
+
+- **Home-only bases**: a world gives each side a base in its home zone
+  only (`bases blue|red|none` in a zone's setup); everywhere else it has to
+  get in.
+- **Transporters** (the old gate, renamed) are built by engineers (R). A
+  send leaves from our transporter nearest the units, and the transporter
+  charges only while units wait, for the batch then waiting:
+  - *paired* (our transporter at the destination): any units, up to 60, a
+    10 s charge at 30 energy a unit; they land around that transporter;
+  - *unpaired* (none there): to a neighbouring zone only, raiders and
+    engineers only (others are turned away), up to 8, a 40 s charge at
+    4000 + 400 a unit; they land in our strip of the zone (west or east
+    quarter) at the point picked.
+- **Relays**: a send to a zone further away goes hop by hop through zones
+  with our transporters, the route the sender gives (`send army to far via
+  middle`) or the shortest one. Each hop is its own send, charged and paid
+  by the zone it leaves; the units wait at the relay's transporter, in the
+  open, until it fires.
+- **Push-back**: a zone takes a batch only while its landing area (16 around
+  the transporter or landing point) has room for it (60 of our units);
+  otherwise the coordinator holds it and retries. A transporter is one
+  queue, so sends through it go in turn.
+- **The server routes every send** before the step, whoever ordered it: it
+  knows the links from the world file and where our transporters are from
+  the coordinator's directory, and turns "to ZONE" into next hop, route and
+  paired or not, or refuses it. Players can't mark a send unpaired; the
+  server decides.
+- **In the client**: T, then a zone's number. Unpaired, a click then picks
+  the landing point, with our strip traced on the ground.
+- **Gone**: the pool, gate seeds and logout policies. Away from the
+  keyboard, a side's bot plays it, unless the zone's setup turned that bot
+  off. In a world, a setup script can only spawn at tick 0 (fixtures set up;
+  they don't play).
+- **Evidence**: `test_transporters` (paired cost and timing, unpaired
+  filtering, the batch caps, strip landing, a relay, one queue per
+  transporter, the faction split and save/load); `tools/zone-smoke` (in
+  `make check`, 12 s): an unpaired crew through a coordinator restart, a
+  refused send, a transporter built, tanks relayed two hops and held until
+  the landing area clears, a player switching zones; a 2-minute soak (527
+  units across, none lost or duplicated). Demo 10.
+- **Formats**: replay v6, wire v3, zone state v2 (a command carries its
+  route; the config which sides start with a base). Demo 07 (gate seeds,
+  the pool) is retired: its video stays, its script no longer runs. Demo
+  08's title describes the old logout policy; spike 9 replaces it.
+- **Not yet**: the bots don't use transporters (spike 10), so only players
+  and scripts expand. The client's send keys are only tried by hand. The map
+  still shows both sides' strength everywhere.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

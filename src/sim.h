@@ -41,7 +41,7 @@ typedef enum : uint8_t {
 	UNIT_EXTRACTOR,     // structures: never move
 	UNIT_GENERATOR,
 	UNIT_FACTORY,
-	UNIT_GATE,          // warps units to other zones; charges on energy
+	UNIT_TRANSPORTER,   // sends units to other zones; charges on energy
 	UNIT_TURRET,        // a static gun; also what units entrench into
 	UNIT_TYPE_COUNT,
 } UnitType;
@@ -83,7 +83,7 @@ typedef enum : uint8_t {
 	ORDER_MOVE,
 	ORDER_ATTACK_MOVE,
 	ORDER_BUILD,        // engineers: go to the site, then place or assist
-	ORDER_GATE,         // go to a gate and leave through it when it fires
+	ORDER_SEND,         // go to a transporter and leave through it when it fires
 	ORDER_KIND_COUNT,
 } OrderKind;
 
@@ -98,6 +98,7 @@ typedef struct {
 	// With an economy, factions start with a factory and engineers and build
 	// everything else; the spawner and initial_units are unused.
 	bool economy;
+	uint8_t bases;            // economy: which factions start with a base (bit per faction)
 } SimConfig;
 
 SimConfig sim_config_default(void);
@@ -107,7 +108,7 @@ static inline bool sim_config_equal(const SimConfig *a, const SimConfig *b)
 {
 	bool same = a->seed == b->seed && a->initial_units == b->initial_units && a->population == b->population
 	         && a->spawn_interval == b->spawn_interval && a->max_units == b->max_units
-	         && a->max_projectiles == b->max_projectiles && a->economy == b->economy;
+	         && a->max_projectiles == b->max_projectiles && a->economy == b->economy && a->bases == b->bases;
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) same = same && a->type_weight[k] == b->type_weight[k];
 	return same;
 }
@@ -148,20 +149,46 @@ typedef struct {
 	uint64_t *queue;       // factories: up to 8 unit types, a byte each
 	uint8_t *queue_len;
 	uint8_t *repeat;       // factories: finished items go to the back
-	uint8_t *dest;         // units ordered through a gate: the zone they're for
-	uint8_t *seeded;       // gates: arrived as a seed, so they unfold unaided;
-	                       // turrets: an entrenched unit, of type build_type
+	uint8_t *dest;         // units on a send order: the zone of their next hop
+	uint32_t *route;       // ... and the hops after it (a Route), | ROUTE_UNPAIRED
+	uint8_t *seeded;       // turrets: an entrenched unit, of type build_type
 } Units;
 
-// Zones are numbered by the match's zone directory; the pool isn't a zone.
-enum : uint8_t { ZONE_POOL = 255 };
+// Zones are numbered by the world's zone list, 0 to ZONE_MAX - 1.
+enum : uint8_t { ZONE_MAX = 15 };
 
-// Leaving through a gate this tick: `count` units of `type` for zone `dest`.
-// A seed is a single UNIT_GATE.
+// The hops still to go after the next, in order: zone + 1 per 4 bits, from
+// the low end; 0 ends it. Up to ROUTE_HOPS hops.
+typedef uint32_t Route;
+enum { ROUTE_HOPS = 7 };
+static inline int route_first(Route r) { return (int)(r & 0xf) - 1; }   // -1: none
+static inline Route route_rest(Route r) { return r >> 4; }
+static inline Route route_push_front(Route r, int zone) { return r << 4 | (Route)(zone + 1); }
+static inline bool route_ok(Route r)
+{
+	for (int k = 0; k < ROUTE_HOPS + 1; k++, r >>= 4)
+		if (r == 0) return true;
+		else if ((r & 0xf) > ZONE_MAX) return false;
+	return false;
+}
+
+enum : uint32_t { ROUTE_UNPAIRED = 1u << 31 }; // Units.route: an unpaired send
+
+// Arrivals land within LANDING_RADIUS of the receiving transporter (or, unpaired,
+// of the landing point). A zone takes a batch only while that area holds fewer
+// than LANDING_ROOM of our units; otherwise it waits, and sends queue up.
+static constexpr float LANDING_RADIUS = 16.0f;
+enum { LANDING_ROOM = 60 };
+
+// Leaving through a transporter this tick: `count` units of `type` for zone
+// `dest`, then `route`. Unpaired sends land at `landing` in the destination.
 typedef struct {
 	uint8_t dest;
 	UnitType type;
 	int32_t count;
+	Route route;
+	bool unpaired;
+	V2 landing;
 } Departure;
 
 enum { FACTORY_QUEUE = 8 };
@@ -280,7 +307,7 @@ typedef struct {
 	int64_t units_spawned;
 	int64_t units_lost;
 	int64_t launches_dropped;  // arriving shells this faction's pool had no room for
-	int64_t units_departed;    // through gates
+	int64_t units_departed;    // through transporters
 	int64_t units_arrived;
 } FactionStats;
 
@@ -329,7 +356,7 @@ typedef struct {
 	Perception seen;           // its enemies, as it perceives them
 	Economy economy;
 	EnemyView view;            // built from `seen` each tick, in scratch
-	Departure *departures;     // left through gates this tick (in scratch)
+	Departure *departures;     // left through transporters this tick (in scratch)
 	ptrdiff_t departure_count;
 	Launch *outbox;            // launches fired this tick, delivered next tick
 	ptrdiff_t outbox_count;
@@ -347,10 +374,10 @@ typedef enum : uint8_t {
 	COMMAND_SPAWN,
 	COMMAND_BUILD,      // engineers build unit_type at target
 	COMMAND_PRODUCE,    // factories queue `amount` of unit_type (0 clears)
-	COMMAND_GATE,       // units go through the gate nearest target, to zone `amount`
-	COMMAND_SEED,       // the gate nearest target fires a gate seed to zone `amount`
-	COMMAND_ARRIVE,     // `amount` of unit_type come through our gate (a seed: SEED flag)
-	COMMAND_DRAW,       // ask the pool for `amount` of unit_type here: for the zone server
+	COMMAND_SEND,       // units go through our transporter nearest them, to zone `amount`
+	                    // then `route`; UNPAIRED: no transporter there, land at target
+	COMMAND_ARRIVE,     // `amount` of unit_type come in: around our transporter nearest
+	                    // target, or (UNPAIRED) spread around target; then on to `route`
 	COMMAND_ENTRENCH,   // the faction's combat units dig in as turrets where they stand
 	COMMAND_MOBILIZE,   // entrenched turrets become the units they were
 	COMMAND_KIND_COUNT,
@@ -358,16 +385,33 @@ typedef enum : uint8_t {
 
 enum : uint8_t {
 	COMMAND_REPEAT = 1,     // PRODUCE: finished items requeue
-	COMMAND_SEED_GATE = 2,  // ARRIVE: it's a gate seed, landing near target
+	COMMAND_UNPAIRED = 2,   // SEND, ARRIVE: no transporter at the destination
 };
 
-// Gates: a full charge takes GATE_CHARGE seconds and GATE_CHARGE_ENERGY;
-// a seed needs a full charge plus SEED_ENERGY, and unfolds in SEED_UNFOLD.
-static constexpr float GATE_CHARGE = 10.0f;
-static constexpr float GATE_CHARGE_ENERGY = 2000.0f;
-static constexpr float SEED_ENERGY = 5000.0f;
-static constexpr float SEED_UNFOLD = 20.0f;
-static constexpr float GATE_REACH = 7.0f;   // beyond the gate's radius
+// Transporters. A send leaves from one of ours. Paired (we have a
+// transporter at the destination): any units, a batch of up to
+// PAIRED_BATCH, charging PAIRED_CHARGE seconds on PAIRED_ENERGY per unit.
+// Each hop of a relay is its own send, paid by the zone it leaves from.
+// Unpaired (we don't): to an adjacent zone only, raiders and engineers only,
+// up to UNPAIRED_BATCH, charging UNPAIRED_CHARGE seconds on UNPAIRED_ENERGY
+// plus UNPAIRED_ENERGY_PER per unit; they land in our strip of that zone.
+// A transporter charges only while units wait, for the batch then waiting.
+static constexpr float PAIRED_CHARGE = 10.0f;
+static constexpr float PAIRED_ENERGY = 30.0f;
+static constexpr int32_t PAIRED_BATCH = 60;
+static constexpr float UNPAIRED_CHARGE = 40.0f;
+static constexpr float UNPAIRED_ENERGY = 4000.0f;
+static constexpr float UNPAIRED_ENERGY_PER = 400.0f;
+static constexpr int32_t UNPAIRED_BATCH = 8;
+static constexpr float SEND_REACH = 7.0f;   // beyond the transporter's radius
+static inline bool unpaired_can_send(UnitType t) { return t == UNIT_RAIDER || t == UNIT_ENGINEER; }
+
+// Each side lands unpaired sends in its own strip of a zone: blue the west
+// STRIP of the map's width, red the east. The rest is contested.
+static constexpr float STRIP = 0.25f;
+
+// Where an unpaired send for f lands: at, moved into f's strip.
+V2 sim_strip_point(const Terrain *t, FactionId f, V2 at);
 
 static constexpr int32_t SPAWN_MAX = 4096;      // units per spawn command
 static constexpr float SPAWN_MAX_RADIUS = 200.0f;
@@ -386,6 +430,7 @@ typedef struct {
 	int32_t amount;
 	float radius;
 	uint8_t flags;
+	Route route;        // SEND, ARRIVE: hops after the next
 } Command;
 
 typedef struct {

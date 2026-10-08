@@ -72,12 +72,20 @@ static void draw_zone(const DirectoryZone *z, Vector2 c, bool hover, int h)
 		return;
 	}
 	for (int f = 0; f < FACTION_COUNT; f++) {
-		const char *line = TextFormat("%d units  %d bldg%s", z->status.units[f], z->status.structures[f],
-		                              z->status.gates[f] ? TextFormat("  %d gate%s", z->status.gates[f],
-		                                                              z->status.gates[f] > 1 ? "s" : "")
-		                                                 : "");
+		const char *line = TextFormat("%d units  %d bldg", z->status.units[f], z->status.structures[f]);
 		int lw = MeasureText(line, small);
 		DrawText(line, (int)c.x - lw / 2, (int)(c.y + r) + 8 * px + f * (small + 4 * px), small, side_color(f));
+		// Transporters: a marker on the rim, blue's on the left, red's on the right.
+		int n = z->status.transporters[f];
+		if (n == 0) continue;
+		Vector2 m = {c.x + (f == 0 ? -r : r), c.y};
+		float k = 14.0f * u;
+		DrawPoly(m, 4, k, 45.0f, side_color(f));
+		DrawPolyLines(m, 4, k, 45.0f, RAYWHITE);
+		if (n > 1) {
+			const char *count = TextFormat("%d", n);
+			DrawText(count, (int)m.x - MeasureText(count, small) / 2, (int)m.y - small / 2, small, RAYWHITE);
+		}
 	}
 	// The zone's own clock: how long it has run.
 	int64_t secs = z->status.tick / (int64_t)SIM_HZ;
@@ -113,7 +121,7 @@ void map_draw(const Directory *d, int viewer, int hover, int w, int h)
 	const char *title = "strategic map";
 	DrawText(title, (w - MeasureText(title, ts)) / 2, (int)(48.0f * u), ts, MAP_TEXT);
 	const char *who = viewer == 0 ? "you are blue" : viewer == 1 ? "you are red" : "spectating";
-	const char *help = TextFormat("%s   click a zone to launch in   esc: quit", who);
+	const char *help = TextFormat("%s   click a zone to launch in   esc: quit   (squares: transporters)", who);
 	DrawText(help, (w - MeasureText(help, hs)) / 2, h - (int)(56.0f * u), hs, MAP_DIM);
 	if (d->link_count == 0 && d->zone_count > 1) {
 		const char *note = "(no world file: zones shown without links)";

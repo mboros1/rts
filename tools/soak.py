@@ -4,8 +4,8 @@
     tools/soak.py BIN_DIR OUT_DIR --minutes M [--speed S] [--seed N]
 
 A coordinator and two zones (alpha, beta), bots on both sides of each, both
-sending waves through gates between them, and a player who keeps logging in
-and out of alpha (so its units entrench and mobilize). Alpha and the
+sending waves through transporters between them, and a player who keeps
+logging in and out of alpha (so its bot stands down and takes over). Alpha and the
 coordinator are killed with SIGKILL at random and restarted; beta is left
 alone so its memory can be watched over the whole run.
 
@@ -49,18 +49,21 @@ def main():
     coord_port, ports = port, {"alpha": port + 1, "beta": port + 2}
     other = {"alpha": "beta", "beta": "alpha"}
 
-    # Each zone: an economy, bots on both sides, a gate each, and a wave of
-    # raiders through it every simulated minute, both sides, so units keep
-    # crossing whichever side is winning.
+    # Each zone: an economy, bots on both sides, a transporter each, and a
+    # wave of raiders through it every simulated minute, both sides, so units
+    # keep crossing whichever side is winning. Paired: both zones have both
+    # sides' transporters (until they're destroyed, when sends are refused).
     horizon = int(a.minutes * 60 * a.speed * 30) + 10_000
-    gates = {"blue": "130,256", "red": "382,256"}
+    transporters = {"blue": "130,256", "red": "382,256"}
+    with open(out("pair.world"), "w") as f:
+        f.write(f"port {coord_port}\nzone alpha 0.3 0.5 home blue\nzone beta 0.7 0.5 home red\nlink alpha beta\n")
     for zone in ports:
         lines = ["scenario economy", "zones alpha beta"]
-        lines += [f"at 0 spawn {side} gate 1 at {at} radius 0" for side, at in gates.items()]
+        lines += [f"at 0 spawn {side} transporter 1 at {at} radius 0" for side, at in transporters.items()]
         for t in range(1800, horizon, 1800):
-            for k, (side, at) in enumerate(gates.items()):
+            for k, side in enumerate(transporters):
                 lines += [f"at {t + 2 * k} select {side} raider max 20 as {side}wave",
-                          f"at {t + 2 * k + 1} gate {side}wave to {other[zone]} via {at}"]
+                          f"at {t + 2 * k + 1} send {side}wave to {other[zone]}"]
         with open(out(f"{zone}.script"), "w") as f:
             f.write("\n".join(lines) + "\n")
 
@@ -94,15 +97,16 @@ def main():
 
     def start_coord():
         procs["coord"] = subprocess.Popen(
-            [f"{a.bin}/rts-coord", "--port", str(coord_port), "--log", out("coord.log"), "--retry", "0.5"],
+            [f"{a.bin}/rts-coord", "--port", str(coord_port), "--log", out("coord.log"), "--retry", "0.5",
+             "--world", out("pair.world")],
             stdout=open(out("coord.out"), "a"), stderr=subprocess.STDOUT)
 
     def start_zone(zone):
         segments[zone] += 1
         procs[zone] = subprocess.Popen(
-            [f"{a.bin}/rts-server", "--script", out(f"{zone}.script"), "--zone", zone, "--zones", "alpha,beta",
+            [f"{a.bin}/rts-server", "--script", out(f"{zone}.script"), "--zone", zone, "--world", out("pair.world"),
              "--coord", f"127.0.0.1:{coord_port}", "--port", str(ports[zone]), "--speed", str(a.speed),
-             "--state", out(f"{zone}.state"), "--save-every", "2", "--logout", "entrench",
+             "--state", out(f"{zone}.state"), "--save-every", "2",
              "--record", out(f"{zone}-{segments[zone]:03d}.replay"), "--stats", out(f"{zone}.txt")],
             stdout=open(out(f"{zone}.out"), "a"), stderr=subprocess.STDOUT)
 
@@ -173,12 +177,13 @@ def main():
     # Conservation, from the coordinator's log.
     sent, delivered = {z: 0 for z in ports}, {z: 0 for z in ports}
     transfers, logged_seqs = {}, {z: set() for z in ports}
+    # transfer ID SRC DST FACTION paired|unpaired SEQ ROUTE X,Z TYPE:N ...
     for line in open(out("coord.log")):
         f = line.split()
         if f[0] == "transfer" and f[2] in ports:
             logged_seqs[f[2]].add(int(f[6]))
-        if f[0] == "transfer" and f[5] == "units":
-            n = sum(int(c.split(":")[1]) for c in f[7:])
+        if f[0] == "transfer":
+            n = sum(int(c.split(":")[1]) for c in f[9:])
             transfers[f[1]] = (f[3], n)
             sent[f[2]] += n
         elif f[0] == "delivered" and f[1] in transfers:
@@ -186,7 +191,7 @@ def main():
             if dst in delivered:
                 delivered[dst] += n
     # Units must actually have crossed, or the run proved little (a side
-    # that lost its gates early sends nothing).
+    # that lost its transporters early sends nothing).
     crossed = sum(delivered.values())
     if crossed < 10 * a.minutes:
         failures.append(f"only {crossed} units crossed between zones in {a.minutes} minutes")

@@ -8,6 +8,7 @@
 //   about Raiders swing north and hit red's side
 //   scenario skirmish                 # starting config and bot behaviour
 //   seed 7 | units 400 | weights 6 3 2 | respawn off | economy on
+//   bases blue | bases red | bases none | bases both  # economy: who starts with a base
 //   bot red off                       # at tick 0
 //   clip 200..700                     # default clip window
 //   speed 4                           # time-lapse clips: a frame every 4 ticks
@@ -19,16 +20,17 @@
 //   at 30  move column 256,90         # also: attack-move, stop
 //   at 40  build crew extractor at 92,226   # engineers; also generator, factory
 //   at 40  queue crew generator at 40,280   # build once the group is done building
-//   zones alpha beta                  # names for zone numbers, in order; also: pool
-//   at 50  gate army to beta via 80,256     # through the gate nearest 80,256
-//   at 50  seed gates to beta               # a gate group fires a seed
-//   at 50  arrive blue tank 10              # as if through blue's gate (tests)
+//   zones alpha beta                  # names for zone numbers, in order
+//   at 50  send army to gamma via beta at 60,300  # through our nearest transporter;
+//                                     #   via: the hops before; at: an unpaired landing
+//                                     #   point; unpaired: say so (no server to decide)
+//   at 50  arrive blue tank 10        # as if through blue's transporter (tests)
 //   at 40  produce plant raider 2 repeat    # factories: queue N (0 clears)
 //   at 60  bot red on
 //   at 600 expect red lost > 50       # side fields: units lost fired shells spawned
 //                                     #   metal energy metal_income energy_income
 //                                     #   and finished counts: raiders tanks artillery
-//                                     #   engineers extractors generators factories gates
+//                                     #   engineers extractors generators factories transporters
 //                                     #   departed arrived
 //   at 600 expect column alive >= 15  # group field: alive
 //
@@ -81,7 +83,8 @@ typedef struct {
 	V2 at;                  // select area centre, spawn point, order target
 	int32_t limit;          // select max (0 for all), spawn amount
 	CommandKind command;    // order; build and produce use type and limit
-	uint8_t flags;          // produce: COMMAND_REPEAT
+	uint8_t flags;          // produce: COMMAND_REPEAT; send: COMMAND_UNPAIRED
+	Route route;            // send: the hops after the first (limit)
 	bool on;                // bot
 	ExpectField field;      // expect
 	ExpectOp op;
