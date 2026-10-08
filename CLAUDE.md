@@ -13,6 +13,8 @@ persistent map. Read these before changing anything:
 - Touched sim math? Also run `make determinism-x86`.
 - Touched saving, zones or the coordinator? Also run `make soak MINUTES=3`
   (random SIGKILLs; checks no unit is lost and replays chain).
+- Touched the bots or anything a whole world does? `make world-soak MINUTES=10`
+  (a self-playing world under random kills; an hour for a release).
 - Programs: `rts` (the game: `rts world`; also clips and the dev sandbox),
   `rts-headless` (bench, replays, scripts), `rts-server` (a zone),
   `rts-coord` (the coordinator).

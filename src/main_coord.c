@@ -166,8 +166,11 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 		if (!from || !ok || faction >= FACTION_COUNT || !get_leg(&r, &leg) || !get_counts(&r, counts)) break;
 		if (!zone_named(c, name)) printf("coord: %s sent units to %s, which isn't a zone here\n", from->name, name);
 		Transfer *t = ledger_depart(&c->ledger, from->name, seq, name, faction, &leg, counts);
-		if (t) printf("coord: transfer %llu %s -> %s (faction %u, %s)\n", (unsigned long long)t->id, from->name, name,
-		              faction, leg.unpaired ? "unpaired" : "paired");
+		int32_t units = 0;
+		for (int k = 0; k < UNIT_TYPE_COUNT; k++) units += counts[k];
+		// The soak test counts units from these lines (the log is compacted).
+		if (t) printf("coord: transfer %llu %s -> %s (faction %u, %s, seq %llu, %d units)\n", (unsigned long long)t->id,
+		              from->name, name, faction, leg.unpaired ? "unpaired" : "paired", (unsigned long long)seq, units);
 		else printf("coord: %s re-sent departure %llu, already logged\n", from->name, (unsigned long long)seq);
 		// Logged now, or before: either way the zone can forget it.
 		arena_reset(&c->out);
@@ -248,6 +251,9 @@ int main(int argc, char **argv)
 		       ledger_pending(&c.ledger));
 	}
 	if (!(c.ledger.log = fopen(log_path, "a"))) fatal("cannot open %s", log_path);
+	// Start from a compact log: what's pending, not everything that ever was.
+	if (!ledger_compact(&c.ledger, log_path, &c.program)) fatal("cannot compact %s", log_path);
+	printf("coord: compacted %s at startup: %d pending\n", log_path, c.ledger.transfer_count);
 	for (int k = 0; k < MAX_PEERS; k++) conn_init(&c.peers[k].conn, &c.program, -1, 1 << 20, 1 << 20);
 	int listen_fd = net_listen(port);
 	if (listen_fd < 0) fatal("cannot listen on port %d", port);
@@ -283,6 +289,13 @@ int main(int argc, char **argv)
 			}
 		}
 		deliver(&c, now);
+		if (c.ledger.lines >= COMPACT_EVERY) {
+			int32_t before = c.ledger.transfer_count;
+			if (ledger_compact(&c.ledger, log_path, &c.out))
+				printf("coord: compacted %s: %d transfers, %d pending\n", log_path, before, c.ledger.transfer_count);
+			else
+				fprintf(stderr, "coord: cannot compact %s; going on with it as it is\n", log_path);
+		}
 		for (int k = 0; k < MAX_PEERS; k++)
 			if (c.peers[k].used) conn_pump(&c.peers[k].conn, now);
 		fflush(stdout);

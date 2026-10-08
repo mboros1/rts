@@ -1,8 +1,8 @@
 # Five zones: two routes from each home to the other, crossing in the middle.
 port 7700
 zone west   0.12 0.5  home blue
-zone north  0.4  0.22
-zone south  0.4  0.78
+zone north  0.4  0.08
+zone south  0.4  0.92
 zone centre 0.62 0.5
 zone east   0.88 0.5  home red
 link west north

@@ -91,19 +91,27 @@ void director_update(Director *d, const Scene *scene)
 		}
 		spread = total / (float)n;
 	} else {
+		// Between the sides' centres; a side with nobody here doesn't count
+		// (its base may be empty ground in a zone it has never reached).
 		V2 centre[FACTION_COUNT];
+		int present = 0;
 		for (int f = 0; f < FACTION_COUNT; f++) {
 			const SceneUnits *u = &scene->units[f];
-			V2 s = scene->base[f];
-			if (u->count) {
-				s = v2(0.0f, 0.0f);
-				for (ptrdiff_t i = 0; i < u->count; i++) s = v2_add(s, v2(u->px[i], u->pz[i]));
-				s = v2_scale(s, 1.0f / (float)u->count);
-			}
-			centre[f] = s;
+			if (!u->count) continue;
+			V2 s = v2(0.0f, 0.0f);
+			for (ptrdiff_t i = 0; i < u->count; i++) s = v2_add(s, v2(u->px[i], u->pz[i]));
+			centre[present++] = v2_scale(s, 1.0f / (float)u->count);
 		}
-		focus = v2_scale(v2_add(centre[0], centre[1]), 0.5f);
-		spread = 0.5f * v2_len(v2_sub(centre[0], centre[1]));
+		if (present == 0) {
+			focus = v2_scale(v2_add(scene->base[0], scene->base[1]), 0.5f);
+			spread = 0.5f * v2_len(v2_sub(scene->base[0], scene->base[1]));
+		} else if (present == 1) {
+			focus = centre[0];
+			spread = 40.0f;
+		} else {
+			focus = v2_scale(v2_add(centre[0], centre[1]), 0.5f);
+			spread = 0.5f * v2_len(v2_sub(centre[0], centre[1]));
+		}
 	}
 	float distance = f_clamp(spread * 2.4f + 70.0f, 80.0f, 360.0f);
 	if (!d->primed) {

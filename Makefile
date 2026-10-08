@@ -14,6 +14,7 @@
 #   make demos-restore   re-render demo videos that are only LFS pointers
 #   make share DEMO=NAME   full-quality copy of a demo, on the clipboard
 #   make soak MINUTES=N   zones, a coordinator and a player under random kills
+#   make world-soak MINUTES=N   a self-playing world under random kills
 
 CC      := clang
 GCC     := gcc-15
@@ -35,7 +36,7 @@ SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
 # The zone smoke test drives these through processes; rebuild them together.
 
-.PHONY: play demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 soak cross clips demos demos-restore share clean
+.PHONY: play world-soak demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 soak cross clips demos demos-restore share clean
 
 all: $(B)/rts $(B)/rts-headless $(B)/rts-server $(B)/rts-coord
 
@@ -172,6 +173,12 @@ determinism-x86:
 MINUTES ?= 5
 soak: all
 	@$(S) "soak: $(MINUTES) min" python3 tools/soak.py $(B) $(B)/soak --minutes $(MINUTES)
+
+# The world playing itself: bots on both sides everywhere, zones and the
+# coordinator SIGKILLed at random, players dropping in. Checks conservation,
+# replays, memory, and that both sides expanded.
+world-soak: all
+	@$(S) "world soak: $(MINUTES) min" python3 tools/world-soak.py $(B) $(B)/world-soak --minutes $(MINUTES)
 
 CROSS := $(B)/cross
 cross: $(B)/rts-headless

@@ -700,6 +700,20 @@ static void test_ledger(void)
 	for (ptrdiff_t i = 0; i < text.len; i++) lines += text.ptr[i] == '\n';
 	CHECK(lines == 3);
 
+	// Compacted: the pending transfer, the ids and departure numbers; nothing else.
+	CHECK(ledger_compact(again, path, &a));
+	CHECK(again->transfer_count == 1 && again->lines == 0);
+	CHECK(platform_read_file(&a, path, &text));
+	Ledger *compact = PUSH(&a, Ledger, 1);
+	CHECK(ledger_replay(compact, text, &bad));
+	CHECK(compact->transfer_count == 1 && ledger_pending(compact) == 1 && compact->next_id == 2);
+	const Transfer *c1 = ledger_find(compact, 1);
+	CHECK(c1 && c1->leg.unpaired && c1->counts[UNIT_RAIDER] == 4);
+	CHECK(ledger_depart(compact, "alpha", 2, "beta", 0, &open, raiders) == nullptr); // still a repeat
+	Transfer *t3 = ledger_depart(compact, "alpha", 3, "beta", 0, &open, raiders);
+	CHECK(t3 && t3->id == 2);                       // ids carry on, never reused
+	if (again->log) fclose(again->log);
+
 	const char *broken[] = {"transfer 9 a b 7 paired 1 0 0,0 tank:1\n", "delivered 42\n",
 	                        "transfer 1 a b 0 paired 1 0 0,0 nonsense:3\n", "explode 1\n", "transfer 1 a b 0 paired\n",
 	                        "transfer 1 a b 0 sideways 1 0 0,0 tank:1\n", "transfer 1 a b 0 unpaired 1 3 0,0 tank:1\n",

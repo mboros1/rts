@@ -91,6 +91,7 @@ typedef struct {
 	int journey_at;             // step of --journey in progress
 	double journey_until;
 	Bot bot;                    // --bot
+	BotWorld bot_world;
 	int64_t bot_tick;
 	FILE *netlog;
 	double t0;
@@ -408,6 +409,20 @@ static void client_bot(Client *c)
 {
 	if (!c->ready || !c->player || c->remote.sim.tick.v == c->bot_tick) return;
 	c->bot_tick = c->remote.sim.tick.v;
+	if (c->opt.coord && c->dir.zone_count) {
+		// The map as the directory has it; this zone's own side as simulated here.
+		bot_world_build(&c->bot_world, &c->dir, c->zone_at, c->opt.faction);
+		const Units *u = &c->remote.sim.factions[c->opt.faction].units;
+		int32_t mine = 0;
+		bool ours = false;
+		for (ptrdiff_t i = 0; i < u->count; i++) {
+			mine += unit_is_structure(u->type[i]) ? 2 : unit_is_combat(u->type[i]);
+			ours = ours || (u->type[i] == UNIT_TRANSPORTER && u->progress[i] >= 1.0f);
+		}
+		c->bot_world.mine[c->zone_at] = mine;
+		c->bot_world.ours[c->zone_at] = ours;
+		c->bot.world = &c->bot_world;
+	}
 	Command cmds[64];
 	ptrdiff_t n = 0;
 	bot_think(&c->bot, &c->remote.sim, &c->frame, cmds, &n, countof(cmds));

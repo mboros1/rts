@@ -7,6 +7,11 @@
 //       units left SRC for DST (SEQ: SRC's own number for it), going on
 //       along ROUTE (a Route, in hex) from there; unpaired ones land at X,Z
 //   delivered ID                            DST took them in
+//   next ID / seq ZONE N                    after compaction: the next transfer
+//                                           id, and ZONE's highest departure number
+//
+// The log is compacted at startup and every COMPACT_EVERY lines: rewritten
+// (atomically) as next and seq lines plus the transfers still pending.
 //
 // A transfer is pending until delivered; while DST is down, has no
 // transporter for a paired transfer, or has no room where they'd land, it
@@ -21,7 +26,7 @@
 #include "bytes.h"
 #include "sim.h"
 
-enum { COORD_MAX_ZONES = 8, COORD_MAX_TRANSFERS = 4096, ZONE_NAME = 24 };
+enum { COORD_MAX_ZONES = 8, COORD_MAX_TRANSFERS = 4096, ZONE_NAME = 24, COMPACT_EVERY = 2000 };
 
 // Messages between zones, players and the coordinator (framed by net.h).
 typedef enum : uint8_t {
@@ -72,6 +77,7 @@ typedef struct {
 	uint64_t seq_max[COORD_MAX_ZONES * 2];
 	int32_t seq_zones;
 	FILE *log;              // nullptr: changes aren't recorded (tests)
+	int32_t lines;          // appended since the last compaction
 } Ledger;
 
 // Rebuild from a log's text. False, with the line number, on a bad line.
@@ -84,4 +90,9 @@ Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *ds
 void ledger_delivered(Ledger *l, uint64_t id);
 
 Transfer *ledger_find(Ledger *l, uint64_t id);
+
+// Rewrite the log at path as what's needed to rebuild this ledger, drop
+// delivered transfers, and go on appending to the new log. False (and the
+// old log kept) if it can't be written.
+bool ledger_compact(Ledger *l, const char *path, Arena *scratch);
 int32_t ledger_pending(const Ledger *l);

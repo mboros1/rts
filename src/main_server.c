@@ -116,6 +116,7 @@ typedef struct {
 	int here;                    // this zone's index in the world
 	Directory dir;               // the coordinator's, refreshed every few seconds
 	bool have_dir;
+	BotWorld bot_world[FACTION_COUNT]; // each side's bot's view of the map
 	double next_dir;
 	int64_t sends_routed, sends_refused, arrivals_held;
 	char coord_host[64];
@@ -659,8 +660,30 @@ static bool route_send(Server *s, Command *c)
 	return true;
 }
 
+// Each side's bot sees the map as the directory last told it, with this zone
+// as it is now.
+static void update_bot_worlds(Server *s)
+{
+	if (!s->world.zone_count || !s->have_dir) return;
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		BotWorld *w = &s->bot_world[f];
+		bot_world_build(w, &s->dir, s->here, (uint8_t)f);
+		int32_t strength[FACTION_COUNT] = {0};
+		for (int g = 0; g < FACTION_COUNT; g++) {
+			const Units *u = &s->sim.factions[g].units;
+			for (ptrdiff_t i = 0; i < u->count; i++)
+				strength[g] += unit_is_structure(u->type[i]) ? 2 : unit_is_combat(u->type[i]);
+		}
+		w->mine[s->here] = strength[f];
+		w->theirs[s->here] = strength[1 - f];
+		w->ours[s->here] = has_transporter(s, s->here, (uint8_t)f);
+		s->run.bots[f].world = w;
+	}
+}
+
 static void step(Server *s, double now)
 {
+	update_bot_worlds(s);
 	ptrdiff_t n = s->queued_count;
 	n += script_tick(&s->run, &s->sim, &s->tick, s->queued + n, MAX_COMMANDS - n);
 	// Every send, whoever ordered it, goes the way the world allows, or not at all.

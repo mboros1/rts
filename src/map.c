@@ -15,7 +15,7 @@ static float unit(int h) { return (float)h / 900.0f; }
 // Zones sit inside a margin; positions are 0..1 across it.
 static Vector2 zone_at(const DirectoryZone *z, int w, int h)
 {
-	float mx = 190.0f * unit(h), my = 230.0f * unit(h);
+	float mx = 190.0f * unit(h), my = 190.0f * unit(h);
 	return (Vector2){mx + z->x * ((float)w - 2.0f * mx), my + z->y * ((float)h - 2.0f * my)};
 }
 

@@ -13,6 +13,7 @@
 #pragma once
 
 #include "base.h"
+#include "bot.h"
 #include "coord.h"
 
 enum { WORLD_MAX_LINKS = 32 };
@@ -86,3 +87,7 @@ bool get_directory(ByteReader *r, Directory *d);
 //   links: west-middle middle-east
 //   transit: blue 12 west->middle
 void directory_print(const Directory *d, FILE *out);
+
+// What a bot of side f in zone `here` knows of the world: from the directory
+// (matched to the world by name), links from the world or the directory's.
+void bot_world_build(BotWorld *w, const Directory *d, int here, uint8_t f);

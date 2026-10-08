@@ -344,6 +344,46 @@ Done. Entrenching is an order, not something logging out does.
   entrenched line holds forever (later: upkeep). The prices are first
   guesses.
 
+## Spike 10 results (2026-10-08)
+
+Done. A fresh world plays itself, and keeps going for hours.
+
+- **The bots play the map** (`bot.c`, every 10 s, through ordinary orders
+  the zone server routes like a player's). In each zone each side's bot
+  knows the world from the directory: links, where its side has
+  transporters, both sides' strength everywhere. It builds a transporter
+  where its side has none (every idle engineer on it); opens neighbouring
+  zones where it has no transporter with an unpaired crew (4 engineers, 4
+  raiders): empty ones first, enemy-held ones only from a zone with an army
+  to follow; and sends what it can spare (keeping 10) to the zone of its
+  side that's furthest forward: one where the enemy is, then one next to
+  them. Within a zone it attacks what it sees, or hunts an enemy it knows
+  of after a minute if it's the stronger, so a landing nobody has spotted
+  gets time to raise a transporter. A zone's bot stops building army at 300.
+- **Getting there took four tries**, each run watched as text on the map:
+  crews thrown at enemy zones and lost; armies piling up at home because
+  reinforcements only went to zones that were losing; a frozen standoff in
+  a zone where neither side could see the other; and defenders who always
+  knew where a landing was. The rules above are what came out.
+- **Coordinator log compaction**: at startup and every 2000 lines the log is
+  rewritten (atomically) as the next id, each zone's highest departure
+  number, and the pending transfers; delivered ones leave memory too.
+- **Evidence**: `make world-soak` (`tools/world-soak.py`): five zones, bots
+  everywhere, a zone SIGKILLed every 20-60 s and the coordinator every
+  60-120 s, players (the client's `--bot`) dropping in. An hour at 8x (about
+  8 game hours a zone): 88 zone kills, 40 coordinator kills, 61 player
+  sessions; 7449 units crossed, none lost or duplicated; 93 replay segments
+  verified and chained; memory flat within every process's life (a zone
+  restored from its state sits higher, around 350 MB, and stays there); the
+  log compacted 41 times; both sides held zones beyond home (centre changed
+  hands). The ledger test covers compaction. Demo 12 is a time-lapse of a
+  fresh world filling in.
+- **Not yet**: the fronts settle into a standoff once every zone reaches the
+  cap: crews keep trying, and sometimes a landing takes, but neither side
+  wins a zone for long. Making a war that moves is game design (costs,
+  caps, what attackers and defenders can see), not plumbing. The map shows
+  both sides' strength everywhere, which the bots use too.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

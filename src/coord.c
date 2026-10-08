@@ -62,6 +62,7 @@ static void log_line(Ledger *l, const char *line)
 	if (!l->log) return;
 	fputs(line, l->log);
 	fputc('\n', l->log);
+	l->lines++;
 	// Durable before anyone hears of it: a restart replays exactly this.
 	if (fflush(l->log) != 0 || fsync(fileno(l->log)) != 0) fatal("cannot write the coordinator's log");
 }
@@ -161,6 +162,14 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 			uint64_t seq = strtoull(seq_s, nullptr, 10), *max = seq_of(l, src);
 			if (seq > *max) *max = seq;
 			add_transfer(l, id, src, dst, (uint8_t)faction, &leg, counts);
+		} else if (!strcmp(verb, "next")) {
+			if (id > l->next_id) l->next_id = id;
+		} else if (!strcmp(verb, "seq")) {
+			// seq ZONE N: id_s is the zone's name here.
+			char *n_s = strtok_r(nullptr, " ", &save);
+			if (!n_s || strlen(id_s) >= ZONE_NAME) return false;
+			uint64_t n = strtoull(n_s, nullptr, 10), *max = seq_of(l, id_s);
+			if (n > *max) *max = n;
 		} else if (!strcmp(verb, "delivered")) {
 			Transfer *t = ledger_find(l, id);
 			if (!t) return false;
@@ -195,4 +204,47 @@ void ledger_delivered(Ledger *l, uint64_t id)
 	snprintf(line, sizeof line, "delivered %llu", (unsigned long long)id);
 	log_line(l, line);
 	t->delivered = true;
+}
+
+static void format_transfer(char *line, size_t size, const Transfer *t, uint64_t seq)
+{
+	char list[384];
+	format_counts(list, sizeof list, t->counts);
+	snprintf(line, size, "transfer %llu %s %s %u %s %llu %x %.9g,%.9g%s", (unsigned long long)t->id, t->src, t->dst,
+	         t->faction, t->leg.unpaired ? "unpaired" : "paired", (unsigned long long)seq, t->leg.route,
+	         (double)t->leg.landing.x, (double)t->leg.landing.z, list);
+}
+
+bool ledger_compact(Ledger *l, const char *path, Arena *scratch)
+{
+	ArenaMark m = arena_mark(scratch);
+	ByteBuf b = bytebuf_make(scratch, (ptrdiff_t)l->transfer_count * 512 + 64 * (COORD_MAX_ZONES * 2) + 64);
+	char line[512];
+	snprintf(line, sizeof line, "next %llu\n", (unsigned long long)l->next_id);
+	put_bytes(&b, line, (ptrdiff_t)strlen(line));
+	for (int32_t k = 0; k < l->seq_zones; k++) {
+		snprintf(line, sizeof line, "seq %s %llu\n", l->seq_zone[k], (unsigned long long)l->seq_max[k]);
+		put_bytes(&b, line, (ptrdiff_t)strlen(line));
+	}
+	int32_t kept = 0;
+	for (int32_t k = 0; k < l->transfer_count; k++) {
+		const Transfer *t = &l->transfers[k];
+		if (t->delivered) continue;
+		// The departure number only mattered for spotting repeats, which the
+		// seq lines now cover.
+		format_transfer(line, sizeof line, t, 0);
+		put_bytes(&b, line, (ptrdiff_t)strlen(line));
+		put_bytes(&b, "\n", 1);
+		l->transfers[kept++] = *t;
+	}
+	bool ok = !b.overflow && platform_write_file_atomic(path, b.data, b.len);
+	if (ok) {
+		l->transfer_count = kept;
+		if (l->log) fclose(l->log);
+		l->log = fopen(path, "a");
+		if (!l->log) fatal("cannot reopen %s", path);
+		l->lines = 0;
+	}
+	arena_rewind(m);
+	return ok;
 }

@@ -210,3 +210,24 @@ void directory_print(const Directory *d, FILE *out)
 		        d->zones[t->dst].name);
 	}
 }
+
+void bot_world_build(BotWorld *w, const Directory *d, int here, uint8_t f)
+{
+	*w = (BotWorld){.count = d->zone_count < ZONE_MAX ? d->zone_count : ZONE_MAX, .here = here};
+	for (int z = 0; z < w->count; z++) {
+		const DirectoryZone *dz = &d->zones[z];
+		w->home[z] = dz->home == f;
+		if (!dz->reported) continue;
+		w->ours[z] = dz->status.transporters[f] > 0;
+		w->mine[z] = dz->status.units[f] + 2 * dz->status.structures[f];
+		w->theirs[z] = dz->status.units[1 - f] + 2 * dz->status.structures[1 - f];
+	}
+	for (int k = 0; k < d->link_count; k++) {
+		int a = d->links[k][0], b = d->links[k][1];
+		if (a >= w->count || b >= w->count) continue;
+		if (a == here) w->linked[b] = true;
+		if (b == here) w->linked[a] = true;
+		if (w->theirs[a] > 0) w->neighbours_enemy[b] = true;
+		if (w->theirs[b] > 0) w->neighbours_enemy[a] = true;
+	}
+}
