@@ -9,7 +9,7 @@
 set -eu
 bin=$1; out=$2
 mkdir -p "$out"; rm -f "$out"/*.log "$out"/*.txt "$out"/*.out 2>/dev/null || true
-base=$((20000 + $$ % 15000)); coord=$base; alpha=$((base + 1)); beta=$((base + 2)); gamma=$((base + 3))
+base=$((25000 + ($$ % 2500) * 4)); coord=$base; alpha=$((base + 1)); beta=$((base + 2)); gamma=$((base + 3))
 zones="--zones alpha,beta,gamma --coord 127.0.0.1:$coord"
 
 # Alpha: blue has a gate, ten tanks to send to beta, and the power for a seed.

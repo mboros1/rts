@@ -1,6 +1,8 @@
 # Unity builds: each program is one translation unit (src/main_*.c).
 #
 #   make            release game and headless runner
+#   make play       the game: continue the world in world/ (a new one from
+#                   worlds/three.world the first time); WORLD=FILE starts over
 #   make check      local CI: clean ASan/UBSan tests, replay determinism,
 #                   then a gcc-15 -Werror -fanalyzer build
 #   make bench      time the sim at 5000 units per side
@@ -33,7 +35,7 @@ SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
 # The zone smoke test drives these through processes; rebuild them together.
 
-.PHONY: demos-rerender all setup check check-zones check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 soak cross clips demos demos-restore share clean
+.PHONY: play demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 soak cross clips demos demos-restore share clean
 
 all: $(B)/rts $(B)/rts-headless $(B)/rts-server $(B)/rts-coord
 
@@ -62,6 +64,13 @@ $(B)/rts-server: src/main_server.c $(SIM_SRC) | $(B)
 $(B)/rts-coord: src/main_coord.c $(SIM_SRC) | $(B)
 	$(CC) $(BASE) $(RELEASE) $< -o $@
 
+# The game. The world keeps running when the window closes: `build/rts world
+# --stop` stops it (every zone saves first).
+play: all
+	@if [ -n "$(WORLD)" ]; then $(B)/rts world --new $(WORLD); \
+	elif [ -f world/live/world.txt ]; then $(B)/rts world; \
+	else $(B)/rts world --new worlds/three.world; fi
+
 bench: $(B)/rts-headless
 	$(B)/rts-headless bench 1800 5000
 
@@ -70,7 +79,7 @@ bench: $(B)/rts-headless
 # (history in build/timings.log), so check costs about its slowest stage.
 CHECK := $(B)/check
 S := tools/stage
-CHECK_STAGES := check-tests check-replay check-split check-demo-scripts check-game check-server check-gcc check-net check-zones
+CHECK_STAGES := check-tests check-replay check-split check-demo-scripts check-game check-server check-gcc check-net check-zones check-world
 check:
 	@rm -rf $(CHECK) && mkdir -p $(CHECK)
 	@$(S) "check (total)" $(MAKE) --no-print-directory -j8 $(CHECK_STAGES)
@@ -114,6 +123,12 @@ $(CHECK)/rts-coord:
 check-zones: $(CHECK)/rts $(CHECK)/rts-server $(CHECK)/rts-coord
 	@$(S) "zones: transfer, restart, seed, switch" tools/zone-smoke $(CHECK) $(CHECK)/zones > $(CHECK)/zones.log 2>&1 \
 		|| { cat $(CHECK)/zones.log; exit 1; }
+
+# The game through `rts world`: start, a player's journey across the map and
+# two zones, stop and continue, save and load, the journey's clip.
+check-world: $(CHECK)/rts $(CHECK)/rts-server $(CHECK)/rts-coord
+	@$(S) "world: journey, stop/continue, save/load" tools/world-smoke $(CHECK) $(CHECK)/world > $(CHECK)/world.log 2>&1 \
+		|| { cat $(CHECK)/world.log; exit 1; }
 
 check-server: $(CHECK)/rts-server
 

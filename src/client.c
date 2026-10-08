@@ -5,11 +5,21 @@
 //       [--netlog PATH] [--stats PATH]
 //       [--headless] [--auto-orders]       no window; order idle units forward
 //       [--disconnect-at TICK] [--reconnect-after SECONDS] [--quit-at TICK]
-//   rts --coord HOST:PORT [--zone NAME]   find zones through the coordinator
+//   rts --coord HOST:PORT [--zone NAME]   a world, through its coordinator
 //       [--switch-to NAME --switch-at N] [--quit-after N]   (N: ticks received)
+//       [--journey STEP,STEP,...]          scripted: map:SECONDS or ZONE:SECONDS
+//       [--bot]                            the bot plays your side, as a player
 //
-// With a coordinator, Tab moves to the next zone. Each zone is its own
-// match: switching drops this one and joins the next from its snapshot.
+// With a coordinator and no --zone, the window opens on the strategic map
+// (map.h): click a zone to launch into it; Tab, or Esc when not placing a
+// structure, goes back to the map. Each zone is its own match: launching
+// joins it from its snapshot. --journey scripts the same for demos and tests:
+// "map:3,west:30,map:3,east:20" looks at the map for 3 s, plays west for 30 s,
+// and so on, then quits.
+//
+// --bot runs the game's bot on this client's own view of its faction and
+// sends its orders like a player's: a stand-in player for demos and tests
+// that can only do what a player can.
 //
 // A player simulates its own faction (remote.h): from a faction snapshot and
 // each tick's commands and effects it runs the faction's phase itself and
@@ -22,7 +32,10 @@
 
 #include <math.h>
 
+#include "bot.h"
+#include "controls.h"
 #include "coord.h"
+#include "map.h"
 #include "net.h"
 #include "netlog.h"
 #include "platform.h"
@@ -43,20 +56,18 @@ typedef struct {
 	double reconnect_after;
 	const char *coord, *zone, *switch_to;
 	int64_t switch_at, quit_after;
+	bool bot;
+	char journey[16][ZONE_NAME];   // "map" or a zone name, each for journey_s seconds
+	double journey_s[16];
+	int journey_len;
 } ClientOptions;
-
-typedef struct {
-	char name[ZONE_NAME];
-	char host[64];
-	int port;
-	bool up;
-} ZoneEntry;
 
 typedef struct {
 	ClientOptions opt;
 	Conn conn;
 	bool ever_connected;
-	double disconnected_since;
+	double disconnected_since;  // or since the last failed retry
+	double lost_at;             // when the connection went, for giving up
 	bool forced_done;
 
 	bool have_world;
@@ -71,10 +82,16 @@ typedef struct {
 
 	Arena program, frame, out;
 	Arena world;                // this zone's terrain and state: reset on a switch
-	ZoneEntry zones[COORD_MAX_ZONES];
-	int zone_count, zone_at;
+	Directory dir;              // the world, as the coordinator last told it
+	int zone_at;
 	int64_t zones_visited;
 	bool switched;
+	bool on_map;                // looking at the strategic map, in no zone
+	double next_directory;
+	int journey_at;             // step of --journey in progress
+	double journey_until;
+	Bot bot;                    // --bot
+	int64_t bot_tick;
 	FILE *netlog;
 	double t0;
 	Rng rng;
@@ -88,10 +105,8 @@ typedef struct {
 	Renderer renderer;
 	bool renderer_ready;
 	View view;
-	UnitHandle *selection;
-	ptrdiff_t selection_count;
-	bool dragging;
-	Vector2 drag_start;
+	Controls controls;
+	bool overlay;
 } Client;
 
 // Monotonic seconds on this machine's clock, so netlogs from two clients on
@@ -116,52 +131,56 @@ static void client_event(Client *c, uint8_t kind, const char *text)
 
 // ---------------------------------------------------------------- connection
 
-// Ask the coordinator which zones there are. Blocks briefly.
-static bool client_directory(Client *c)
+// Ask the coordinator at HOST:PORT for the directory. Blocks up to half a
+// second. The raw frame (for netlogs) lives in a.
+static bool directory_fetch(const char *coord, Arena *a, Directory *d, Str *raw)
 {
-	const char *colon = strrchr(c->opt.coord, ':');
+	const char *colon = strrchr(coord, ':');
 	if (!colon) fatal("--coord HOST:PORT");
 	char host[64];
-	snprintf(host, sizeof host, "%.*s", (int)(colon - c->opt.coord), c->opt.coord);
+	snprintf(host, sizeof host, "%.*s", (int)(colon - coord), coord);
 	int fd = net_connect(host, atoi(colon + 1));
 	if (fd < 0) return false;
 	Conn q;
-	conn_init(&q, &c->out, fd, 1 << 16, 1 << 16);
+	conn_init(&q, a, fd, 1 << 16, 1 << 16);
 	conn_send(&q, COORD_DIRECTORY_ASK, "", 0, platform_seconds());
 	bool got = false;
-	for (int i = 0; i < 400 && q.open && !got; i++) {
+	for (int i = 0; i < 100 && q.open && !got; i++) {
 		conn_pump(&q, platform_seconds());
 		Frame f;
 		while (!got && conn_next(&q, &f)) {
 			if (f.kind != COORD_DIRECTORY) continue;
 			ByteReader r = byte_reader(f.data, f.len);
-			int n = get8(&r);
-			c->zone_count = 0;
-			for (int k = 0; k < n && k < COORD_MAX_ZONES; k++) {
-				ZoneEntry *z = &c->zones[c->zone_count];
-				char zhost[ZONE_NAME];
-				if (!get_name(&r, z->name) || !get_name(&r, zhost)) break;
-				snprintf(z->host, sizeof z->host, "%s", zhost);
-				z->port = get16(&r);
-				z->up = get8(&r);
-				if (!r.bad) c->zone_count++;
-			}
+			if (!get_directory(&r, d)) break;
+			if (raw) *raw = (Str){(const char *)f.data, f.len};
 			got = true;
 		}
-		net_sleep(0.005);
+		if (!got) net_sleep(0.005);
 	}
 	conn_close(&q, "done");
 	return got;
 }
 
+static bool client_directory(Client *c)
+{
+	arena_reset(&c->out);
+	Directory d;
+	Str raw;
+	if (!directory_fetch(c->opt.coord, &c->out, &d, &raw)) return false;
+	c->dir = d;
+	// Logged: a clip of this client draws the map as it was then.
+	client_log(c, COORD_DIRECTORY, raw.ptr, raw.len);
+	return true;
+}
+
 // Point the client at a zone from the directory; it connects next round.
 static bool client_choose_zone(Client *c, const char *name)
 {
-	for (int k = 0; k < c->zone_count; k++)
-		if (!name || !strcmp(c->zones[k].name, name)) {
+	for (int k = 0; k < c->dir.zone_count; k++)
+		if (!name || !strcmp(c->dir.zones[k].name, name)) {
 			c->zone_at = k;
-			c->opt.host = c->zones[k].host;
-			c->opt.port = c->zones[k].port;
+			c->opt.host = c->dir.zones[k].host;
+			c->opt.port = c->dir.zones[k].port;
 			return true;
 		}
 	return false;
@@ -182,8 +201,8 @@ static bool client_connect(Client *c)
 	conn_send(&c->conn, MSG_HELLO, b.data, b.len, client_now(c));
 	client_event(c, NETLOG_CONNECTED, "");
 	c->zones_visited++;
-	if (c->zone_count) {
-		const char *info = TextFormat("zone %s", c->zones[c->zone_at].name);
+	if (c->dir.zone_count) {
+		const char *info = TextFormat("zone %s", c->dir.zones[c->zone_at].name);
 		client_log(c, NETLOG_INFO, info, (ptrdiff_t)strlen(info));
 	}
 	return true;
@@ -202,7 +221,7 @@ static uint16_t client_dilation(const Client *c)
 static void client_lost(Client *c, const char *why)
 {
 	client_event(c, NETLOG_DISCONNECTED, why ? why : "closed");
-	c->disconnected_since = client_now(c);
+	c->disconnected_since = c->lost_at = client_now(c);
 	c->ready = false;
 }
 
@@ -229,7 +248,6 @@ static void client_welcome(Client *c, ByteReader *r)
 		if (c->renderer_ready) renderer_unload(&c->renderer);
 		c->renderer_ready = false;
 		c->have_world = false;
-		c->selection_count = 0;
 		arena_reset(&c->world);
 	}
 	c->config = config;
@@ -238,7 +256,9 @@ static void client_welcome(Client *c, ByteReader *r)
 	c->player = faction < FACTION_COUNT;
 	if (c->player) remote_init(&c->remote, &config, (FactionId){faction}, &c->world);
 	else mirror_init(&c->mirror, &c->world, config.max_units, config.max_projectiles);
-	c->selection = PUSH(&c->world, UnitHandle, config.max_units);
+	controls_init(&c->controls, (FactionId){faction < FACTION_COUNT ? faction : 0}, &c->world, config.max_units);
+	c->bot = bot_create((FactionId){faction < FACTION_COUNT ? faction : 0}, config.seed ^ 0x5eedu);
+	c->bot_tick = -1;
 	c->have_world = true;
 }
 
@@ -353,69 +373,27 @@ static void client_auto_orders(Client *c)
 
 // ---------------------------------------------------------------- window
 
-// Players select from their own simulated units; spectators can't order.
-static void client_select(Client *c, const Scene *scene, Rectangle box, bool add, bool click)
+static void client_input(Client *c)
 {
 	if (!c->player) return;
-	const SceneUnits *su = &scene->units[c->opt.faction];
-	const Units *u = &c->remote.sim.factions[c->opt.faction].units;
-	if (!add) c->selection_count = 0;
-	ptrdiff_t best = -1;
-	float best_d2 = 14.0f * 14.0f;
-	for (ptrdiff_t i = 0; i < su->count; i++) {
-		Vector2 s = GetWorldToScreen((Vector3){su->px[i], su->py[i] + 0.5f, su->pz[i]}, c->view.camera);
-		if (click) {
-			float dx = s.x - box.x, dy = s.y - box.y;
-			if (dx * dx + dy * dy < best_d2) {
-				best = i;
-				best_d2 = dx * dx + dy * dy;
-			}
-		} else if (CheckCollisionPointRec(s, box) && c->selection_count < c->config.max_units) {
-			c->selection[c->selection_count++] = units_handle(u, i);
-		}
-	}
-	if (click && best >= 0) c->selection[c->selection_count++] = units_handle(u, best);
+	Order orders[16];
+	ptrdiff_t n = controls_input(&c->controls, &c->remote.sim, &c->view, &c->frame, orders, countof(orders));
+	for (ptrdiff_t k = 0; k < n; k++)
+		client_send_order(c, orders[k].kind, orders[k].target, orders[k].type, orders[k].amount, orders[k].flags,
+		                  orders[k].units, orders[k].count);
 }
 
-// Marks selected units by scene index and drops dead ones from the selection.
-static uint8_t *client_selected(Client *c)
+// --bot: the game's bot, on what this client knows, sending what a player can.
+static void client_bot(Client *c)
 {
-	if (!c->player) return nullptr;
-	const Units *u = &c->remote.sim.factions[c->opt.faction].units;
-	uint8_t *marked = PUSH(&c->frame, uint8_t, u->count);
-	ptrdiff_t kept = 0;
-	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
-		ptrdiff_t i = units_find(u, c->selection[k]);
-		if (i < 0 || marked[i]) continue;
-		marked[i] = 1;
-		c->selection[kept++] = c->selection[k];
-	}
-	c->selection_count = kept;
-	return marked;
-}
-
-static void client_input(Client *c, const Scene *scene)
-{
-	Vector2 mouse = GetMousePosition();
-	if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-		c->dragging = true;
-		c->drag_start = mouse;
-	}
-	if (c->dragging && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-		c->dragging = false;
-		Rectangle box = {fminf(c->drag_start.x, mouse.x), fminf(c->drag_start.y, mouse.y),
-		                 fabsf(mouse.x - c->drag_start.x), fabsf(mouse.y - c->drag_start.y)};
-		bool click = box.width < 4.0f && box.height < 4.0f;
-		if (click) box = (Rectangle){mouse.x, mouse.y, 0, 0};
-		client_select(c, scene, box, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT), click);
-	}
-	V2 at;
-	if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && pick_ground(&c->view, &c->terrain, mouse, &at)) {
-		bool move = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-		client_send_command(c, move ? COMMAND_MOVE : COMMAND_ATTACK_MOVE, at, c->selection, c->selection_count);
-	}
-	if (IsKeyPressed(KEY_X) && c->selection_count)
-		client_send_command(c, COMMAND_STOP, v2(0, 0), c->selection, c->selection_count);
+	if (!c->ready || !c->player || c->remote.sim.tick.v == c->bot_tick) return;
+	c->bot_tick = c->remote.sim.tick.v;
+	Command cmds[64];
+	ptrdiff_t n = 0;
+	bot_think(&c->bot, &c->remote.sim, &c->frame, cmds, &n, countof(cmds));
+	for (ptrdiff_t k = 0; k < n; k++)
+		client_send_order(c, cmds[k].kind, cmds[k].target, cmds[k].unit_type, cmds[k].amount, cmds[k].flags,
+		                  cmds[k].units, cmds[k].count);
 }
 
 static void client_overlay(const Client *c, bool connected)
@@ -436,16 +414,60 @@ static void client_overlay(const Client *c, bool connected)
 	DrawText(TextFormat("sending with %.0f ms latency, %.0f ms jitter", c->opt.latency * 1e3, c->opt.jitter * 1e3),
 	         12, y, 16, LIGHTGRAY);
 	y += line;
-	DrawText(TextFormat("selected %td   commands sent %lld", c->selection_count, (long long)c->commands_sent),
-	         12, y, 16, LIGHTGRAY);
+	DrawText(TextFormat("commands sent %lld", (long long)c->commands_sent), 12, y, 16, LIGHTGRAY);
 	y += line;
-	DrawText("drag select | right: attack-move | ctrl+right: move | X stop", 12, y, 14, GRAY);
+	DrawText("Tab or Esc: strategic map | F1: this overlay", 12, y, 14, GRAY);
 	if (!connected) {
 		const char *msg = "connection lost: reconnecting...";
 		int w = MeasureText(msg, 30);
 		DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), (Color){0, 0, 0, 120});
 		DrawText(msg, (GetScreenWidth() - w) / 2, GetScreenHeight() / 2 - 15, 30, RAYWHITE);
 	}
+}
+
+// The zone's name and how to get back to the map, top left; F1 has the rest.
+static void client_banner(const Client *c, bool connected)
+{
+	const char *side = c->opt.faction == 0 ? "blue" : c->opt.faction == 1 ? "red" : "spectator";
+	const char *zone = c->dir.zone_count ? c->dir.zones[c->zone_at].name : TextFormat("%s:%d", c->opt.host, c->opt.port);
+	const char *text = TextFormat("zone %s   %s   %s", zone, side, c->opt.coord ? "Tab: strategic map   F1: details" : "F1: details");
+	DrawRectangle(5, 5, MeasureText(text, 20) + 20, 32, (Color){0, 0, 0, 150});
+	DrawText(text, 15, 11, 20, RAYWHITE);
+	if (!connected) {
+		const char *msg = "connection lost: reconnecting...";
+		int w = MeasureText(msg, 30);
+		DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), (Color){0, 0, 0, 120});
+		DrawText(msg, (GetScreenWidth() - w) / 2, GetScreenHeight() / 2 - 15, 30, RAYWHITE);
+	}
+}
+
+// Leave the zone (if in one) for the strategic map.
+static void client_to_map(Client *c, double now)
+{
+	if (c->conn.open) {
+		conn_close(&c->conn, "to the map");
+		client_lost(c, "to the strategic map");
+	}
+	c->on_map = true;
+	c->ready = false;
+	c->next_directory = now; // fresh at once
+	if (c->have_world) controls_clear(&c->controls);
+	client_log(c, NETLOG_MAP, "", 0);
+}
+
+// Into a zone, from the map or another zone: it connects this round.
+static bool client_launch(Client *c, const char *zone, double now)
+{
+	if (!client_choose_zone(c, zone)) return false;
+	if (c->conn.open) {
+		conn_close(&c->conn, "switching zones");
+		client_lost(c, TextFormat("switching to zone %s", zone));
+	}
+	if (c->ever_connected) c->reconnects--;  // the next connect is a launch, not a failure
+	c->on_map = false;
+	c->disconnected_since = now - c->opt.reconnect_after; // connect right away
+	c->lost_at = now;
+	return true;
 }
 
 // ---------------------------------------------------------------- main
@@ -467,6 +489,7 @@ static int client_main(int argc, char **argv)
 		int used = 2;
 		if (!strcmp(a, "--headless")) c.opt.headless = true, used = 1;
 		else if (!strcmp(a, "--auto-orders")) c.opt.auto_orders = true, used = 1;
+		else if (!strcmp(a, "--bot")) c.opt.bot = true, used = 1;
 		else if (!v) fatal("%s needs a value", a);
 		else if (!strcmp(a, "--connect")) {
 			static char host[256];
@@ -489,18 +512,23 @@ static int client_main(int argc, char **argv)
 		else if (!strcmp(a, "--switch-to")) c.opt.switch_to = v;
 		else if (!strcmp(a, "--switch-at")) c.opt.switch_at = atoll(v);
 		else if (!strcmp(a, "--quit-after")) c.opt.quit_after = atoll(v);
+		else if (!strcmp(a, "--journey")) {
+			static char steps[512];
+			snprintf(steps, sizeof steps, "%s", v);
+			char *save;
+			for (char *t = strtok_r(steps, ",", &save); t; t = strtok_r(nullptr, ",", &save)) {
+				char *colon = strchr(t, ':');
+				if (!colon || c.opt.journey_len == (int)countof(c.opt.journey) || colon - t >= ZONE_NAME)
+					fatal("--journey map:SECONDS,ZONE:SECONDS,...");
+				*colon = 0;
+				snprintf(c.opt.journey[c.opt.journey_len], ZONE_NAME, "%s", t);
+				c.opt.journey_s[c.opt.journey_len++] = atof(colon + 1);
+			}
+		}
 		else fatal("unknown option %s", a);
 		i += used;
 	}
 	c.out = arena_create("client out", (ptrdiff_t)16 << 20);
-	if (c.opt.coord) {
-		bool listed = false;
-		for (int tries = 0; tries < 50 && !(listed = client_directory(&c) && c.zone_count > 0); tries++) net_sleep(0.1);
-		if (!listed) fatal("no zones from the coordinator at %s", c.opt.coord);
-		if (!client_choose_zone(&c, c.opt.zone)) fatal("no zone %s at the coordinator", c.opt.zone);
-	}
-	if (!c.opt.host || c.opt.port <= 0) fatal("--connect HOST:PORT or --coord HOST:PORT");
-
 	c.program = arena_create("client program", (ptrdiff_t)1 << 30);
 	c.world = arena_create("client world", (ptrdiff_t)2 << 30);
 	c.frame = arena_create("client frame", (ptrdiff_t)256 << 20);
@@ -518,13 +546,31 @@ static int client_main(int argc, char **argv)
 		         c.opt.latency * 1e3, c.opt.jitter * 1e3);
 		client_log(&c, NETLOG_INFO, info, (ptrdiff_t)strlen(info));
 	}
+	if (c.opt.coord) {
+		bool listed = false;
+		for (int tries = 0; tries < 50 && !(listed = client_directory(&c) && c.dir.zone_count > 0); tries++) net_sleep(0.1);
+		if (!listed) fatal("no zones from the coordinator at %s", c.opt.coord);
+		// Where to start: a zone, or the map (in a window, or a journey's first step).
+		const char *first = c.opt.journey_len ? c.opt.journey[0] : c.opt.zone;
+		if (c.opt.journey_len) c.journey_until = platform_seconds() + c.opt.journey_s[0];
+		if (first && strcmp(first, "map")) {
+			if (!client_choose_zone(&c, first)) fatal("no zone %s at the coordinator", first);
+		} else if (first || !c.opt.headless) {
+			c.on_map = true;
+			client_log(&c, NETLOG_MAP, "", 0);
+		} else if (!client_choose_zone(&c, nullptr)) {
+			fatal("no zones at the coordinator");
+		}
+	}
+	if (!c.on_map && (!c.opt.host || c.opt.port <= 0)) fatal("--connect HOST:PORT or --coord HOST:PORT");
 
 	if (!c.opt.headless) {
 		SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
-		InitWindow(1600, 900, TextFormat("rts client: %s:%d", c.opt.host, c.opt.port));
+		InitWindow(1600, 900, c.opt.coord ? "rts" : TextFormat("rts client: %s:%d", c.opt.host, c.opt.port));
+		SetExitKey(KEY_NULL); // Esc goes to the map; close the window to quit
 		SetTargetFPS(120);
 	}
-	for (int tries = 0; !client_connect(&c); tries++) {
+	for (int tries = 0; !c.on_map && !client_connect(&c); tries++) {
 		if (tries == 50) fatal("cannot connect to %s:%d", c.opt.host, c.opt.port);
 		net_sleep(0.1);
 	}
@@ -538,7 +584,7 @@ static int client_main(int argc, char **argv)
 			conn_pump(&c.conn, now);
 			client_frames(&c);
 			if (!c.conn.open) client_lost(&c, c.conn.why_closed);
-		} else if (now - c.disconnected_since >= c.opt.reconnect_after) {
+		} else if (!c.on_map && now - c.disconnected_since >= c.opt.reconnect_after) {
 			if (!client_connect(&c)) c.disconnected_since = now; // try again later
 		}
 		if (c.opt.disconnect_at >= 0 && !c.forced_done && c.ready && client_tick(&c) >= c.opt.disconnect_at) {
@@ -547,6 +593,7 @@ static int client_main(int argc, char **argv)
 			client_lost(&c, "test disconnect");
 		}
 		if (c.opt.auto_orders) client_auto_orders(&c);
+		if (c.opt.bot && !c.on_map) client_bot(&c);
 		if (c.conn.open && now >= c.next_ping) {
 			c.next_ping = now + 1.0;
 			conn_send(&c.conn, MSG_PING, &now, sizeof now, now);
@@ -556,23 +603,27 @@ static int client_main(int argc, char **argv)
 			c.rate_bytes = c.conn.bytes_received;
 			c.rate_since = now;
 		}
+		if (c.on_map && now >= c.next_directory) {
+			c.next_directory = now + 1.0;
+			client_directory(&c);
+		}
 		if (c.opt.quit_at >= 0 && client_tick(&c) >= c.opt.quit_at) break;
 		if (c.opt.quit_after > 0 && c.deltas >= c.opt.quit_after) break;
-		// Switching zones: leave this match and join the next from its snapshot.
-		bool tab = !c.opt.headless && c.zone_count > 1 && IsKeyPressed(KEY_TAB);
-		bool scripted = c.opt.switch_to && !c.switched && c.deltas >= c.opt.switch_at;
-		if (tab || scripted) {
-			c.switched = c.switched || scripted;
-			client_directory(&c);
-			const char *next = scripted ? c.opt.switch_to : c.zones[(c.zone_at + 1) % c.zone_count].name;
-			if (client_choose_zone(&c, next)) {
-				conn_close(&c.conn, "switching zones");
-				client_lost(&c, TextFormat("switching to zone %s", next));
-				c.disconnected_since = now - c.opt.reconnect_after; // reconnect right away
-				c.reconnects--;  // a switch, not a failure
-			}
+		// A scripted journey: the next step when this one's time is up.
+		if (c.opt.journey_len && now >= c.journey_until) {
+			if (++c.journey_at == c.opt.journey_len) break;
+			const char *step = c.opt.journey[c.journey_at];
+			c.journey_until = now + c.opt.journey_s[c.journey_at];
+			if (!strcmp(step, "map")) client_to_map(&c, now);
+			else if (!client_launch(&c, step, now)) fatal("--journey: no zone %s", step);
 		}
-		if (!c.conn.open && now - c.disconnected_since > 15.0 && c.opt.headless) {
+		// --switch-to: straight from one zone to another (the zone smoke test).
+		if (c.opt.switch_to && !c.switched && c.deltas >= c.opt.switch_at) {
+			c.switched = true;
+			client_directory(&c);
+			if (!client_launch(&c, c.opt.switch_to, now)) fatal("--switch-to: no zone %s", c.opt.switch_to);
+		}
+		if (!c.on_map && !c.conn.open && now - c.lost_at > 15.0 && c.opt.headless) {
 			fprintf(stderr, "client: server gone for 15 s, giving up\n");
 			status = 1;
 			break;
@@ -583,13 +634,30 @@ static int client_main(int argc, char **argv)
 			continue;
 		}
 		if (WindowShouldClose()) break;
-		if (c.have_world && !c.renderer_ready) {
-			renderer_init(&c.renderer, &c.terrain, c.config.max_units, &c.world);
-			c.view = (View){.focus = v2(c.terrain.size_x * 0.5f, c.terrain.size_z * 0.5f), .distance = 420.0f};
-			c.renderer_ready = true;
-		}
 		BeginDrawing();
 		ClearBackground((Color){24, 28, 34, 255});
+		if (c.on_map) {
+			Vector2 m = GetMousePosition();
+			int w = GetScreenWidth(), h = GetScreenHeight();
+			int hover = map_pick(&c.dir, m.x, m.y, w, h);
+			map_draw(&c.dir, c.opt.faction < FACTION_COUNT ? c.opt.faction : -1, hover, w, h);
+			if (hover >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && c.dir.zones[hover].up)
+				client_launch(&c, c.dir.zones[hover].name, now);
+			if (IsKeyPressed(KEY_ESCAPE)) {
+				EndDrawing();
+				break;
+			}
+			EndDrawing();
+			continue;
+		}
+		if (c.have_world && !c.renderer_ready) {
+			renderer_init(&c.renderer, &c.terrain, c.config.max_units, &c.world);
+			// Start over our own base.
+			V2 home = c.player ? c.base[c.opt.faction] : v2(c.terrain.size_x * 0.5f, c.terrain.size_z * 0.5f);
+			c.view = (View){.focus = home, .distance = c.player ? 220.0f : 420.0f};
+			c.renderer_ready = true;
+		}
+		bool was_placing = c.controls.placing >= 0;
 		if (c.renderer_ready && c.ready) {
 			view_update(&c.view, &c.terrain);
 			Scene scene = c.player ? remote_scene(&c.remote, c.base, &c.frame)
@@ -598,9 +666,10 @@ static int client_main(int argc, char **argv)
 				uint8_t *visible = PUSH(&c.frame, uint8_t, (ptrdiff_t)(c.terrain.cells_x + 1) * (c.terrain.cells_z + 1));
 				remote_fog(&c.remote, visible);
 				renderer_set_fog(&c.renderer, visible);
+				client_input(&c);
 			}
-			client_input(&c, &scene);
-			uint8_t *selected = client_selected(&c);
+			uint8_t *selected = c.player ? controls_selected(&c.controls, &c.remote.sim.factions[c.opt.faction].units, &c.frame)
+			                             : nullptr;
 			// Extrapolate along velocity since the last update, a little past
 			// one tick at most so a late packet doesn't fling units.
 			uint16_t dil = client_dilation(&c);
@@ -609,16 +678,17 @@ static int client_main(int argc, char **argv)
 			BeginMode3D(c.view.camera);
 			renderer_draw_scene(&c.renderer, &scene, c.conn.open ? alpha : 0.0f, &c.frame, selected,
 			                    c.opt.faction < FACTION_COUNT ? c.opt.faction : -1);
+			if (c.player) controls_draw_world(&c.controls, &c.remote.sim, &c.view);
 			EndMode3D();
-			if (c.dragging) {
-				Vector2 m = GetMousePosition();
-				DrawRectangleLinesEx((Rectangle){fminf(c.drag_start.x, m.x), fminf(c.drag_start.y, m.y),
-				                                 fabsf(m.x - c.drag_start.x), fabsf(m.y - c.drag_start.y)},
-				                     1.0f, SELECTED_COLOR);
-			}
+			if (c.player) controls_draw_screen(&c.controls, &c.remote.sim);
 		}
-		client_overlay(&c, c.conn.open);
+		if (IsKeyPressed(KEY_F1)) c.overlay = !c.overlay;
+		if (c.overlay) client_overlay(&c, c.conn.open);
+		else client_banner(&c, c.conn.open);
 		EndDrawing();
+		// To the map: Tab, or Esc unless it just cancelled a placement.
+		if (c.opt.coord && (IsKeyPressed(KEY_TAB) || (IsKeyPressed(KEY_ESCAPE) && !was_placing))) client_to_map(&c, now);
+		else if (!c.opt.coord && IsKeyPressed(KEY_ESCAPE) && !was_placing) break;
 	}
 
 	conn_close(&c.conn, "client quit");

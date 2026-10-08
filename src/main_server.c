@@ -47,6 +47,7 @@
 #include "wire.c"
 #include "net.c"
 #include "coord.c"
+#include "world.c"
 
 enum { MAX_CLIENTS = 8, MAX_COMMANDS = 512 };
 static constexpr ptrdiff_t CLIENT_OUT = (ptrdiff_t)32 << 20;  // power of two
@@ -104,7 +105,7 @@ typedef struct {
 	char coord_host[64];
 	int coord_port, port;
 	Conn coord;
-	double coord_retry_at;
+	double coord_retry_at, next_status;
 	Outgoing outgoing[256];      // departures awaiting the coordinator's ack
 	uint64_t depart_seq;         // the last departure numbered
 	int outgoing_count;
@@ -387,6 +388,28 @@ static void coord_service(Server *s, double now)
 		}
 	}
 	if (!s->coord.open) return;
+	if (now >= s->next_status) {
+		// For the strategic map: who's here, in what strength.
+		s->next_status = now + 1.0;
+		ZoneStatus st = {.tick = s->sim.tick.v};
+		for (int f = 0; f < FACTION_COUNT; f++) {
+			const Units *u = &s->sim.factions[f].units;
+			int32_t units = 0, structures = 0, gates = 0;
+			for (ptrdiff_t i = 0; i < u->count; i++) {
+				if (unit_defs[u->type[i]].speed > 0.0f) units += unit_is_combat(u->type[i]);
+				else structures++;
+				gates += u->type[i] == UNIT_GATE && u->progress[i] >= 1.0f;
+			}
+			st.units[f] = (uint16_t)(units < 65535 ? units : 65535);
+			st.structures[f] = (uint16_t)(structures < 65535 ? structures : 65535);
+			st.gates[f] = (uint8_t)(gates < 255 ? gates : 255);
+		}
+		ArenaMark m = arena_mark(&s->encode);
+		ByteBuf b = bytebuf_make(&s->encode, 64);
+		put_zone_status(&b, &st);
+		conn_send(&s->coord, COORD_ZONE_STATUS, b.data, b.len, now);
+		arena_rewind(m);
+	}
 	conn_pump(&s->coord, now);
 	Frame f;
 	while (s->coord.open && conn_next(&s->coord, &f)) {

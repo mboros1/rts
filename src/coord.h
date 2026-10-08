@@ -32,8 +32,9 @@ typedef enum : uint8_t {
 	COORD_HOLD,             // zone: u64 id: no gate for that faction yet
 	COORD_DELIVER,          // coord: u64 id, u8 faction, u8 seed, counts
 	COORD_DIRECTORY_ASK,    // player
-	COORD_DIRECTORY,        // coord: u8 n, n x (name, host, u16 port, u8 up)
+	COORD_DIRECTORY,        // coord: Directory (world.h)
 	COORD_DEPART_ACK,       // coord: u64 seq: logged (or already had it)
+	COORD_ZONE_STATUS,      // zone, every second: ZoneStatus (world.h)
 } CoordMsg;
 
 // Names travel as u8 length + bytes; counts as UNIT_TYPE_COUNT x u32.

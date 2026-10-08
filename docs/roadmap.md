@@ -42,6 +42,10 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 4 | Economy | The production loop | Metal and energy, factories, units produced and fielded by the player and by bots |
 | 5 | Zones, gates, and the pool | The world spans processes | 2–3 zone processes plus a coordinator holding the transfer log and the faction unit pool; gate transfer survives a zone process being killed mid-transfer; gate seed opens a new zone; the player can switch zones |
 | 6 | Persistence and soak test | It survives as a persistent world | Logout converts units to defenses or an AI doctrine; zones snapshot to disk and restart cleanly; bots on both sides run for hours without divergence, memory growth, or crashes |
+| 7 | The world | The spikes are one game | `rts world` starts a persistent world of zones in the background and opens the strategic map; launch into a zone and play the full economy through the client; the world continues across restarts; saves and loads for testing; the sandbox is only a dev tool |
+| 8 | Transporters | Expansion across the zone graph | Only home zones start with bases; engineers build transporters; unpaired sends (adjacent only, raiders and engineers, landing in your strip at a point you pick) and paired sends (any unit, relayed hop by hop, each zone paying its hop, units waiting visibly at relays); landing areas queue; pool, gate seeds and logout policies gone; fixtures only set up state |
+| 9 | Entrench and away | Leaving the keyboard | Entrench is a paid order that transforms combat units into defenses and back; away, the bot plays your side |
+| 10 | Strategic bots | The world plays itself | A cross-zone layer for both sides expands, reinforces beachheads and relays; from a fresh world both sides push into the middle; an hour-long soak passes (with coordinator log compaction) |
 
 ## Spike 1 results (2026-10-07)
 
@@ -231,6 +235,37 @@ Done. A zone can be killed at any moment and comes back where it was.
   4096 transfers (it needs compaction: a snapshot line plus the tail).
   Replay segments are never pruned. Hours-long runs and real players are
   still ahead; the soak runs minutes at 8x.
+
+## Spike 7 results (2026-10-08)
+
+Done. `make play` (or `build/rts world`) is the game.
+
+- **The world** is a world file (`worlds/three.world`, `worlds/five.world`):
+  zones, their places on the strategic map, home zones, and links. `rts
+  world --new FILE` starts it: a coordinator and one `rts-server` per zone,
+  detached, so the world keeps running when the window closes. `rts world`
+  continues it (starting whatever isn't running), `--stop` saves every
+  zone and stops, `--save NAME` / `--load NAME` keep situations to come back
+  to, `--status` prints the map as text. Everything lives in `world/live`.
+- **The strategic map** comes from the coordinator's directory: each zone
+  reports its strength every second, and the coordinator adds links and
+  units in transit. Click a zone to launch in; Tab or Esc goes back.
+- **One set of controls.** Selection, orders, building, factory queues and
+  the HUD moved from the sandbox into `controls.c`, which the client and the
+  sandbox share. The sandbox (`rts --scenario`) is a dev tool and gets no
+  features of its own.
+- **A stand-in player**: `rts --coord ... --bot` runs the game's bot on the
+  client's own view of its faction and sends its orders as a player's.
+  `--journey map:3,west:20,...` scripts the trip around the map. Clips
+  follow a journey across zones and draw the map screens.
+- **Evidence**: `tools/world-smoke` (in `make check`, 12 s, in parallel):
+  a new world, a journey through two zones with the bot as the player and
+  every faction hash matching, stop and continue, save and load, the
+  journey's clip. Demo 09 is a journey through a running world.
+- **Not yet**: every zone still starts with both bases and the bots play
+  them all the same, so the map has no shape yet (spike 8). The map shows
+  both sides' strength everywhere, ignoring fog. Units only cross zones
+  through spike 5's gates, which the client can't order yet.
 
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client

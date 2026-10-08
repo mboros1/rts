@@ -1,0 +1,59 @@
+#!/bin/sh
+# tools/world-smoke BIN_DIR OUT_DIR: the game as a player gets it, through
+# `rts world`. Checks that:
+#   - a new world starts its coordinator and zones in the background, and the
+#     map (as text) shows every zone up and reporting;
+#   - a player's journey (map, a zone, the map, another zone) keeps its
+#     faction in step, with the bot playing as that player;
+#   - stopping saves every zone and the world continues where it was;
+#   - a save can be loaded back;
+#   - a clip of the journey renders, map and zones.
+set -eu
+bin=$1; out=$2
+rm -rf "$out"; mkdir -p "$out"
+port=$((35000 + ($$ % 2500) * 4)) # its own band, 4 ports apart: check stages run side by side
+sed "s/^port .*/port $port/" worlds/three.world > "$out/three.world"
+world="$bin/rts world --dir $out/w"
+fail() { echo "world-smoke: $1"; for f in "$out"/w/live/*.out; do echo "== $f"; tail -5 "$f"; done; $world --stop >/dev/null 2>&1 || true; exit 1; }
+seconds() { # a zone's clock, as h:mm:ss in the status line, in seconds
+	$world --status | awk -v z="$1" '$1 == z { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+:[0-9][0-9]:[0-9][0-9]$/) { split($i, t, ":"); print t[1] * 3600 + t[2] * 60 + t[3]; exit } }'
+}
+
+$world --new "$out/three.world" --headless --speed 8 > "$out/start.txt" || fail "cannot start"
+for i in 1 2 3 4 5 6 7 8 9 10; do # until every zone has reported
+	$world --status > "$out/status1.txt"
+	[ "$(grep -c ':[0-9][0-9]:' "$out/status1.txt")" = 3 ] && break
+	sleep 0.2
+done
+[ "$(grep -c ' up ' "$out/status1.txt")" = 3 ] || fail "not all three zones up: $(cat "$out/status1.txt")"
+grep -q 'links: west-middle middle-east' "$out/status1.txt" || fail "no links on the map"
+
+"$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --bot --journey map:0.5,west:2.5,map:0.5,middle:2 \
+	--netlog "$out/journey.netlog" --stats "$out/journey.txt" > "$out/journey.out" 2>&1 || fail "the journey failed"
+grep -q '^zones_visited 2$' "$out/journey.txt" || fail "visited $(grep zones_visited "$out/journey.txt")"
+grep -q '^digest_mismatches 0$' "$out/journey.txt" || fail "faction hash mismatch on the journey"
+grep -q '^reconnects 0$' "$out/journey.txt" || fail "launches counted as reconnects"
+[ "$(awk '/^commands_sent/ { print $2 }' "$out/journey.txt")" -gt 0 ] || fail "the bot sent no orders as the player"
+
+before=$(seconds west)
+$world --stop > /dev/null || fail "cannot stop"
+for z in west middle east; do [ -s "$out/w/live/$z.state" ] || fail "$z didn't save"; done
+pgrep -f "$out/w/live" > /dev/null && fail "processes left running after --stop"
+$world --headless --speed 8 > /dev/null || fail "cannot continue"
+sleep 1
+after=$(seconds west)
+grep -q 'resumed' "$out/w/live/west.out" || fail "west didn't resume from its state"
+[ "$after" -ge "$before" ] || fail "west went back in time: $before s, then $after s"
+
+$world --save smoke --headless --speed 8 > /dev/null || fail "cannot save"
+sleep 1.5
+later=$(seconds west)
+$world --load smoke --headless --speed 8 > /dev/null || fail "cannot load"
+sleep 0.5
+loaded=$(seconds west)
+[ "$loaded" -lt "$later" ] || fail "loading didn't go back: $later s, then $loaded s"
+$world --stop > /dev/null || fail "cannot stop at the end"
+
+"$bin/rts" clip --netlog "$out/journey.netlog" --sheet "$out/journey.png" --frames 4 --size 640x360 \
+	> "$out/clip.txt" 2>&1 || fail "the journey's clip didn't render: $(tail -2 "$out/clip.txt")"
+echo "world-smoke: ok (west at ${before}s, resumed at ${after}s, save/load ${later}s -> ${loaded}s)"

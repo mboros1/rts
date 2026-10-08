@@ -1,0 +1,8 @@
+# Three zones in a line: blue's home in the west, red's in the east, and the
+# middle to fight over.
+port 7700
+zone west   0.18 0.5 home blue
+zone middle 0.5  0.5
+zone east   0.82 0.5 home red
+link west middle
+link middle east

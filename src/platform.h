@@ -42,6 +42,13 @@ int platform_run(const char *const argv[]);
 // Collect background children that have exited. Call once a frame.
 void platform_reap_children(void);
 
+// Start a long-lived process in its own session, so it outlives this one and
+// a Ctrl-C here; its stdout and stderr append to log_path. 0 on failure.
+int platform_spawn_detached(const char *const argv[], const char *log_path);
+// Is this process still running? Send it SIGTERM (asks it to save and stop).
+bool platform_alive(int pid);
+bool platform_terminate(int pid);
+
 bool platform_make_dir(const char *path);   // true if it exists afterwards
 bool platform_file_exists(const char *path);
 

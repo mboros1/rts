@@ -478,6 +478,7 @@ typedef struct {
 	SimConfig config;
 	V2 base[FACTION_COUNT];
 	bool player;                 // a faction stream (simulated); else a mirror
+	bool player_known;
 	char info[256];
 	double t_start, t_end;       // first snapshot, last record
 	Terrain terrain;
@@ -489,11 +490,19 @@ typedef struct {
 	int64_t digests, mismatches, rejoins;
 	Arrival *arrivals;
 	ptrdiff_t arrived, window_start;
+	// A journey (client.c --journey): the map between zones, zones changing.
+	Arena *work;
+	uint8_t faction;
+	Directory dir;
+	bool have_dir, on_map;
+	bool launching;              // left the map: the next connection is a launch
+	bool world_changed;          // a new zone: the renderer needs its terrain
+	char zone[ZONE_NAME];
 } Playback;
 
 static bool playback_open(Playback *p, const char *path, Arena *work)
 {
-	*p = (Playback){.path = path, .connected = true, .t_start = -1.0};
+	*p = (Playback){.path = path, .connected = true, .t_start = -1.0, .work = work};
 	Str file;
 	if (!platform_read_file(work, path, &file) || !netlog_open(&p->nr, file)) return false;
 	bool welcomed = false;
@@ -510,16 +519,19 @@ static bool playback_open(Playback *p, const char *path, Arena *work)
 			if (!wire_get_config(&r, &p->config)) return false;
 			for (int f = 0; f < FACTION_COUNT; f++) p->base[f] = v2(getf(&r), getf(&r));
 			welcomed = !r.bad;
-		} else if ((rec.kind == MSG_SNAPSHOT || rec.kind == MSG_FACTION_SNAPSHOT) && p->t_start < 0.0) {
+		} else if ((rec.kind == MSG_SNAPSHOT || rec.kind == MSG_FACTION_SNAPSHOT) && !p->player_known) {
 			// What the log holds decides how to replay it, not the faction it
 			// asked for: spike 2 logs are mirrors whoever recorded them.
-			p->t_start = rec.t;
+			if (p->t_start < 0.0) p->t_start = rec.t;
 			p->player = rec.kind == MSG_FACTION_SNAPSHOT;
+			p->player_known = true;
+		} else if (rec.kind == COORD_DIRECTORY && p->t_start < 0.0) {
+			p->t_start = rec.t; // a journey can begin on the map
 		} else if (rec.kind == NETLOG_INFO && !p->info[0]) {
 			snprintf(p->info, sizeof p->info, "%.*s", (int)rec.len, (const char *)rec.data);
 		}
 	}
-	if (!welcomed || p->t_start < 0.0) return false;
+	if (!welcomed || !p->player_known) return false;
 	terrain_generate(&p->terrain, work, p->config.seed);
 	if (p->player) {
 		// The faction is whichever the snapshot is for: read from WELCOME again.
@@ -532,6 +544,7 @@ static bool playback_open(Playback *p, const char *path, Arena *work)
 				break;
 			}
 		if (faction >= FACTION_COUNT) return false;
+		p->faction = faction;
 		remote_init(&p->remote, &p->config, (FactionId){faction}, work);
 	} else {
 		mirror_init(&p->mirror, work, p->config.max_units, p->config.max_projectiles);
@@ -542,6 +555,32 @@ static bool playback_open(Playback *p, const char *path, Arena *work)
 
 static int64_t playback_tick(const Playback *p) { return p->player ? p->remote.sim.tick.v : p->mirror.tick; }
 static uint16_t playback_dilation(const Playback *p) { return p->player ? p->remote.dilation : p->mirror.dilation; }
+
+// Joining a zone: the same match carries on; another zone starts over on
+// its own terrain.
+static void playback_welcome(Playback *p, ByteReader *r)
+{
+	get32(r);
+	get8(r);
+	SimConfig config;
+	V2 base[FACTION_COUNT];
+	if (!wire_get_config(r, &config)) return;
+	for (int f = 0; f < FACTION_COUNT; f++) base[f] = v2(getf(r), getf(r));
+	if (r->bad) return;
+	p->on_map = false;
+	if (sim_config_equal(&config, &p->config)) return;
+	p->config = config;
+	memcpy(p->base, base, sizeof base);
+	terrain_generate(&p->terrain, p->work, config.seed);
+	if (p->player) {
+		remote_destroy(&p->remote);
+		remote_init(&p->remote, &config, (FactionId){p->faction}, p->work);
+	} else {
+		mirror_init(&p->mirror, p->work, config.max_units, config.max_projectiles);
+	}
+	p->have_state = false;
+	p->world_changed = true;
+}
 
 // Apply every record up to time t.
 static void playback_advance(Playback *p, double t)
@@ -570,7 +609,11 @@ static void playback_advance(Playback *p, double t)
 			p->last_delta_t = rec.t;
 			p->digests += had_digest;
 			p->mismatches += !matched;
-			if (snapshot && rec.t > p->t_start) {
+			if (snapshot && p->launching) {
+				snprintf(p->status, sizeof p->status, "launched into %s", p->zone[0] ? p->zone : "a zone");
+				p->status_since = rec.t;
+				p->launching = false;
+			} else if (snapshot && rec.t > p->t_start) {
 				snprintf(p->status, sizeof p->status, "rejoined: %ssnapshot of %.1f KB at tick %lld",
 				         p->player ? "faction " : "", (double)rec.len / 1024.0, (long long)playback_tick(p));
 				p->status_since = rec.t;
@@ -579,12 +622,26 @@ static void playback_advance(Playback *p, double t)
 			double sent;
 			memcpy(&sent, rec.data, sizeof sent);
 			p->rtt = rec.t - sent;
+		} else if (rec.kind == MSG_WELCOME) {
+			playback_welcome(p, &r);
+		} else if (rec.kind == COORD_DIRECTORY) {
+			Directory d;
+			if (get_directory(&r, &d)) {
+				p->dir = d;
+				p->have_dir = true;
+			}
+		} else if (rec.kind == NETLOG_MAP) {
+			p->on_map = true;
+			p->launching = true;
+			p->connected = true;    // not lost: looking at the map
+		} else if (rec.kind == NETLOG_INFO && rec.len > 5 && !memcmp(rec.data, "zone ", 5)) {
+			snprintf(p->zone, sizeof p->zone, "%.*s", (int)(rec.len - 5), (const char *)rec.data + 5);
 		} else if (rec.kind == NETLOG_DISCONNECTED) {
 			p->connected = false;
 			snprintf(p->status, sizeof p->status, "connection lost (%.*s)", (int)rec.len, (const char *)rec.data);
 			p->status_since = rec.t;
 		} else if (rec.kind == NETLOG_CONNECTED) {
-			p->rejoins += !p->connected;
+			p->rejoins += !p->connected && !p->launching;
 			p->connected = true;
 		}
 	}
@@ -708,17 +765,30 @@ int clip_netlog(const ClipRequest *req)
 	for (int64_t k = 0; k < frames; k++) {
 		double t = t_start + (double)k / CLIP_FPS;
 		for (int v = 0; v < count; v++) playback_advance(&views[v], t);
-		if (!views[0].have_state || (count == 2 && !views[1].have_state)) continue;
+		if (views[0].world_changed) {
+			// Into another zone: its terrain, and a camera that finds its way again.
+			renderer_unload(&renderer);
+			renderer_init(&renderer, &views[0].terrain, views[0].config.max_units, &work);
+			views[0].world_changed = false;
+			director = (Director){0};
+		}
+		bool map = count == 1 && views[0].on_map && views[0].have_dir;
+		if (!map && (!views[0].have_state || (count == 2 && !views[1].have_state))) continue;
 		arena_reset(&frame);
-		Scene scenes[2];
-		for (int v = 0; v < count; v++) scenes[v] = playback_scene(&views[v], &frame);
-		// Frame the whole picture when there is one to compare against.
-		director_update(&director, &scenes[count - 1]);
+		Scene scenes[2] = {0};
+		if (!map) {
+			for (int v = 0; v < count; v++) scenes[v] = playback_scene(&views[v], &frame);
+			// Frame the whole picture when there is one to compare against.
+			director_update(&director, &scenes[count - 1]);
+		}
 		bool sample = out_wants_sample(&out, k, frames);
 		if (!out.video && !sample) continue;
 		Camera3D cam = render_camera(&views[0].terrain, director.focus, director.distance);
 
-		if (count == 1) {
+		if (map) {
+			out_begin(&out);
+			map_draw(&views[0].dir, views[0].player ? views[0].faction : -1, -1, rw, rh);
+		} else if (count == 1) {
 			out_begin(&out);
 			playback_draw(&views[0], &renderer, &scenes[0], cam, t, &frame, rw, rh, nullptr);
 		} else {
@@ -747,8 +817,10 @@ int clip_netlog(const ClipRequest *req)
 			        scenes[0].units[0].count, scenes[0].units[1].count,
 			        scenes[0].shells[0].count + scenes[0].shells[1].count, playback_rate(p) / 1024.0,
 			        p->connected ? "connected" : "disconnected");
-		out_end(&out, sample, TextFormat("%.1fs  tick %lld  %s", t - t_start, (long long)playback_tick(p),
-		                                 p->connected ? "" : "DISCONNECTED"));
+		out_end(&out, sample, map ? TextFormat("%.1fs  strategic map", t - t_start)
+		                          : TextFormat("%.1fs  %s%stick %lld  %s", t - t_start, p->zone[0] ? p->zone : "",
+		                                       p->zone[0] ? "  " : "", (long long)playback_tick(p),
+		                                       p->connected ? "" : "DISCONNECTED"));
 	}
 	int64_t mismatches = 0;
 	if (stats) {

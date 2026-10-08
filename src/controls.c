@@ -1,0 +1,195 @@
+#include "controls.h"
+
+#include <math.h>
+
+#include "render.h"
+
+void controls_init(Controls *c, FactionId me, Arena *a, ptrdiff_t max_units)
+{
+	*c = (Controls){.me = me, .selection = PUSH(a, UnitHandle, max_units), .placing = -1};
+}
+
+void controls_clear(Controls *c)
+{
+	c->selection_count = 0;
+	c->dragging = false;
+	c->placing = -1;
+}
+
+static const Units *own_units(const Controls *c, const Sim *sim) { return &sim->factions[c->me.v].units; }
+
+static void select_units(Controls *c, const Sim *sim, const View *view, Rectangle box, bool add, bool click)
+{
+	const Units *u = own_units(c, sim);
+	if (!add) c->selection_count = 0;
+	ptrdiff_t best = -1;
+	float best_d2 = 14.0f * 14.0f;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		Vector2 s = GetWorldToScreen((Vector3){u->px[i], u->py[i] + 0.5f, u->pz[i]}, view->camera);
+		if (click) {
+			float dx = s.x - box.x, dy = s.y - box.y;
+			if (dx * dx + dy * dy < best_d2) {
+				best = i;
+				best_d2 = dx * dx + dy * dy;
+			}
+		} else if (CheckCollisionPointRec(s, box)) {
+			c->selection[c->selection_count++] = units_handle(u, i);
+		}
+	}
+	if (click && best >= 0) c->selection[c->selection_count++] = units_handle(u, best);
+}
+
+uint8_t *controls_selected(Controls *c, const Units *own, Arena *frame)
+{
+	uint8_t *marked = PUSH(frame, uint8_t, own->count > 0 ? own->count : 1);
+	ptrdiff_t kept = 0;
+	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
+		ptrdiff_t i = units_find(own, c->selection[k]);
+		if (i < 0 || marked[i]) continue;
+		marked[i] = 1;
+		c->selection[kept++] = c->selection[k];
+	}
+	c->selection_count = kept;
+	return marked;
+}
+
+static bool selection_has(const Controls *c, const Sim *sim, UnitType type)
+{
+	const Units *u = own_units(c, sim);
+	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
+		ptrdiff_t d = units_find(u, c->selection[k]);
+		if (d >= 0 && u->type[d] == type) return true;
+	}
+	return false;
+}
+
+// Where a structure would go for this click: extractors snap to the spot.
+static V2 placement_site(const Sim *sim, UnitType type, V2 at)
+{
+	if (type != UNIT_EXTRACTOR) return at;
+	int32_t best = -1;
+	float best_d2 = 15.0f * 15.0f;
+	for (int32_t k = 0; k < sim->spots.count; k++) {
+		float d2 = v2_len2(v2_sub(sim->spots.at[k], at));
+		if (d2 < best_d2) {
+			best = k;
+			best_d2 = d2;
+		}
+	}
+	return best >= 0 ? sim->spots.at[best] : at;
+}
+
+static void order(Controls *c, Arena *frame, Order *out, ptrdiff_t cap, ptrdiff_t *n, Order o)
+{
+	if (c->selection_count == 0 || *n == cap) return;
+	o.units = arena_copy(frame, c->selection, c->selection_count * (ptrdiff_t)sizeof(UnitHandle), alignof(UnitHandle));
+	o.count = c->selection_count;
+	out[(*n)++] = o;
+}
+
+ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *frame, Order *out, ptrdiff_t cap)
+{
+	ptrdiff_t n = 0;
+	Vector2 mouse = GetMousePosition();
+	bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+	if (IsKeyPressed(KEY_X)) order(c, frame, out, cap, &n, (Order){.kind = COMMAND_STOP});
+
+	if (sim->config.economy) {
+		if (selection_has(c, sim, UNIT_ENGINEER)) {
+			if (IsKeyPressed(KEY_E)) c->placing = UNIT_EXTRACTOR;
+			if (IsKeyPressed(KEY_G)) c->placing = UNIT_GENERATOR;
+			if (IsKeyPressed(KEY_F)) c->placing = UNIT_FACTORY;
+		}
+		if (selection_has(c, sim, UNIT_FACTORY)) {
+			const UnitType keys[] = {UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_ENGINEER};
+			for (int k = 0; k < 4; k++)
+				if (IsKeyPressed(KEY_ONE + k))
+					order(c, frame, out, cap, &n, (Order){.kind = COMMAND_PRODUCE, .type = keys[k], .amount = 1,
+					                                      .flags = shift ? COMMAND_REPEAT : 0});
+			if (IsKeyPressed(KEY_ZERO)) order(c, frame, out, cap, &n, (Order){.kind = COMMAND_PRODUCE, .amount = 0});
+		}
+		if (c->placing >= 0) {
+			// A click that places or cancels a structure isn't a selection.
+			if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+				c->placing = -1;
+				return n;
+			}
+			V2 at;
+			if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && pick_ground(view, &sim->terrain, mouse, &at)) {
+				UnitType type = (UnitType)c->placing;
+				order(c, frame, out, cap, &n, (Order){.kind = COMMAND_BUILD, .target = placement_site(sim, type, at), .type = type});
+				if (!shift) c->placing = -1;
+			}
+			return n;
+		}
+	}
+
+	if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+		c->dragging = true;
+		c->drag_start = mouse;
+	}
+	if (c->dragging && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+		c->dragging = false;
+		Rectangle box = {fminf(c->drag_start.x, mouse.x), fminf(c->drag_start.y, mouse.y),
+		                 fabsf(mouse.x - c->drag_start.x), fabsf(mouse.y - c->drag_start.y)};
+		bool click = box.width < 4.0f && box.height < 4.0f;
+		if (click) box = (Rectangle){mouse.x, mouse.y, 0, 0};
+		select_units(c, sim, view, box, shift, click);
+	}
+	V2 at;
+	if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && pick_ground(view, &sim->terrain, mouse, &at)) {
+		bool move = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+		order(c, frame, out, cap, &n, (Order){.kind = move ? COMMAND_MOVE : COMMAND_ATTACK_MOVE, .target = at});
+	}
+	return n;
+}
+
+void controls_draw_world(const Controls *c, const Sim *sim, const View *view)
+{
+	V2 ghost;
+	if (c->placing < 0 || !pick_ground(view, &sim->terrain, GetMousePosition(), &ghost)) return;
+	UnitType type = (UnitType)c->placing;
+	ghost = placement_site(sim, type, ghost);
+	bool ok = placement_ok(sim, c->me, type, ghost);
+	const UnitDef *def = &unit_defs[type];
+	Vector3 at = {ghost.x, terrain_height(&sim->terrain, ghost.x, ghost.z) + def->height * 0.5f, ghost.z};
+	DrawCubeWires(at, def->radius * 2.0f, def->height, def->radius * 2.0f, ok ? GREEN : RED);
+}
+
+void controls_draw_screen(const Controls *c, const Sim *sim)
+{
+	if (c->dragging) {
+		Vector2 m = GetMousePosition();
+		DrawRectangleLinesEx((Rectangle){fminf(c->drag_start.x, m.x), fminf(c->drag_start.y, m.y),
+		                                 fabsf(m.x - c->drag_start.x), fabsf(m.y - c->drag_start.y)},
+		                     1.0f, SELECTED_COLOR);
+	}
+	// The HUD: a bar along the bottom.
+	int h = GetScreenHeight(), y = h - 74;
+	DrawRectangle(0, y - 8, GetScreenWidth(), 82, (Color){0, 0, 0, 150});
+	if (sim->config.economy) {
+		const Economy *e = &sim->factions[c->me.v].economy;
+		DrawText(TextFormat("metal %.0f (+%.1f -%.1f/s)   energy %.0f (+%.0f -%.0f/s)%s", e->metal, e->metal_income,
+		                    e->metal_spent, e->energy, e->energy_income, e->energy_spent,
+		                    e->rate < 0.99f ? TextFormat("   STALL %.0f%%", e->rate * 100.0f) : ""),
+		         14, y, 20, e->rate < 0.99f ? ORANGE : (Color){230, 220, 160, 255});
+	}
+	// What's selected, by type.
+	const Units *u = own_units(c, sim);
+	int counts[UNIT_TYPE_COUNT] = {0};
+	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
+		ptrdiff_t d = units_find(u, c->selection[k]);
+		if (d >= 0) counts[u->type[d]]++;
+	}
+	char sel[256] = "nothing selected";
+	int used = 0;
+	for (int t = 0; t < UNIT_TYPE_COUNT; t++)
+		if (counts[t] && used < (int)sizeof sel)
+			used += snprintf(sel + used, sizeof sel - (size_t)used, "%s%d %s", used ? ", " : "", counts[t], unit_defs[t].name);
+	if (c->placing >= 0) snprintf(sel, sizeof sel, "placing a %s: click to build, esc to cancel", unit_defs[c->placing].name);
+	DrawText(sel, 14, y + 26, 18, RAYWHITE);
+	DrawText(sim->config.economy
+	             ? "drag select | right attack-move | ctrl+right move | X stop | engineers: E G F | factories: 1-4, shift repeat, 0 clear"
+	             : "drag select | right attack-move | ctrl+right move | X stop",
+	         14, y + 50, 14, GRAY);
+}

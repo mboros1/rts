@@ -6,6 +6,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#include <fcntl.h>
+#include <signal.h>
 #include <spawn.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -165,6 +167,9 @@ bool platform_clipboard_copy_file(const char *path) { (void)path; return false; 
 bool platform_spawn(const char *const argv[]) { (void)argv; return false; }
 int platform_run(const char *const argv[]) { (void)argv; return -1; }
 void platform_reap_children(void) {}
+int platform_spawn_detached(const char *const argv[], const char *log_path) { (void)argv, (void)log_path; return 0; }
+bool platform_alive(int pid) { (void)pid; return false; }
+bool platform_terminate(int pid) { (void)pid; return false; }
 
 #else
 
@@ -179,6 +184,35 @@ bool platform_spawn(const char *const argv[])
 	pid_t pid;
 	return spawn_child(argv, &pid);
 }
+
+int platform_spawn_detached(const char *const argv[], const char *log_path)
+{
+	posix_spawnattr_t attr;
+	posix_spawn_file_actions_t files;
+	if (posix_spawnattr_init(&attr) != 0) return 0;
+	if (posix_spawn_file_actions_init(&files) != 0) {
+		posix_spawnattr_destroy(&attr);
+		return 0;
+	}
+	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
+	posix_spawn_file_actions_addopen(&files, 0, "/dev/null", O_RDONLY, 0);
+	posix_spawn_file_actions_addopen(&files, 1, log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	posix_spawn_file_actions_adddup2(&files, 1, 2);
+	pid_t pid = 0;
+	bool ok = posix_spawnp(&pid, argv[0], &files, &attr, (char *const *)argv, environ) == 0;
+	posix_spawn_file_actions_destroy(&files);
+	posix_spawnattr_destroy(&attr);
+	return ok ? (int)pid : 0;
+}
+
+bool platform_alive(int pid)
+{
+	if (pid <= 0) return false;
+	waitpid(pid, nullptr, WNOHANG); // reap it if it was ours and has exited
+	return kill(pid, 0) == 0;
+}
+
+bool platform_terminate(int pid) { return pid > 0 && kill(pid, SIGTERM) == 0; }
 
 int platform_run(const char *const argv[])
 {

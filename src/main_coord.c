@@ -3,7 +3,12 @@
 // which zones exist. Its log is its memory: kill it, restart it, and it
 // picks up every transfer still owed.
 //
-//   rts-coord [--port N] [--log PATH] [--retry SECONDS]
+//   rts-coord [--port N] [--log PATH] [--retry SECONDS] [--world PATH]
+//
+// With --world (world.h) it knows the zones, their places on the strategic
+// map and the links between them before any zone is up. Either way, players
+// get the directory: each zone with its last status report, and the units
+// in transit between zones.
 //
 // Unity build: this file is the whole program.
 #include "base.h"
@@ -15,6 +20,7 @@
 #include "terrain.c"
 #include "sim.c"
 #include "coord.c"
+#include "world.c"
 #include "net.c"
 
 enum { MAX_PEERS = 32 };
@@ -29,10 +35,15 @@ typedef struct {
 	char name[ZONE_NAME];
 	int port;                   // where its players connect
 	int peer;                   // -1 while down
+	float x, y;                 // from the world, if there is one
+	int8_t home;
+	bool reported;
+	ZoneStatus status;
 } Zone;
 
 typedef struct {
 	Ledger ledger;
+	World world;                // link_count 0 without --world
 	Zone zones[COORD_MAX_ZONES];
 	int zone_count;
 	Peer peers[MAX_PEERS];
@@ -74,6 +85,44 @@ static void deliver(Coord *c, double now)
 	}
 }
 
+static void directory(const Coord *c, Directory *d)
+{
+	*d = (Directory){.zone_count = c->zone_count, .link_count = c->world.link_count};
+	for (int k = 0; k < c->zone_count; k++) {
+		const Zone *z = &c->zones[k];
+		d->zones[k] = (DirectoryZone){.port = z->port, .up = z->peer >= 0, .x = z->x, .y = z->y, .home = z->home,
+		                              .reported = z->reported, .status = z->status};
+		snprintf(d->zones[k].name, ZONE_NAME, "%s", z->name);
+		snprintf(d->zones[k].host, sizeof d->zones[k].host, "127.0.0.1");
+		if (!c->world.zone_count) { // no world file: a row, in order of arrival
+			d->zones[k].x = (float)(k + 1) / (float)(c->zone_count + 1);
+			d->zones[k].y = 0.5f;
+		}
+	}
+	memcpy(d->links, c->world.links, sizeof d->links);
+	// Pending transfers between zones, summed by route and side.
+	for (int32_t k = 0; k < c->ledger.transfer_count; k++) {
+		const Transfer *t = &c->ledger.transfers[k];
+		if (t->delivered) continue;
+		int src = -1, dst = -1;
+		for (int i = 0; i < c->zone_count; i++) {
+			if (!strcmp(c->zones[i].name, t->src)) src = i;
+			if (!strcmp(c->zones[i].name, t->dst)) dst = i;
+		}
+		if (src < 0 || dst < 0) continue;
+		int32_t units = 0;
+		for (int u = 0; u < UNIT_TYPE_COUNT; u++) units += t->counts[u];
+		int i = 0;
+		while (i < d->transit_count && !(d->transit[i].src == src && d->transit[i].dst == dst
+		                                 && d->transit[i].faction == t->faction)) i++;
+		if (i == d->transit_count) {
+			if (i == DIRECTORY_MAX_TRANSIT) continue;
+			d->transit[d->transit_count++] = (DirectoryTransit){(uint8_t)src, (uint8_t)dst, t->faction, 0};
+		}
+		d->transit[i].units += units;
+	}
+}
+
 static void on_frame(Coord *c, int pi, Frame *f, double now)
 {
 	Peer *p = &c->peers[pi];
@@ -90,8 +139,13 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 			break;
 		}
 		Zone *z = zone_named(c, name);
+		if (!z && c->world.zone_count) {
+			conn_close(&p->conn, "no such zone in this world");
+			break;
+		}
 		if (!z && c->zone_count < COORD_MAX_ZONES) {
 			z = &c->zones[c->zone_count++];
+			*z = (Zone){.peer = -1, .home = -1};
 			snprintf(z->name, sizeof z->name, "%s", name);
 		}
 		if (!z) break;
@@ -139,16 +193,19 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 		if (t) t->retry_at = now + c->retry; // no gate there yet: ask again later
 		break;
 	}
+	case COORD_ZONE_STATUS: {
+		ZoneStatus st;
+		if (!from || !get_zone_status(&r, &st)) break;
+		from->status = st;
+		from->reported = true;
+		break;
+	}
 	case COORD_DIRECTORY_ASK: {
+		Directory d;
+		directory(c, &d);
 		arena_reset(&c->out);
-		ByteBuf b = bytebuf_make(&c->out, 1024);
-		put8(&b, (uint8_t)c->zone_count);
-		for (int k = 0; k < c->zone_count; k++) {
-			put_name(&b, c->zones[k].name);
-			put_name(&b, "127.0.0.1");
-			put16(&b, (uint16_t)c->zones[k].port);
-			put8(&b, c->zones[k].peer >= 0);
-		}
+		ByteBuf b = bytebuf_make(&c->out, 8192);
+		put_directory(&b, &d);
 		send_to(c, p, COORD_DIRECTORY, &b, now);
 		break;
 	}
@@ -161,17 +218,32 @@ int main(int argc, char **argv)
 {
 	static Coord c;
 	int port = 7700;
-	const char *log_path = "coord.log";
+	const char *log_path = "coord.log", *world_path = nullptr;
 	c.retry = 2.0;
 	for (int i = 1; i + 1 < argc; i += 2) {
 		if (!strcmp(argv[i], "--port")) port = atoi(argv[i + 1]);
 		else if (!strcmp(argv[i], "--log")) log_path = argv[i + 1];
 		else if (!strcmp(argv[i], "--retry")) c.retry = atof(argv[i + 1]);
-		else fatal("usage: rts-coord [--port N] [--log PATH] [--retry SECONDS]");
+		else if (!strcmp(argv[i], "--world")) world_path = argv[i + 1];
+		else fatal("usage: rts-coord [--port N] [--log PATH] [--retry SECONDS] [--world PATH]");
 	}
 	signal(SIGPIPE, SIG_IGN);
 	c.program = arena_create("coord", (ptrdiff_t)256 << 20);
 	c.out = arena_create("coord out", (ptrdiff_t)1 << 20);
+	for (int k = 0; k < COORD_MAX_ZONES; k++) c.zones[k] = (Zone){.peer = -1, .home = -1};
+	if (world_path) {
+		Str text;
+		char err[256];
+		if (!platform_read_file(&c.program, world_path, &text)) fatal("cannot read %s", world_path);
+		if (!world_parse(&c.world, text, world_path, err, sizeof err)) fatal("%s", err);
+		for (int k = 0; k < c.world.zone_count; k++) {
+			const WorldZone *w = &c.world.zones[k];
+			Zone *z = &c.zones[c.zone_count++];
+			*z = (Zone){.peer = -1, .x = w->x, .y = w->y, .home = w->home,
+			            .port = c.world.port + 1 + k};
+			snprintf(z->name, sizeof z->name, "%s", w->name);
+		}
+	}
 
 	// Rebuild from the log, then keep appending to it.
 	Str text;
@@ -182,7 +254,6 @@ int main(int argc, char **argv)
 		       ledger_pending(&c.ledger));
 	}
 	if (!(c.ledger.log = fopen(log_path, "a"))) fatal("cannot open %s", log_path);
-	for (int k = 0; k < COORD_MAX_ZONES; k++) c.zones[k].peer = -1;
 	for (int k = 0; k < MAX_PEERS; k++) conn_init(&c.peers[k].conn, &c.program, -1, 1 << 20, 1 << 20);
 	int listen_fd = net_listen(port);
 	if (listen_fd < 0) fatal("cannot listen on port %d", port);

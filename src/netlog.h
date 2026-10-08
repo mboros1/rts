@@ -5,8 +5,8 @@
 //   header  "RTSN" u32 version
 //   record  f64 seconds since the client started, u8 kind, u32 length, bytes
 //
-// Kinds are MsgKind for frames, or one of the events below with a short
-// text payload.
+// Kinds are MsgKind for frames, COORD_DIRECTORY for the world's directory
+// (coord.h), or one of the events below with a short text payload.
 #pragma once
 
 #include "base.h"
@@ -17,6 +17,7 @@ typedef enum : uint8_t {
 	NETLOG_INFO = 200,          // "faction blue, latency 120 ms, jitter 30 ms"
 	NETLOG_CONNECTED,
 	NETLOG_DISCONNECTED,        // payload: the reason
+	NETLOG_MAP,                 // went to the strategic map (COORD_DIRECTORY records follow)
 } NetlogEvent;
 
 static inline void netlog_begin(FILE *f)
