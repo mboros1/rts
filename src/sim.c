@@ -40,10 +40,14 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.name = "factory", .radius = 4.0f, .sight = 30.0f, .height = 3.5f, .hp = 1500.0f,
 		.build_power = 15.0f, .metal_cost = 300.0f, .energy_cost = 1500.0f, .build_time = 300.0f,
 	},
+	[UNIT_GATE] = {
+		.name = "gate", .radius = 5.0f, .sight = 30.0f, .height = 6.0f, .hp = 2500.0f,
+		.metal_cost = 600.0f, .energy_cost = 6000.0f, .build_time = 600.0f,
+	},
 };
 
 static constexpr float MAX_SIGHT = 48.0f;
-static constexpr float MAX_RADIUS = 4.0f;           // factories; separation reach
+static constexpr float MAX_RADIUS = 5.0f;           // gates; separation reach
 
 // The economy's constants: what a faction starts with and earns for free
 // (its headquarters), and how close a builder must be.
@@ -139,6 +143,8 @@ static void units_init(Units *u, Arena *a, ptrdiff_t cap)
 	u->queue = PUSH(a, uint64_t, cap);
 	u->queue_len = PUSH(a, uint8_t, cap);
 	u->repeat = PUSH(a, uint8_t, cap);
+	u->dest = PUSH(a, uint8_t, cap);
+	u->seeded = PUSH(a, uint8_t, cap);
 	// Free list pops from the end, so the first spawn gets slot 0.
 	for (ptrdiff_t s = 0; s < cap; s++) {
 		u->slot_dense[s] = -1;
@@ -190,6 +196,8 @@ static ptrdiff_t units_spawn(Units *u, UnitType type, float x, float z, float y)
 	u->queue[d] = 0;
 	u->queue_len[d] = 0;
 	u->repeat[d] = 0;
+	u->dest[d] = 0;
+	u->seeded[d] = 0;
 	return d;
 }
 
@@ -205,7 +213,7 @@ static void units_kill(Units *u, ptrdiff_t d)
 		MOVE(hp); MOVE(type); MOVE(order); MOVE(tx); MOVE(tz);
 		MOVE(cooldown); MOVE(target); MOVE(engaged);
 		MOVE(progress); MOVE(build_type); MOVE(building); MOVE(work);
-		MOVE(queue); MOVE(queue_len); MOVE(repeat);
+		MOVE(queue); MOVE(queue_len); MOVE(repeat); MOVE(dest); MOVE(seeded);
 #undef MOVE
 		u->slot_dense[u->dense_slot[d]] = (int32_t)d;
 	}
@@ -411,6 +419,7 @@ static const OrderKind order_for_command[] = {
 	[COMMAND_MOVE] = ORDER_MOVE,
 	[COMMAND_ATTACK_MOVE] = ORDER_ATTACK_MOVE,
 	[COMMAND_BUILD] = ORDER_BUILD,
+	[COMMAND_GATE] = ORDER_GATE,
 };
 
 static UnitType queue_front(const Units *u, ptrdiff_t d) { return (UnitType)(u->queue[d] & 0xff); }
@@ -446,10 +455,68 @@ static void apply_produce(Faction *f, const Command *c)
 	}
 }
 
+// The faction's finished gate nearest `at`, within `within`, or -1.
+static ptrdiff_t nearest_gate(const Faction *f, V2 at, float within)
+{
+	const Units *u = &f->units;
+	ptrdiff_t best = -1;
+	float best_d2 = within * within;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] != UNIT_GATE || u->progress[i] < 1.0f) continue;
+		float d2 = v2_len2(v2_sub(v2(u->px[i], u->pz[i]), at));
+		if (d2 < best_d2) {
+			best = i;
+			best_d2 = d2;
+		}
+	}
+	return best;
+}
+
+// A gate fires a seed when it's charged and the energy is there.
+static void apply_seed(Faction *f, const Sim *sim, const Command *c)
+{
+	(void)sim;
+	if (c->amount < 0 || c->amount >= ZONE_POOL) return;
+	ptrdiff_t g = nearest_gate(f, c->target, 30.0f);
+	if (g < 0) return;
+	f->units.queue_len[g] = 1; // a seed pending
+	f->units.dest[g] = (uint8_t)c->amount;
+}
+
+// Units come through this faction's gate (the one nearest target), or a seed
+// lands near target and starts unfolding. With no gate, they come to base.
+static void apply_arrive(Faction *f, const Sim *sim, const Command *c)
+{
+	const Terrain *t = &sim->terrain;
+	Units *u = &f->units;
+	if (c->unit_type >= UNIT_TYPE_COUNT || c->amount < 0 || c->amount > SPAWN_MAX) return;
+	if (c->flags & COMMAND_SEED_GATE) {
+		V2 site;
+		if (u->count == u->cap || !site_near(sim, f->id, UNIT_GATE, c->target, &site)) return;
+		ptrdiff_t s = units_spawn(u, UNIT_GATE, site.x, site.z, terrain_height(t, site.x, site.z));
+		u->progress[s] = 0.0f;
+		u->hp[s] = 0.1f * unit_defs[UNIT_GATE].hp;
+		u->seeded[s] = 1;
+		f->stats.units_spawned++;
+		return;
+	}
+	if (unit_is_structure(c->unit_type)) return;
+	ptrdiff_t g = nearest_gate(f, c->target, 1e4f);
+	V2 at = g >= 0 ? v2(u->px[g], u->pz[g]) : f->base;
+	float ring = (g >= 0 ? unit_defs[UNIT_GATE].radius : 0.0f) + 4.0f;
+	for (int32_t k = 0; k < c->amount && u->count < u->cap; k++) {
+		V2 p = clamp_to_map(t, v2(at.x + rng_range(&f->rng, -ring, ring), at.z + rng_range(&f->rng, -ring, ring)), 2.0f);
+		units_spawn(u, c->unit_type, p.x, p.z, terrain_height(t, p.x, p.z));
+		f->stats.units_spawned++;
+		f->stats.units_arrived++;
+	}
+}
+
 // Orders keep the group's shape: each unit aims at the target plus its offset
 // from the group's centre, squeezed so the group doesn't stay spread out.
-static void apply_command(Faction *f, const Terrain *t, const Command *c)
+static void apply_command(Faction *f, const Sim *sim, const Command *c)
 {
+	const Terrain *t = &sim->terrain;
 	if (c->kind >= COMMAND_KIND_COUNT) return;
 	if (!finite_f(c->target.x) || !finite_f(c->target.z)) return;
 	if (c->kind == COMMAND_SPAWN) {
@@ -460,6 +527,17 @@ static void apply_command(Faction *f, const Terrain *t, const Command *c)
 		apply_produce(f, c);
 		return;
 	}
+	if (c->kind == COMMAND_ARRIVE) {
+		apply_arrive(f, sim, c);
+		return;
+	}
+	if (c->kind == COMMAND_SEED) {
+		apply_seed(f, sim, c);
+		return;
+	}
+	if (c->kind == COMMAND_DRAW) return; // for the zone server, which asks the pool
+	ptrdiff_t gate = -1;
+	if (c->kind == COMMAND_GATE && (gate = nearest_gate(f, c->target, 30.0f)) < 0) return;
 	if (c->kind == COMMAND_BUILD && !unit_is_structure(c->unit_type)) return;
 	Units *u = &f->units;
 	V2 target = clamp_to_map(t, c->target, 1.0f);
@@ -486,15 +564,18 @@ static void apply_command(Faction *f, const Terrain *t, const Command *c)
 	for (ptrdiff_t k = 0; k < c->count; k++) {
 		ptrdiff_t d = units_find(u, c->units[k]);
 		if (d < 0 || unit_is_structure(u->type[d])) continue;
-		// Builders all go to the one site; others keep the group's shape.
+		// Builders all go to the one site, travellers to their gate; others
+		// keep the group's shape.
 		bool build = c->kind == COMMAND_BUILD;
 		if (build && u->type[d] != UNIT_ENGINEER) continue;
 		V2 offset = v2_scale(v2_sub(v2(u->px[d], u->pz[d]), centre), squeeze);
 		V2 dest = build ? target : clamp_to_map(t, v2_add(target, offset), 1.0f);
+		if (gate >= 0) dest = v2(u->px[gate], u->pz[gate]);
 		u->order[d] = order_for_command[c->kind];
 		u->tx[d] = dest.x;
 		u->tz[d] = dest.z;
-		u->building[d] = NO_UNIT;
+		u->building[d] = gate >= 0 ? units_handle(u, gate) : NO_UNIT;
+		if (gate >= 0) u->dest[d] = (uint8_t)(c->amount < 0 || c->amount > ZONE_POOL ? ZONE_POOL : c->amount);
 		if (build) u->build_type[d] = c->unit_type;
 	}
 }
@@ -546,10 +627,11 @@ static void move_units(Faction *f, const Terrain *t)
 		}
 		V2 p = v2(u->px[i], u->pz[i]);
 		V2 desired = v2(0.0f, 0.0f);
-		if (u->order[i] == ORDER_BUILD) {
+		if (u->order[i] == ORDER_BUILD || u->order[i] == ORDER_GATE) {
 			V2 to = v2_sub(v2(u->tx[i], u->tz[i]), p);
 			float d = v2_len(to);
-			float reach = BUILD_RANGE + unit_defs[u->build_type[i]].radius;
+			float reach = u->order[i] == ORDER_GATE ? unit_defs[UNIT_GATE].radius + GATE_REACH - 1.0f
+			                                         : BUILD_RANGE + unit_defs[u->build_type[i]].radius;
 			if (d > reach) desired = v2_scale(to, def->speed / d);
 		} else if (u->order[i] != ORDER_IDLE) {
 			V2 to = v2_sub(v2(u->tx[i], u->tz[i]), p);
@@ -762,6 +844,28 @@ static void fire_weapons(Faction *f, const EnemyView *v, const Terrain *t, Tick 
 
 // ---------------------------------------------------------------- economy
 
+bool site_near(const Sim *sim, FactionId f, UnitType type, V2 near, V2 *out)
+{
+	// Eight directions as exact constants: no libm in the sim.
+	static const V2 ring[8] = {
+		{1.0f, 0.0f}, {0.70710678f, 0.70710678f}, {0.0f, 1.0f}, {-0.70710678f, 0.70710678f},
+		{-1.0f, 0.0f}, {-0.70710678f, -0.70710678f}, {0.0f, -1.0f}, {0.70710678f, -0.70710678f},
+	};
+	if (placement_ok(sim, f, type, near)) {
+		*out = near;
+		return true;
+	}
+	for (int i = 0; i < 96; i++) {
+		float r = 8.0f + 7.0f * (float)(i / 8);
+		V2 at = v2_add(near, v2_scale(ring[(i + 3 * (i / 8)) % 8], r));
+		if (placement_ok(sim, f, type, at)) {
+			*out = at;
+			return true;
+		}
+	}
+	return false;
+}
+
 bool placement_ok(const Sim *sim, FactionId fid, UnitType type, V2 at)
 {
 	const Terrain *t = &sim->terrain;
@@ -886,6 +990,11 @@ static void run_economy(Faction *f, const Sim *sim)
 		want_e += def->energy_cost * j.work / def->build_time;
 		jobs[n++] = j;
 	}
+	// Gates charge on energy, like a job that only costs energy.
+	const float charge_step = SIM_DT / GATE_CHARGE;
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->type[i] == UNIT_GATE && u->progress[i] >= 1.0f && u->work[i] < 1.0f)
+			want_e += GATE_CHARGE_ENERGY * charge_step;
 	float rate_m = want_m > e->metal ? e->metal / want_m : 1.0f;
 	float rate_e = want_e > e->energy ? e->energy / want_e : 1.0f;
 	e->rate = n ? f_min(rate_m, rate_e) : 1.0f;
@@ -923,10 +1032,80 @@ static void run_economy(Faction *f, const Sim *sim)
 		spent_m += def->metal_cost * step;
 		spent_e += def->energy_cost * step;
 	}
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] != UNIT_GATE) continue;
+		if (u->progress[i] < 1.0f) {
+			// A seed unfolds by itself, and costs nothing more.
+			if (!u->seeded[i]) continue;
+			float step = f_min(SIM_DT / SEED_UNFOLD, 1.0f - u->progress[i]);
+			u->progress[i] += step;
+			u->hp[i] += 0.9f * unit_defs[UNIT_GATE].hp * step;
+			if (u->progress[i] >= 1.0f) u->progress[i] = 1.0f;
+		} else if (u->work[i] < 1.0f) {
+			float step = f_min(charge_step * rate_e, 1.0f - u->work[i]);
+			u->work[i] += step;
+			spent_e += GATE_CHARGE_ENERGY * step;
+		}
+	}
 	e->metal = f_max(0.0f, e->metal - spent_m);
 	e->energy = f_max(0.0f, e->energy - spent_e);
 	e->metal_spent = spent_m / SIM_DT;
 	e->energy_spent = spent_e / SIM_DT;
+}
+
+static void add_departure(Faction *f, uint8_t dest, UnitType type)
+{
+	for (ptrdiff_t k = 0; k < f->departure_count; k++) {
+		Departure *d = &f->departures[k];
+		if (d->dest == dest && d->type == type) {
+			d->count++;
+			return;
+		}
+	}
+	f->departures[f->departure_count++] = (Departure){dest, type, 1};
+}
+
+// Charged gates fire: a pending seed if the energy is there, otherwise every
+// unit waiting at the gate for the zone of the first in line.
+static void fire_gates(Faction *f)
+{
+	Units *u = &f->units;
+	f->departures = PUSH(&f->scratch, Departure, 2 * UNIT_TYPE_COUNT * 8 + 8);
+	f->departure_count = 0;
+	int32_t *leaving = PUSH(&f->scratch, int32_t, u->count);
+	for (ptrdiff_t g = 0; g < u->count && f->departure_count < 2 * UNIT_TYPE_COUNT * 8; g++) {
+		if (u->type[g] != UNIT_GATE || u->progress[g] < 1.0f || u->work[g] < 1.0f) continue;
+		if (u->queue_len[g]) {
+			if (f->economy.energy < SEED_ENERGY) continue;
+			f->economy.energy -= SEED_ENERGY;
+			add_departure(f, u->dest[g], UNIT_GATE);
+			u->queue_len[g] = 0;
+			u->work[g] = 0.0f;
+			continue;
+		}
+		UnitHandle gh = units_handle(u, g);
+		float reach = unit_defs[UNIT_GATE].radius + GATE_REACH;
+		ptrdiff_t n = 0;
+		int dest = -1;
+		for (ptrdiff_t i = 0; i < u->count; i++) {
+			if (u->order[i] != ORDER_GATE || !unit_handle_eq(u->building[i], gh)) continue;
+			if (v2_len2(v2_sub(v2(u->px[i], u->pz[i]), v2(u->px[g], u->pz[g]))) > reach * reach) continue;
+			if (dest < 0) dest = u->dest[i];
+			if (u->dest[i] == dest) leaving[n++] = (int32_t)i;
+		}
+		if (n == 0) continue;
+		for (ptrdiff_t k = 0; k < n; k++) add_departure(f, (uint8_t)dest, u->type[leaving[k]]);
+		// Leaving units are removed highest index first, so swap-remove
+		// never moves one still to be removed.
+		for (ptrdiff_t k = n - 1; k >= 0; k--) {
+			units_kill(u, leaving[k]);
+			f->stats.units_departed++;
+		}
+		// Removal may have moved the gate: find it again by handle. If the
+		// loop now skips a gate, it fires next tick; none fires twice, as
+		// firing empties the charge.
+		u->work[units_find(u, gh)] = 0.0f;
+	}
 }
 
 static void remove_dead(Faction *f)
@@ -1027,10 +1206,15 @@ static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const 
 	apply_effects(f, fx, sim->tick);
 	build_view(f, &sim->terrain, sim->tick);
 	for (ptrdiff_t k = 0; k < count; k++)
-		if (commands[k].faction.v == f->id.v) apply_command(f, &sim->terrain, &commands[k]);
+		if (commands[k].faction.v == f->id.v) apply_command(f, sim, &commands[k]);
 	spawn(f, sim);
 	move_units(f, &sim->terrain);
-	if (sim->config.economy) run_economy(f, sim);
+	if (sim->config.economy) {
+		run_economy(f, sim);
+		fire_gates(f);
+	} else {
+		f->departure_count = 0;
+	}
 	fly_projectiles(f, &sim->terrain);
 	fire_weapons(f, &f->view, &sim->terrain, sim->tick);
 	remove_dead(f);
@@ -1150,7 +1334,7 @@ static Hash hash_units(Hash h, const Units *u)
 		h = hash_u32(h, u->building[i].generation);
 		h = hash_f32(h, u->work[i]);
 		h = hash_u64(h, u->queue[i]);
-		h = hash_u32(h, (uint32_t)u->queue_len[i] << 8 | u->repeat[i]);
+		h = hash_u32(h, (uint32_t)u->queue_len[i] << 24 | (uint32_t)u->repeat[i] << 16 | (uint32_t)u->dest[i] << 8 | u->seeded[i]);
 	}
 	return h;
 }
@@ -1209,6 +1393,8 @@ Hash faction_hash(const Faction *f)
 	h = hash_u64(h, (uint64_t)f->stats.units_spawned);
 	h = hash_u64(h, (uint64_t)f->stats.units_lost);
 	h = hash_u64(h, (uint64_t)f->stats.launches_dropped);
+	h = hash_u64(h, (uint64_t)f->stats.units_departed);
+	h = hash_u64(h, (uint64_t)f->stats.units_arrived);
 	const Economy *e = &f->economy;
 	float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
 	              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
@@ -1263,6 +1449,8 @@ void faction_write(const Faction *f, ByteBuf *b)
 		put64(b, u->queue[i]);
 		put8(b, u->queue_len[i]);
 		put8(b, u->repeat[i]);
+		put8(b, u->dest[i]);
+		put8(b, u->seeded[i]);
 	}
 	const Projectiles *p = &f->incoming;
 	put32(b, (uint32_t)p->count);
@@ -1293,6 +1481,8 @@ void faction_write(const Faction *f, ByteBuf *b)
 	put64(b, (uint64_t)f->stats.units_spawned);
 	put64(b, (uint64_t)f->stats.units_lost);
 	put64(b, (uint64_t)f->stats.launches_dropped);
+	put64(b, (uint64_t)f->stats.units_departed);
+	put64(b, (uint64_t)f->stats.units_arrived);
 	const Economy *e = &f->economy;
 	float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
 	              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
@@ -1362,8 +1552,10 @@ bool faction_read(Faction *f, ByteReader *r)
 		u->queue[i] = get64(r);
 		u->queue_len[i] = get8(r);
 		u->repeat[i] = get8(r);
+		u->dest[i] = get8(r);
+		u->seeded[i] = get8(r);
 		if (type >= UNIT_TYPE_COUNT || order >= ORDER_KIND_COUNT || u->engaged[i] > 1 || u->cooldown[i] < 0
-		    || build_type >= UNIT_TYPE_COUNT || u->queue_len[i] > FACTORY_QUEUE || u->repeat[i] > 1
+		    || build_type >= UNIT_TYPE_COUNT || u->queue_len[i] > FACTORY_QUEUE || u->repeat[i] > 1 || u->seeded[i] > 1
 		    || !(u->progress[i] >= 0.0f && u->progress[i] <= 1.0f) || !(u->work[i] >= 0.0f && u->work[i] < 1.0f))
 			return false;
 		for (int q = 0; q < u->queue_len[i]; q++)
@@ -1416,6 +1608,8 @@ bool faction_read(Faction *f, ByteReader *r)
 	f->stats.units_spawned = (int64_t)get64(r);
 	f->stats.units_lost = (int64_t)get64(r);
 	f->stats.launches_dropped = (int64_t)get64(r);
+	f->stats.units_departed = (int64_t)get64(r);
+	f->stats.units_arrived = (int64_t)get64(r);
 	Economy *e = &f->economy;
 	float *ef[] = {&e->metal, &e->energy, &e->metal_cap, &e->energy_cap, &e->metal_income, &e->energy_income,
 	               &e->metal_spent, &e->energy_spent, &e->metal_wanted, &e->energy_wanted, &e->rate};

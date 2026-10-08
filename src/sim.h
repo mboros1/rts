@@ -41,6 +41,7 @@ typedef enum : uint8_t {
 	UNIT_EXTRACTOR,     // structures: never move
 	UNIT_GENERATOR,
 	UNIT_FACTORY,
+	UNIT_GATE,          // warps units to other zones; charges on energy
 	UNIT_TYPE_COUNT,
 } UnitType;
 
@@ -81,6 +82,7 @@ typedef enum : uint8_t {
 	ORDER_MOVE,
 	ORDER_ATTACK_MOVE,
 	ORDER_BUILD,        // engineers: go to the site, then place or assist
+	ORDER_GATE,         // go to a gate and leave through it when it fires
 	ORDER_KIND_COUNT,
 } OrderKind;
 
@@ -145,7 +147,20 @@ typedef struct {
 	uint64_t *queue;       // factories: up to 8 unit types, a byte each
 	uint8_t *queue_len;
 	uint8_t *repeat;       // factories: finished items go to the back
+	uint8_t *dest;         // units ordered through a gate: the zone they're for
+	uint8_t *seeded;       // gates: arrived as a seed, so they unfold unaided
 } Units;
+
+// Zones are numbered by the match's zone directory; the pool isn't a zone.
+enum : uint8_t { ZONE_POOL = 255 };
+
+// Leaving through a gate this tick: `count` units of `type` for zone `dest`.
+// A seed is a single UNIT_GATE.
+typedef struct {
+	uint8_t dest;
+	UnitType type;
+	int32_t count;
+} Departure;
 
 enum { FACTORY_QUEUE = 8 };
 
@@ -263,6 +278,8 @@ typedef struct {
 	int64_t units_spawned;
 	int64_t units_lost;
 	int64_t launches_dropped;  // arriving shells this faction's pool had no room for
+	int64_t units_departed;    // through gates
+	int64_t units_arrived;
 } FactionStats;
 
 // A faction's resources. Income and spending stream: each tick builders ask
@@ -310,6 +327,8 @@ typedef struct {
 	Perception seen;           // its enemies, as it perceives them
 	Economy economy;
 	EnemyView view;            // built from `seen` each tick, in scratch
+	Departure *departures;     // left through gates this tick (in scratch)
+	ptrdiff_t departure_count;
 	Launch *outbox;            // launches fired this tick, delivered next tick
 	ptrdiff_t outbox_count;
 	ptrdiff_t outbox_cap;
@@ -326,10 +345,25 @@ typedef enum : uint8_t {
 	COMMAND_SPAWN,
 	COMMAND_BUILD,      // engineers build unit_type at target
 	COMMAND_PRODUCE,    // factories queue `amount` of unit_type (0 clears)
+	COMMAND_GATE,       // units go through the gate nearest target, to zone `amount`
+	COMMAND_SEED,       // the gate nearest target fires a gate seed to zone `amount`
+	COMMAND_ARRIVE,     // `amount` of unit_type come through our gate (a seed: SEED flag)
+	COMMAND_DRAW,       // ask the pool for `amount` of unit_type here: for the zone server
 	COMMAND_KIND_COUNT,
 } CommandKind;
 
-enum : uint8_t { COMMAND_REPEAT = 1 }; // PRODUCE: finished items requeue
+enum : uint8_t {
+	COMMAND_REPEAT = 1,     // PRODUCE: finished items requeue
+	COMMAND_SEED_GATE = 2,  // ARRIVE: it's a gate seed, landing near target
+};
+
+// Gates: a full charge takes GATE_CHARGE seconds and GATE_CHARGE_ENERGY;
+// a seed needs a full charge plus SEED_ENERGY, and unfolds in SEED_UNFOLD.
+static constexpr float GATE_CHARGE = 10.0f;
+static constexpr float GATE_CHARGE_ENERGY = 2000.0f;
+static constexpr float SEED_ENERGY = 5000.0f;
+static constexpr float SEED_UNFOLD = 20.0f;
+static constexpr float GATE_REACH = 7.0f;   // beyond the gate's radius
 
 static constexpr int32_t SPAWN_MAX = 4096;      // units per spawn command
 static constexpr float SPAWN_MAX_RADIUS = 200.0f;
@@ -403,6 +437,10 @@ static inline void shell_advance(V3 *pos, V3 *vel)
 // Can faction f start a structure of this type here? Uses only what f
 // knows: its own units, its perception of enemy structures, the spots.
 bool placement_ok(const Sim *sim, FactionId f, UnitType type, V2 at);
+
+// The nearest site to `near` where faction f can start `type`, spiralling
+// outward. False if there is none within reach.
+bool site_near(const Sim *sim, FactionId f, UnitType type, V2 near, V2 *out);
 
 // The metal spot at a position, or -1.
 int32_t spot_at(const Spots *spots, V2 at);

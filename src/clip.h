@@ -56,6 +56,8 @@ typedef struct {
 	const char *script;         // ... or run this script (with its bots) ...
 	const char *netlog;         // ... or show what a network client saw
 	const char *compare;        // with --netlog: a second client, side by side
+	const char *headings;       // "A,B": labels for the two halves
+	const char *views;          // "X,Z,D;X,Z,D": a fixed camera per half
 	const char *title, *about;  // title card, when there's no script to say
 	const char *label;          // shown on the title card, e.g. the commit
 	int64_t from, to;           // tick window; to < 0 means the end

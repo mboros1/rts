@@ -682,6 +682,22 @@ int clip_netlog(const ClipRequest *req)
 		fprintf(stats, "\n%7s %6s %6s %6s %7s %8s  %s\n", "time", "tick", "blue", "red", "shells", "KB/s", "status");
 	}
 
+	// Two halves may be one match seen two ways (shared camera, following the
+	// fuller view) or two zones (--views: a fixed camera each).
+	char headings[2][64] = {"", ""};
+	if (req->headings) {
+		const char *comma = strchr(req->headings, ',');
+		if (!comma) return fail("--headings A,B", req->headings);
+		snprintf(headings[0], sizeof headings[0], "%.*s", (int)(comma - req->headings), req->headings);
+		snprintf(headings[1], sizeof headings[1], "%s", comma + 1);
+	}
+	bool fixed = req->views != nullptr;
+	V2 view_at[2] = {0};
+	float view_d[2] = {0};
+	if (fixed && sscanf(req->views, "%f,%f,%f;%f,%f,%f", &view_at[0].x, &view_at[0].z, &view_d[0], &view_at[1].x,
+	                    &view_at[1].z, &view_d[1]) != 6)
+		return fail("--views X,Z,D;X,Z,D", req->views);
+
 	Director director = {0};
 	int64_t frames = (int64_t)((t_end - t_start) * CLIP_FPS) + 1;
 	for (int64_t k = 0; k < frames; k++) {
@@ -706,7 +722,9 @@ int clip_netlog(const ClipRequest *req)
 			for (int v = 0; v < 2; v++) {
 				BeginTextureMode(half);
 				ClearBackground((Color){24, 28, 34, 255});
-				playback_draw(&views[v], &renderer, &scenes[v], cam, t, &frame, rw / 2, rh, playback_heading(&views[v]));
+				Camera3D half_cam = fixed ? render_camera(&views[v].terrain, view_at[v], view_d[v]) : cam;
+				playback_draw(&views[v], &renderer, &scenes[v], half_cam, t, &frame, rw / 2, rh,
+				              headings[v][0] ? headings[v] : playback_heading(&views[v]));
 				EndTextureMode();
 				BeginTextureMode(out.big);
 				DrawTexturePro(half.texture, (Rectangle){0, 0, (float)(rw / 2), (float)-rh},
@@ -764,6 +782,8 @@ static void usage(void)
 	        "  --label TEXT             title card subtitle, e.g. the commit\n"
 	        "  --title TEXT --about TEXT  title card for --netlog clips\n"
 	        "  --compare NETLOG         a second netlog beside the first, same clock and camera\n"
+	        "  --headings A,B           labels for the two halves\n"
+	        "  --views X,Z,D;X,Z,D      a fixed camera for each half (two zones, say)\n"
 	        "  --crf N                  video quality, 0..51, lower is bigger (default 26)\n"
 	        "  --speed N                time-lapse: one frame every N ticks\n"
 	        "  --list                   list scenarios\n");
@@ -792,6 +812,8 @@ int clip_main(int argc, char **argv)
 		else if (!strcmp(a, "--script")) req.script = v;
 		else if (!strcmp(a, "--netlog")) req.netlog = v;
 		else if (!strcmp(a, "--compare")) req.compare = v;
+		else if (!strcmp(a, "--headings")) req.headings = v;
+		else if (!strcmp(a, "--views")) req.views = v;
 		else if (!strcmp(a, "--title")) req.title = v;
 		else if (!strcmp(a, "--about")) req.about = v;
 		else if (!strcmp(a, "--label")) req.label = v;

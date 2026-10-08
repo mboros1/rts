@@ -112,6 +112,7 @@ void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Are
 	r->unit_mesh[UNIT_EXTRACTOR] = GenMeshCylinder(0.5f, 1.0f, 10);
 	r->unit_mesh[UNIT_GENERATOR] = GenMeshCylinder(0.3f, 1.0f, 6);
 	r->unit_mesh[UNIT_FACTORY] = GenMeshCube(1.0f, 1.0f, 1.0f);
+	r->unit_mesh[UNIT_GATE] = GenMeshCylinder(0.5f, 1.0f, 20);
 	r->shell_mesh = GenMeshSphere(1.0f, 6, 8);
 	r->terrain = build_terrain(terrain);
 	r->terrain_vertices = r->terrain.meshes[0].vertexCount;
@@ -198,7 +199,7 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 			float built = u->progress ? u->progress[i] : 1.0f;
 			if (built < 1.0f) s = 2;
 			float h = def->height * f_max(0.15f, built);
-			bool from_base = t == UNIT_ARTILLERY || t == UNIT_EXTRACTOR || t == UNIT_GENERATOR;
+			bool from_base = t == UNIT_ARTILLERY || t == UNIT_EXTRACTOR || t == UNIT_GENERATOR || t == UNIT_GATE;
 			float y = u->py[i] + (from_base ? 0.0f : 0.5f * h);
 			float yaw = unit_is_structure(u->type[i]) ? 0.0f : heading[slot];
 			if (t == UNIT_ENGINEER) h *= 0.7f;

@@ -30,10 +30,11 @@ RAYLIB_LIBS   := $(shell pkg-config --libs raylib)
 
 SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
+# The zone smoke test drives these through processes; rebuild them together.
 
-.PHONY: demos-rerender all setup check check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 cross clips demos demos-restore share clean
+.PHONY: demos-rerender all setup check check-zones check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 cross clips demos demos-restore share clean
 
-all: $(B)/rts $(B)/rts-headless $(B)/rts-server
+all: $(B)/rts $(B)/rts-headless $(B)/rts-server $(B)/rts-coord
 
 $(B):
 	@mkdir -p $(B)
@@ -57,6 +58,9 @@ $(B)/rts-headless: src/main_headless.c $(SIM_SRC) | $(B)
 $(B)/rts-server: src/main_server.c $(SIM_SRC) | $(B)
 	$(CC) $(BASE) $(RELEASE) $< -o $@
 
+$(B)/rts-coord: src/main_coord.c $(SIM_SRC) | $(B)
+	$(CC) $(BASE) $(RELEASE) $< -o $@
+
 bench: $(B)/rts-headless
 	$(B)/rts-headless bench 1800 5000
 
@@ -65,7 +69,7 @@ bench: $(B)/rts-headless
 # (history in build/timings.log), so check costs about its slowest stage.
 CHECK := $(B)/check
 S := tools/stage
-CHECK_STAGES := check-tests check-replay check-split check-demo-scripts check-game check-server check-gcc check-net
+CHECK_STAGES := check-tests check-replay check-split check-demo-scripts check-game check-server check-gcc check-net check-zones
 check:
 	@rm -rf $(CHECK) && mkdir -p $(CHECK)
 	@$(S) "check (total)" $(MAKE) --no-print-directory -j8 $(CHECK_STAGES)
@@ -101,6 +105,15 @@ check-game: $(CHECK)/rts
 $(CHECK)/rts-server:
 	@$(S) "build server (clang -O2)" $(CC) $(BASE) -Werror $(RELEASE) src/main_server.c -o $@
 
+$(CHECK)/rts-coord:
+	@$(S) "build coordinator (clang -O2)" $(CC) $(BASE) -Werror $(RELEASE) src/main_coord.c -o $@
+
+# Three zones and a coordinator: a held transfer survives a coordinator
+# restart, a seed opens a zone, a player switches zones.
+check-zones: $(CHECK)/rts $(CHECK)/rts-server $(CHECK)/rts-coord
+	@$(S) "zones: transfer, restart, seed, switch" tools/zone-smoke $(CHECK) $(CHECK)/zones > $(CHECK)/zones.log 2>&1 \
+		|| { cat $(CHECK)/zones.log; exit 1; }
+
 check-server: $(CHECK)/rts-server
 
 # A server and a headless client over a real socket, with latency, jitter and
@@ -112,7 +125,9 @@ check-net: $(CHECK)/rts $(CHECK)/rts-server $(CHECK)/headless
 	@$(S) "net: server replay verifies" $(CHECK)/headless verify $(NET)/server.replay > /dev/null
 
 # One stage per program: the analyzer is the slowest step, so run them side by side.
-check-gcc: check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game
+check-gcc: check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game check-gcc-coord
+check-gcc-coord:
+	@$(S) "gcc -fanalyzer: coordinator" $(GCC) $(BASE) -Werror -O1 -fanalyzer src/main_coord.c -o $(CHECK)/coord-gcc
 check-gcc-tests:
 	@$(S) "gcc -fanalyzer: tests" $(GCC) $(BASE) -Werror -O1 -fanalyzer src/main_tests.c -o $(CHECK)/tests-gcc
 check-gcc-headless:

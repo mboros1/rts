@@ -19,12 +19,17 @@
 //   at 30  move column 256,90         # also: attack-move, stop
 //   at 40  build crew extractor at 92,226   # engineers; also generator, factory
 //   at 40  queue crew generator at 40,280   # build once the group is done building
+//   zones alpha beta                  # names for zone numbers, in order; also: pool
+//   at 50  gate army to beta via 80,256     # through the gate nearest 80,256
+//   at 50  seed gates to beta               # a gate group fires a seed
+//   at 50  arrive blue tank 10              # as if through blue's gate (tests)
 //   at 40  produce plant raider 2 repeat    # factories: queue N (0 clears)
 //   at 60  bot red on
 //   at 600 expect red lost > 50       # side fields: units lost fired shells spawned
 //                                     #   metal energy metal_income energy_income
 //                                     #   and finished counts: raiders tanks artillery
-//                                     #   engineers extractors generators factories
+//                                     #   engineers extractors generators factories gates
+//                                     #   departed arrived
 //   at 600 expect column alive >= 15  # group field: alive
 //
 // Selections are queries resolved at their tick: SIDE, TYPE (raider, tank,
@@ -58,6 +63,8 @@ typedef enum : uint8_t {
 	FIELD_METAL_INCOME,
 	FIELD_ENERGY_INCOME,
 	FIELD_COUNT,      // finished units of `type`
+	FIELD_DEPARTED,
+	FIELD_ARRIVED,
 } ExpectField;
 
 typedef enum : uint8_t { OP_LT, OP_LE, OP_GT, OP_GE, OP_EQ, OP_NE } ExpectOp;
@@ -95,6 +102,8 @@ typedef struct {
 	ptrdiff_t group_count;
 	int64_t clip_from, clip_to;
 	int32_t speed;                 // clip time-lapse: one frame every N ticks
+	const char *zones[8];          // zone numbers' names
+	int32_t zone_count;
 	int64_t end;
 	bool fixed_camera;
 	V2 camera_at;

@@ -1,6 +1,7 @@
 // rts-server: runs the sim headless, in real time, and streams it to clients.
 //
 //   rts-server [--scenario NAME | --script PATH] [--port N] [--ticks N]
+//              [--zone NAME --zones A,B,... --coord HOST:PORT]
 //              [--record PATH] [--stats PATH] [--bot blue|red on|off]
 //              [--latency MS] [--jitter MS] [--dilation F] [--speed X]
 //
@@ -14,6 +15,12 @@
 // --latency/--jitter delay everything this server sends, to every client.
 // --dilation forces time dilation; otherwise it follows the step time.
 // --speed runs the clock X times faster than real time, for tests.
+//
+// With --coord, this is one zone of a larger match (coord.h): units leaving
+// through its gates are reported to the coordinator, and units it delivers
+// come in through this zone's gates as ARRIVE commands, so the zone's replay
+// still verifies on its own. --zones names the match's zones, in the order
+// gate commands number them.
 //
 // Unity build: this file is the whole program.
 #include "base.h"
@@ -30,6 +37,7 @@
 #include "script.c"
 #include "wire.c"
 #include "net.c"
+#include "coord.c"
 
 enum { MAX_CLIENTS = 8, MAX_COMMANDS = 512 };
 static constexpr ptrdiff_t CLIENT_OUT = (ptrdiff_t)32 << 20;  // power of two
@@ -68,6 +76,21 @@ typedef struct {
 	double forced_dilation;   // 0: automatic
 	double speed;             // clock multiplier; 1 is real time
 	double dilation;
+	// One zone of many (with --coord).
+	const char *zone_name;
+	char zones[COORD_MAX_ZONES][ZONE_NAME];
+	int zone_count;
+	char coord_host[64];
+	int coord_port, port;
+	Conn coord;
+	double coord_retry_at;
+	ByteBuf held[64];            // departures while the coordinator is down
+	int held_count;
+	uint64_t applied[4096];      // transfers already brought in
+	int applied_count;
+	uint64_t confirm[64];        // brought in this tick: confirm after the step
+	int confirm_count;
+	int64_t units_in, units_out;
 	WireStats wire;
 	int64_t faction_bytes[FACTION_COUNT];   // each faction's stream, encoded
 	int64_t bytes_out, bytes_out_last;
@@ -137,9 +160,12 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	uint8_t flags = get8(r);
 	uint32_t n = get32(r);
 	// Players order, build and produce; spawning is for scripts only.
-	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE;
+	// Arriving and spawning come from the coordinator and scripts, never players.
+	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE
+	            || kind == COMMAND_GATE || kind == COMMAND_SEED || kind == COMMAND_DRAW;
 	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && unit_type < UNIT_TYPE_COUNT
-	       && amount >= 0 && amount <= FACTORY_QUEUE && flags <= COMMAND_REPEAT
+	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : kind == COMMAND_DRAW ? SPAWN_MAX : ZONE_POOL)
+	       && flags <= COMMAND_REPEAT
 	       && n <= (uint32_t)s->sim.config.max_units && (ptrdiff_t)n * 8 == r->len - r->pos
 	       && s->queued_count < MAX_COMMANDS;
 	if (!ok) {
@@ -195,6 +221,153 @@ static void service_clients(Server *s, double now)
 
 // ---------------------------------------------------------------- ticking
 
+// ---------------------------------------------------------------- zones
+
+static void coord_send(Server *s, uint8_t kind, const ByteBuf *b, double now)
+{
+	if (s->coord.open) {
+		conn_send(&s->coord, kind, b->data, b->len, now);
+		return;
+	}
+	// Down: keep departures until it's back (lost only if this zone dies too).
+	if (kind == COORD_DEPART && s->held_count < (int)countof(s->held)) {
+		ByteBuf *h = &s->held[s->held_count++];
+		h->len = 0;
+		h->overflow = false;
+		put_bytes(h, b->data, b->len);
+	}
+}
+
+static bool was_applied(const Server *s, uint64_t id)
+{
+	for (int k = 0; k < s->applied_count; k++)
+		if (s->applied[k] == id) return true;
+	return false;
+}
+
+// Units for this zone: through the faction's gate, as ARRIVE commands in the
+// next tick. A seed lands near the faction's base. No gate yet: hold.
+static void on_deliver(Server *s, ByteReader *r, double now)
+{
+	uint64_t id = get64(r);
+	uint8_t faction = get8(r), seed = get8(r);
+	int32_t counts[UNIT_TYPE_COUNT];
+	if (!get_counts(r, counts) || faction >= FACTION_COUNT) return;
+	ArenaMark m = arena_mark(&s->encode);
+	ByteBuf b = bytebuf_make(&s->encode, 16);
+	put64(&b, id);
+	if (was_applied(s, id)) { // a retry of one we already have: just confirm again
+		coord_send(s, COORD_DELIVERED, &b, now);
+		arena_rewind(m);
+		return;
+	}
+	const Faction *f = &s->sim.factions[faction];
+	V2 at = f->base;
+	bool has_gate = false;
+	for (ptrdiff_t i = 0; i < f->units.count && !has_gate; i++)
+		if (f->units.type[i] == UNIT_GATE && f->units.progress[i] >= 1.0f) {
+			has_gate = true;
+			at = v2(f->units.px[i], f->units.pz[i]);
+		}
+	if (!seed && !has_gate) {
+		coord_send(s, COORD_HOLD, &b, now);
+		arena_rewind(m);
+		return;
+	}
+	arena_rewind(m);
+	for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
+		if (!counts[k] || s->queued_count == MAX_COMMANDS) continue;
+		s->queued[s->queued_count++] = (Command){.faction = {faction}, .kind = COMMAND_ARRIVE, .target = at,
+		                                         .unit_type = (UnitType)k, .amount = counts[k],
+		                                         .flags = seed ? COMMAND_SEED_GATE : 0};
+		if (!seed) s->units_in += counts[k];
+	}
+	if (s->applied_count < (int)countof(s->applied)) s->applied[s->applied_count++] = id;
+	if (s->confirm_count < (int)countof(s->confirm)) s->confirm[s->confirm_count++] = id;
+	printf("server %s: transfer %llu arrives (%s)\n", s->zone_name, (unsigned long long)id,
+	       seed ? "a gate seed" : faction ? "red" : "blue");
+}
+
+static void coord_service(Server *s, double now)
+{
+	if (!s->coord_port) return;
+	if (!s->coord.open && now >= s->coord_retry_at) {
+		s->coord_retry_at = now + 0.5;
+		int fd = net_connect(s->coord_host, s->coord_port);
+		if (fd >= 0) {
+			conn_reopen(&s->coord, fd);
+			ArenaMark m = arena_mark(&s->encode);
+			ByteBuf b = bytebuf_make(&s->encode, 64);
+			put_name(&b, s->zone_name);
+			put16(&b, (uint16_t)s->port);
+			conn_send(&s->coord, COORD_ZONE_HELLO, b.data, b.len, now);
+			arena_rewind(m);
+			for (int k = 0; k < s->held_count; k++)
+				conn_send(&s->coord, COORD_DEPART, s->held[k].data, s->held[k].len, now);
+			s->held_count = 0;
+			printf("server %s: registered with the coordinator\n", s->zone_name);
+		}
+	}
+	if (!s->coord.open) return;
+	conn_pump(&s->coord, now);
+	Frame f;
+	while (s->coord.open && conn_next(&s->coord, &f)) {
+		ByteReader r = byte_reader(f.data, f.len);
+		if (f.kind == COORD_DELIVER) on_deliver(s, &r, now);
+	}
+}
+
+// After a step: tell the coordinator what left, what was asked of the pool,
+// and which deliveries are now in the sim.
+static void report_to_coord(Server *s, const Command *cmds, ptrdiff_t n, double now)
+{
+	if (!s->coord_port) return;
+	ArenaMark m = arena_mark(&s->encode);
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		const Faction *fa = &s->sim.factions[f];
+		// One message per destination, and one per seed.
+		for (ptrdiff_t k = 0; k < fa->departure_count; k++) {
+			const Departure *d = &fa->departures[k];
+			bool seed = d->type == UNIT_GATE, first = true;
+			for (ptrdiff_t j = 0; j < k && first; j++)
+				first = fa->departures[j].dest != d->dest || (fa->departures[j].type == UNIT_GATE) != seed;
+			if (!first) continue;
+			int32_t counts[UNIT_TYPE_COUNT] = {0};
+			for (ptrdiff_t j = k; j < fa->departure_count; j++)
+				if (fa->departures[j].dest == d->dest && (fa->departures[j].type == UNIT_GATE) == seed)
+					counts[fa->departures[j].type] += fa->departures[j].count;
+			const char *dst = d->dest == ZONE_POOL ? "pool" : d->dest < s->zone_count ? s->zones[d->dest] : nullptr;
+			if (!dst) {
+				fprintf(stderr, "server %s: units left for zone %d, which isn't in --zones\n", s->zone_name, d->dest);
+				continue;
+			}
+			ByteBuf b = bytebuf_make(&s->encode, 128);
+			put8(&b, (uint8_t)f);
+			put_name(&b, dst);
+			put8(&b, seed);
+			put_counts(&b, counts);
+			coord_send(s, COORD_DEPART, &b, now);
+			for (int t = 0; t < UNIT_TYPE_COUNT; t++) s->units_out += seed ? 0 : counts[t];
+		}
+	}
+	for (ptrdiff_t k = 0; k < n; k++) {
+		if (cmds[k].kind != COMMAND_DRAW || cmds[k].unit_type >= UNIT_TYPE_COUNT) continue;
+		int32_t counts[UNIT_TYPE_COUNT] = {0};
+		counts[cmds[k].unit_type] = cmds[k].amount;
+		ByteBuf b = bytebuf_make(&s->encode, 64);
+		put8(&b, (uint8_t)cmds[k].faction.v);
+		put_counts(&b, counts);
+		coord_send(s, COORD_DRAW, &b, now);
+	}
+	for (int k = 0; k < s->confirm_count; k++) {
+		ByteBuf b = bytebuf_make(&s->encode, 8);
+		put64(&b, s->confirm[k]);
+		coord_send(s, COORD_DELIVERED, &b, now);
+	}
+	s->confirm_count = 0;
+	arena_rewind(m);
+}
+
 static void step(Server *s, double now)
 {
 	ptrdiff_t n = s->queued_count;
@@ -205,6 +378,7 @@ static void step(Server *s, double now)
 	double ms = 1e3 * (platform_seconds() - t0);
 	s->step_ms_avg = s->step_ms_avg == 0.0 ? ms : s->step_ms_avg * 0.95 + ms * 0.05;
 	if (s->recording) replay_tick(&s->writer, tick, s->queued, n, sim_hash_now(&s->sim));
+	report_to_coord(s, s->queued, n, now);
 
 	// Time dilation: if a step takes more than 80% of the tick budget, slow
 	// the clock so the server stays responsive instead of falling behind.
@@ -293,6 +467,21 @@ int main(int argc, char **argv)
 			if (f < 0 || (strcmp(on, "on") && strcmp(on, "off"))) fatal("--bot blue|red on|off");
 			bot_override[f] = !strcmp(on, "on");
 			used = 3;
+		} else if (!strcmp(a, "--zone")) s.zone_name = v;
+		else if (!strcmp(a, "--zones")) {
+			for (const char *z = v; *z && s.zone_count < COORD_MAX_ZONES;) {
+				const char *comma = strchr(z, ',');
+				size_t len = comma ? (size_t)(comma - z) : strlen(z);
+				if (len == 0 || len >= ZONE_NAME) fatal("bad --zones %s", v);
+				memcpy(s.zones[s.zone_count], z, len);
+				s.zones[s.zone_count++][len] = 0;
+				z += len + (comma != nullptr);
+			}
+		} else if (!strcmp(a, "--coord")) {
+			const char *colon = strrchr(v, ':');
+			if (!colon || colon - v >= (ptrdiff_t)sizeof s.coord_host) fatal("--coord HOST:PORT");
+			memcpy(s.coord_host, v, (size_t)(colon - v));
+			s.coord_port = atoi(colon + 1);
 		} else fatal("unknown option %s", a);
 		i += used;
 	}
@@ -321,6 +510,13 @@ int main(int argc, char **argv)
 		replay_begin(&s.writer, &s.replay, s.sim.config);
 		s.recording = true;
 	}
+	s.port = port;
+	if (s.coord_port) {
+		if (!s.zone_name) fatal("--coord needs --zone NAME");
+		conn_init(&s.coord, &s.program, -1, 1 << 20, 4 << 20);
+		for (int k = 0; k < (int)countof(s.held); k++) s.held[k] = bytebuf_make(&s.program, 256);
+	}
+	if (!s.zone_name) s.zone_name = "zone";
 	s.listen_fd = net_listen(port);
 	if (s.listen_fd < 0) fatal("cannot listen on port %d", port);
 	printf("server: %s on port %d, sending with %.0f ms latency, %.0f ms jitter\n",
@@ -332,6 +528,7 @@ int main(int argc, char **argv)
 	while (ticks < 0 || s.sim.tick.v < ticks) {
 		double now = platform_seconds();
 		service_clients(&s, now);
+		coord_service(&s, now);
 		if (now >= next) {
 			step(&s, now);
 			next += SIM_DT / (s.dilation * s.speed);
@@ -350,6 +547,7 @@ int main(int argc, char **argv)
 	for (double end = platform_seconds() + s.latency + s.jitter + 0.5; platform_seconds() < end;) {
 		for (int k = 0; k < MAX_CLIENTS; k++)
 			if (s.clients[k].state != CLIENT_FREE) conn_pump(&s.clients[k].conn, platform_seconds());
+		if (s.coord.open) conn_pump(&s.coord, platform_seconds());
 		net_sleep(0.002);
 	}
 	report(&s, 5.0);
@@ -366,12 +564,18 @@ int main(int argc, char **argv)
 		if (!f) fatal("cannot write %s", stats);
 		fprintf(f, "ticks %lld\njoins %lld\ncommands_admitted %lld\ncommands_refused %lld\n"
 		           "bytes_sent %lld\nunit_entries %lld\nshells_started %lld\nshells_ended %lld\n"
-		           "final_hash %016llx\nfaction_stream_bytes %lld %lld\n",
+		           "final_hash %016llx\nfaction_stream_bytes %lld %lld\nunits_in %lld\nunits_out %lld\n",
 		        (long long)s.sim.tick.v, (long long)s.joins, (long long)s.commands_admitted,
 		        (long long)s.commands_refused, (long long)sent, (long long)s.wire.units_sent,
 		        (long long)s.wire.shells_started, (long long)s.wire.shells_ended,
 		        (unsigned long long)sim_hash_now(&s.sim).v, (long long)s.faction_bytes[0],
-		        (long long)s.faction_bytes[1]);
+		        (long long)s.faction_bytes[1], (long long)s.units_in, (long long)s.units_out);
+		for (int k = 0; k < FACTION_COUNT; k++) {
+			const Units *u = &s.sim.factions[k].units;
+			int gates = 0;
+			for (ptrdiff_t i = 0; i < u->count; i++) gates += u->type[i] == UNIT_GATE && u->progress[i] >= 1.0f;
+			fprintf(f, "gates_%s %d\n", k ? "red" : "blue", gates);
+		}
 		fclose(f);
 	}
 	return 0;

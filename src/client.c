@@ -5,6 +5,11 @@
 //       [--netlog PATH] [--stats PATH]
 //       [--headless] [--auto-orders]       no window; order idle units forward
 //       [--disconnect-at TICK] [--reconnect-after SECONDS] [--quit-at TICK]
+//   rts --coord HOST:PORT [--zone NAME]   find zones through the coordinator
+//       [--switch-to NAME --switch-at N] [--quit-after N]   (N: ticks received)
+//
+// With a coordinator, Tab moves to the next zone. Each zone is its own
+// match: switching drops this one and joins the next from its snapshot.
 //
 // A player simulates its own faction (remote.h): from a faction snapshot and
 // each tick's commands and effects it runs the faction's phase itself and
@@ -17,6 +22,7 @@
 
 #include <math.h>
 
+#include "coord.h"
 #include "net.h"
 #include "netlog.h"
 #include "platform.h"
@@ -35,7 +41,16 @@ typedef struct {
 	bool headless, auto_orders;
 	int64_t disconnect_at, quit_at;
 	double reconnect_after;
+	const char *coord, *zone, *switch_to;
+	int64_t switch_at, quit_after;
 } ClientOptions;
+
+typedef struct {
+	char name[ZONE_NAME];
+	char host[64];
+	int port;
+	bool up;
+} ZoneEntry;
 
 typedef struct {
 	ClientOptions opt;
@@ -55,6 +70,11 @@ typedef struct {
 	double last_delta_at;
 
 	Arena program, frame, out;
+	Arena world;                // this zone's terrain and state: reset on a switch
+	ZoneEntry zones[COORD_MAX_ZONES];
+	int zone_count, zone_at;
+	int64_t zones_visited;
+	bool switched;
 	FILE *netlog;
 	double t0;
 	Rng rng;
@@ -96,6 +116,57 @@ static void client_event(Client *c, uint8_t kind, const char *text)
 
 // ---------------------------------------------------------------- connection
 
+// Ask the coordinator which zones there are. Blocks briefly.
+static bool client_directory(Client *c)
+{
+	const char *colon = strrchr(c->opt.coord, ':');
+	if (!colon) fatal("--coord HOST:PORT");
+	char host[64];
+	snprintf(host, sizeof host, "%.*s", (int)(colon - c->opt.coord), c->opt.coord);
+	int fd = net_connect(host, atoi(colon + 1));
+	if (fd < 0) return false;
+	Conn q;
+	conn_init(&q, &c->out, fd, 1 << 16, 1 << 16);
+	conn_send(&q, COORD_DIRECTORY_ASK, "", 0, platform_seconds());
+	bool got = false;
+	for (int i = 0; i < 400 && q.open && !got; i++) {
+		conn_pump(&q, platform_seconds());
+		Frame f;
+		while (!got && conn_next(&q, &f)) {
+			if (f.kind != COORD_DIRECTORY) continue;
+			ByteReader r = byte_reader(f.data, f.len);
+			int n = get8(&r);
+			c->zone_count = 0;
+			for (int k = 0; k < n && k < COORD_MAX_ZONES; k++) {
+				ZoneEntry *z = &c->zones[c->zone_count];
+				char zhost[ZONE_NAME];
+				if (!get_name(&r, z->name) || !get_name(&r, zhost)) break;
+				snprintf(z->host, sizeof z->host, "%s", zhost);
+				z->port = get16(&r);
+				z->up = get8(&r);
+				if (!r.bad) c->zone_count++;
+			}
+			got = true;
+		}
+		net_sleep(0.005);
+	}
+	conn_close(&q, "done");
+	return got;
+}
+
+// Point the client at a zone from the directory; it connects next round.
+static bool client_choose_zone(Client *c, const char *name)
+{
+	for (int k = 0; k < c->zone_count; k++)
+		if (!name || !strcmp(c->zones[k].name, name)) {
+			c->zone_at = k;
+			c->opt.host = c->zones[k].host;
+			c->opt.port = c->zones[k].port;
+			return true;
+		}
+	return false;
+}
+
 static bool client_connect(Client *c)
 {
 	int fd = net_connect(c->opt.host, c->opt.port);
@@ -110,6 +181,11 @@ static bool client_connect(Client *c)
 	put8(&b, c->opt.faction);
 	conn_send(&c->conn, MSG_HELLO, b.data, b.len, client_now(c));
 	client_event(c, NETLOG_CONNECTED, "");
+	c->zones_visited++;
+	if (c->zone_count) {
+		const char *info = TextFormat("zone %s", c->zones[c->zone_at].name);
+		client_log(c, NETLOG_INFO, info, (ptrdiff_t)strlen(info));
+	}
 	return true;
 }
 
@@ -144,16 +220,25 @@ static void client_welcome(Client *c, ByteReader *r)
 		return;
 	}
 	if (c->have_world) {
-		if (!sim_config_equal(&config, &c->config)) fatal("server changed its config on reconnect");
-		return;
+		// Same match: carry on. A different one (another zone): start over.
+		if (sim_config_equal(&config, &c->config)) {
+			memcpy(c->base, base, sizeof base);
+			return;
+		}
+		if (c->player) remote_destroy(&c->remote);
+		if (c->renderer_ready) renderer_unload(&c->renderer);
+		c->renderer_ready = false;
+		c->have_world = false;
+		c->selection_count = 0;
+		arena_reset(&c->world);
 	}
 	c->config = config;
 	memcpy(c->base, base, sizeof base);
-	terrain_generate(&c->terrain, &c->program, config.seed);
+	terrain_generate(&c->terrain, &c->world, config.seed);
 	c->player = faction < FACTION_COUNT;
-	if (c->player) remote_init(&c->remote, &config, (FactionId){faction}, &c->program);
-	else mirror_init(&c->mirror, &c->program, config.max_units, config.max_projectiles);
-	c->selection = PUSH(&c->program, UnitHandle, config.max_units);
+	if (c->player) remote_init(&c->remote, &config, (FactionId){faction}, &c->world);
+	else mirror_init(&c->mirror, &c->world, config.max_units, config.max_projectiles);
+	c->selection = PUSH(&c->world, UnitHandle, config.max_units);
 	c->have_world = true;
 }
 
@@ -399,14 +484,26 @@ static int client_main(int argc, char **argv)
 		else if (!strcmp(a, "--disconnect-at")) c.opt.disconnect_at = atoll(v);
 		else if (!strcmp(a, "--reconnect-after")) c.opt.reconnect_after = atof(v);
 		else if (!strcmp(a, "--quit-at")) c.opt.quit_at = atoll(v);
+		else if (!strcmp(a, "--coord")) c.opt.coord = v;
+		else if (!strcmp(a, "--zone")) c.opt.zone = v;
+		else if (!strcmp(a, "--switch-to")) c.opt.switch_to = v;
+		else if (!strcmp(a, "--switch-at")) c.opt.switch_at = atoll(v);
+		else if (!strcmp(a, "--quit-after")) c.opt.quit_after = atoll(v);
 		else fatal("unknown option %s", a);
 		i += used;
 	}
-	if (!c.opt.host || c.opt.port <= 0) fatal("--connect HOST:PORT");
+	c.out = arena_create("client out", (ptrdiff_t)16 << 20);
+	if (c.opt.coord) {
+		bool listed = false;
+		for (int tries = 0; tries < 50 && !(listed = client_directory(&c) && c.zone_count > 0); tries++) net_sleep(0.1);
+		if (!listed) fatal("no zones from the coordinator at %s", c.opt.coord);
+		if (!client_choose_zone(&c, c.opt.zone)) fatal("no zone %s at the coordinator", c.opt.zone);
+	}
+	if (!c.opt.host || c.opt.port <= 0) fatal("--connect HOST:PORT or --coord HOST:PORT");
 
 	c.program = arena_create("client program", (ptrdiff_t)1 << 30);
+	c.world = arena_create("client world", (ptrdiff_t)2 << 30);
 	c.frame = arena_create("client frame", (ptrdiff_t)256 << 20);
-	c.out = arena_create("client out", (ptrdiff_t)16 << 20);
 	conn_init(&c.conn, &c.program, -1, (ptrdiff_t)4 << 20, (ptrdiff_t)32 << 20);
 	conn_set_delay(&c.conn, c.opt.latency, c.opt.jitter, 0xc11e47u);
 	c.rng = rng_seed(0xa070u + c.opt.faction);
@@ -460,6 +557,21 @@ static int client_main(int argc, char **argv)
 			c.rate_since = now;
 		}
 		if (c.opt.quit_at >= 0 && client_tick(&c) >= c.opt.quit_at) break;
+		if (c.opt.quit_after > 0 && c.deltas >= c.opt.quit_after) break;
+		// Switching zones: leave this match and join the next from its snapshot.
+		bool tab = !c.opt.headless && c.zone_count > 1 && IsKeyPressed(KEY_TAB);
+		bool scripted = c.opt.switch_to && !c.switched && c.deltas >= c.opt.switch_at;
+		if (tab || scripted) {
+			c.switched = c.switched || scripted;
+			client_directory(&c);
+			const char *next = scripted ? c.opt.switch_to : c.zones[(c.zone_at + 1) % c.zone_count].name;
+			if (client_choose_zone(&c, next)) {
+				conn_close(&c.conn, "switching zones");
+				client_lost(&c, TextFormat("switching to zone %s", next));
+				c.disconnected_since = now - c.opt.reconnect_after; // reconnect right away
+				c.reconnects--;  // a switch, not a failure
+			}
+		}
 		if (!c.conn.open && now - c.disconnected_since > 15.0 && c.opt.headless) {
 			fprintf(stderr, "client: server gone for 15 s, giving up\n");
 			status = 1;
@@ -472,7 +584,7 @@ static int client_main(int argc, char **argv)
 		}
 		if (WindowShouldClose()) break;
 		if (c.have_world && !c.renderer_ready) {
-			renderer_init(&c.renderer, &c.terrain, c.config.max_units, &c.program);
+			renderer_init(&c.renderer, &c.terrain, c.config.max_units, &c.world);
 			c.view = (View){.focus = v2(c.terrain.size_x * 0.5f, c.terrain.size_z * 0.5f), .distance = 420.0f};
 			c.renderer_ready = true;
 		}
@@ -518,6 +630,7 @@ static int client_main(int argc, char **argv)
 	if (c.opt.stats_path) {
 		FILE *f = fopen(c.opt.stats_path, "w");
 		if (!f) fatal("cannot write %s", c.opt.stats_path);
+		fprintf(f, "zones_visited %lld\n", (long long)c.zones_visited);
 		fprintf(f, "deltas %lld\ndigests %lld\ndigest_mismatches %lld\nreconnects %lld\ngaps %lld\n"
 		           "malformed %lld\ncommands_sent %lld\nfinal_tick %lld\nbytes_received %lld\n",
 		        (long long)c.deltas, (long long)c.digests, (long long)c.digest_mismatches,

@@ -146,6 +146,36 @@ Done. The economy is faction state, so the faction split carries it unchanged.
 - **CI**: `make check` is 9.3 s, up from 6.5: the economy test (3 s under
   ASan) and a bigger sanitized build. Next to win back.
 
+## Spike 5 results (2026-10-08)
+
+Done. Zones are separate `rts-server` processes; `rts-coord` sits between.
+
+- **Gates** are structures that charge on energy (10 s, 2000 energy). Units
+  ordered through one walk to it and leave when it fires; arrivals come in
+  around the faction's gate. Departures and arrivals are recorded commands,
+  so every zone's replay still verifies alone, and both are faction state,
+  so the faction split holds (tested).
+- **Seeds**: a charged gate plus 5000 energy fires a gate seed into another
+  zone. It lands near the faction's base there and unfolds over 20 s,
+  vulnerable until it's up.
+- **The coordinator** keeps a text log, one fsynced line per event
+  (`transfer`, `delivered`, `draw`), and rebuilds pools and pending
+  transfers from it on restart. It holds a transfer while its zone is down
+  or has no gate yet for that faction, and retries; zones recognise repeats
+  by transfer id. The pool is a destination like a zone; drawing from it is
+  a transfer back.
+- **Players** find zones through the coordinator (`rts --coord`) and switch
+  with Tab, rejoining each zone from its faction snapshot.
+- **Evidence**: `tools/zone-smoke` (in `make check`, 7 s): units leave alpha
+  for beta while beta is down; the coordinator is killed and restarted from
+  its log; beta comes up and receives all ten; a seed opens gamma; a player
+  switches zones with every faction hash matching. Unit tests cover the
+  ledger (replay, pool, partial draws, bad log lines) and gates under the
+  faction split. Demo 07 shows alpha and beta side by side.
+- **Not yet**: a zone's own crash loses its state, including units that left
+  but weren't yet reported (spike 6: zone snapshots). Zones are local
+  processes on one machine; the directory hands out 127.0.0.1.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

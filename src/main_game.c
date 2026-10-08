@@ -35,6 +35,7 @@
 #include "render.c"
 #include "view.c"
 #include "net.c"
+#include "coord.c"
 #include "remote.c"
 #include "client.c"
 #include "clip.c"
@@ -400,7 +401,7 @@ int main(int argc, char **argv)
 {
 	if (argc > 1 && !strcmp(argv[1], "clip")) return clip_main(argc, argv);
 	for (int i = 1; i < argc; i++)
-		if (!strcmp(argv[i], "--connect")) return client_main(argc, argv);
+		if (!strcmp(argv[i], "--connect") || !strcmp(argv[i], "--coord")) return client_main(argc, argv);
 	const Scenario *scenario = scenario_find("battle");
 	if (argc > 2 && !strcmp(argv[1], "--scenario") && !(scenario = scenario_find(argv[2]))) {
 		fprintf(stderr, "unknown scenario %s; `rts clip --list` lists them\n", argv[2]);

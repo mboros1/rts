@@ -10,6 +10,7 @@
 #include "scenario.c"
 #include "script.c"
 #include "wire.c"
+#include "coord.c"
 
 static int failures;
 static int checks;
@@ -663,6 +664,118 @@ static void test_build_orders(void)
 	arena_destroy(&a);
 }
 
+// The coordinator's memory: what it logs, replayed, is what it had.
+static void test_ledger(void)
+{
+	Arena a = arena_create("ledger", 16 << 20);
+	char path[] = "build/test-ledger.log";
+	FILE *log = fopen(path, "w");
+	CHECK(log != nullptr);
+	if (!log) return;
+	Ledger *l = PUSH(&a, Ledger, 1);
+	l->log = log;
+	int32_t tanks[UNIT_TYPE_COUNT] = {[UNIT_TANK] = 10}, raiders[UNIT_TYPE_COUNT] = {[UNIT_RAIDER] = 4};
+	Transfer *t0 = ledger_depart(l, "alpha", "beta", 0, false, tanks);
+	Transfer *t1 = ledger_depart(l, "alpha", "pool", 0, false, raiders);
+	CHECK(!t0->delivered && t1->delivered);        // the pool takes them at once
+	CHECK(l->pool[0][UNIT_RAIDER] == 4);
+	int32_t want[UNIT_TYPE_COUNT] = {[UNIT_RAIDER] = 6, [UNIT_TANK] = 1};
+	Transfer *t2 = ledger_draw(l, 0, "gamma", want);  // asks for more than there is
+	CHECK(t2 && t2->counts[UNIT_RAIDER] == 4 && t2->counts[UNIT_TANK] == 0);
+	CHECK(l->pool[0][UNIT_RAIDER] == 0);
+	CHECK(ledger_draw(l, 0, "gamma", want) == nullptr); // nothing left
+	ledger_delivered(l, t0->id);
+	ledger_delivered(l, t0->id);                    // again: no second line
+	CHECK(ledger_pending(l) == 1);                  // the draw is still owed
+	fclose(log);
+
+	// A fresh ledger from the log alone has the same transfers and pool.
+	Str text;
+	CHECK(platform_read_file(&a, path, &text));
+	Ledger *again = PUSH(&a, Ledger, 1);
+	int32_t bad;
+	CHECK(ledger_replay(again, text, &bad));
+	CHECK(again->transfer_count == 3 && ledger_pending(again) == 1);
+	CHECK(again->pool[0][UNIT_RAIDER] == 0 && again->next_id == 3);
+	CHECK(ledger_find(again, 0)->delivered && !ledger_find(again, 2)->delivered);
+	int lines = 0;
+	for (ptrdiff_t i = 0; i < text.len; i++) lines += text.ptr[i] == '\n';
+	CHECK(lines == 4);
+
+	const char *broken[] = {"transfer 9 a b 7 units tank:1\n", "delivered 42\n", "draw 1 0 z tank:5\n",
+	                        "transfer 1 a b 0 units nonsense:3\n", "explode 1\n"};
+	for (int k = 0; k < (int)countof(broken); k++) {
+		Ledger *x = PUSH(&a, Ledger, 1);
+		CHECK(!ledger_replay(x, (Str){broken[k], (ptrdiff_t)strlen(broken[k])}, &bad));
+	}
+	remove(path);
+	arena_destroy(&a);
+}
+
+// Gates under the faction split: departures, arrivals and a seed unfolding
+// are all faction state, so clients fed only their streams still match.
+static void test_gates(void)
+{
+	const char *text =
+		"scenario economy\n"
+		"bot blue off\n"
+		"bot red off\n"
+		"zones alpha beta\n"
+		"at 0 spawn blue gate 1 at 100,256 radius 0\n"
+		"at 0 spawn blue tank 6 at 140,256 radius 5\n"
+		"at 1 select blue tank as army\n"
+		"at 2 gate army to beta via 100,256\n";
+	Arena a = arena_create("gates", 64 << 20);
+	Arena tick = arena_create("gates tick", 16 << 20);
+	Script sc;
+	char err[512];
+	CHECK(script_parse(&sc, &a, (Str){text, (ptrdiff_t)strlen(text)}, "t.script", err, sizeof err));
+	Sim server, client;
+	sim_init(&server, sc.config);
+	sim_init(&client, sc.config);
+	ByteBuf buf = bytebuf_make(&a, 4 << 20);
+	wire_encode_faction_snapshot(&server, (FactionId){0}, &buf);
+	ByteReader r = byte_reader(buf.data, buf.len);
+	client.tick.v = (int64_t)get64(&r);
+	CHECK(faction_read(&client.factions[0], &r));
+	ScriptRun run;
+	script_run_init(&run, &sc, &a, nullptr);
+	bool matched = true;
+	int64_t departed = 0;
+	Command cmds[64];
+	for (int t = 0; t < 1500; t++) {
+		arena_reset(&tick);
+		ptrdiff_t n = script_tick(&run, &server, &tick, cmds, countof(cmds) - 2);
+		// What the coordinator would do: send the tanks back, and a seed.
+		if (t == 600) cmds[n++] = (Command){.faction = {0}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_RAIDER, .amount = 3};
+		if (t == 650) cmds[n++] = (Command){.faction = {0}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_GATE, .amount = 1,
+		                                    .flags = COMMAND_SEED_GATE, .target = v2(100, 360)};
+		sim_step(&server, cmds, n);
+		for (ptrdiff_t k = 0; k < server.factions[0].departure_count; k++) departed += server.factions[0].departures[k].count;
+		buf.len = 0;
+		wire_encode_faction_tick(&server, (FactionId){0}, cmds, n, true, 1000, &buf);
+		r = byte_reader(buf.data, buf.len);
+		FactionTick ft;
+		bool ok = wire_read_faction_tick(&r, &tick, &sc.config, (FactionId){0}, &ft);
+		if (ok) faction_tick(&client, (FactionId){0}, &ft.effects, ft.commands, ft.command_count);
+		matched = matched && ok && faction_hash(&client.factions[0]).v == ft.hash.v;
+	}
+	const Units *u = &server.factions[0].units;
+	int gates = 0, raiders = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		gates += u->type[i] == UNIT_GATE && u->progress[i] >= 1.0f;
+		raiders += u->type[i] == UNIT_RAIDER;
+	}
+	CHECK(departed == 6);                    // all six tanks left, as one departure
+	CHECK(server.factions[0].stats.units_arrived == 3 && raiders == 3);
+	CHECK(gates == 2);                       // the seed unfolded beside the first
+	CHECK(matched);
+	sim_destroy(&server);
+	sim_destroy(&client);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+}
+
 typedef struct {
 	const char *name;
 	void (*run)(void);
@@ -680,6 +793,8 @@ static const Test tests[] = {
 	{"split", test_split},
 	{"economy", test_economy},
 	{"build_orders", test_build_orders},
+	{"ledger", test_ledger},
+	{"gates", test_gates},
 };
 
 // tests            run all, in order
