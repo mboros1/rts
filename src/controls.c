@@ -563,7 +563,9 @@ static void draw_info(const Controls *c, const Sim *sim, const Layout *L, const 
 	float x = L->info.x + 10.0f * sc, y = L->info.y + 8.0f * sc;
 	text(def->name, x, y, 22.0f * sc, render_player_color((int)c->me.v, u->owner[d]));
 	const char *who = c->team[u->owner[d].v] && c->team[u->owner[d].v][0] ? c->team[u->owner[d].v] : "you";
-	text(TextFormat("%s   %s", order_name(u->order[d]), u->owner[d].v == c->player.v ? "" : who), x, y + 26.0f * sc,
+	// What it's doing: a factory with a queue is producing, whatever its order says.
+	const char *doing = u->type[d] == UNIT_FACTORY && u->queue_len[d] ? "producing" : order_name(u->order[d]);
+	text(TextFormat("%s   %s", doing, u->owner[d].v == c->player.v ? "" : who), x, y + 26.0f * sc,
 	     14.0f * sc, TEXT_DIM);
 	Rectangle hp = {x, y + 46.0f * sc, L->info.width - 20.0f * sc, 8.0f * sc};
 	DrawRectangleRec(hp, (Color){60, 30, 30, 255});
@@ -586,10 +588,17 @@ static void draw_info(const Controls *c, const Sim *sim, const Layout *L, const 
 	if (u->type[d] == UNIT_ENERGY_TRUCK || u->type[d] == UNIT_ENERGY_VAULT)
 		text(TextFormat("storage +%.0f energy", TRUCK_ENERGY), x, y + 96.0f * sc, 13.0f * sc, ENERGY);
 	if (u->type[d] == UNIT_FACTORY && u->progress[d] >= 1.0f) {
+		// In order, runs of a type together: "queue: raider, 5 tank".
 		char q[160] = "queue:";
 		int used = 6;
-		for (int k = 0; k < u->queue_len[d] && used < (int)sizeof q; k++)
-			used += snprintf(q + used, sizeof q - (size_t)used, " %s", unit_defs[u->queue[d] >> (8 * k) & 0xff].name);
+		for (int k = 0; k < u->queue_len[d] && used < (int)sizeof q;) {
+			UnitType t = (UnitType)(u->queue[d] >> (8 * k) & 0xff);
+			int run = 1;
+			while (k + run < u->queue_len[d] && (UnitType)(u->queue[d] >> (8 * (k + run)) & 0xff) == t) run++;
+			used += snprintf(q + used, sizeof q - (size_t)used, "%s %s%s", k ? "," : "", run > 1 ? TextFormat("%d ", run) : "",
+			                 unit_defs[t].name);
+			k += run;
+		}
 		if (!u->queue_len[d]) snprintf(q + used, sizeof q - (size_t)used, " empty");
 		text(q, x, y + 96.0f * sc, 13.0f * sc, TEXT);
 		if (u->queue_len[d]) {
