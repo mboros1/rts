@@ -997,7 +997,7 @@ static int client_main(int argc, char **argv)
 			UnloadRenderTexture(c.small);
 			if (pclose(c.video) != 0) fprintf(stderr, "client: ffmpeg failed on %s\n", c.opt.video), status = 1;
 			else printf("client: wrote %s (%lld frames)\n", c.opt.video, (long long)c.video_frames);
-			char abs[1024];
+			char abs[4096]; // realpath's size
 			if (c.opt.clipboard && (!platform_absolute_path(c.opt.video, abs, sizeof abs) || !platform_clipboard_copy_file(abs)))
 				fprintf(stderr, "client: could not copy %s to the clipboard\n", c.opt.video);
 			else if (c.opt.clipboard) printf("client: %s is on the clipboard\n", abs);
