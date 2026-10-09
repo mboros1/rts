@@ -675,6 +675,11 @@ truck carries a load only when it leaves or changes hands.)
   message, and the two new floats overflowed it silently; the server
   refused every command. It's sized from the fields now, and an overflow is
   fatal.
+- **Soaks**: 3 minutes of `make soak` pass. The hour-long soak at the end of
+  spikes 13-16 (`worlds/teams.world`, 60 minutes at 8x) passes: 92 zone
+  kills, 39 coordinator kills, 58 player sessions, 5600 units across with
+  none lost or duplicated, every replay segment chained, the log compacted
+  40 times; centre changed hands three times.
 - **Formats**: replay v13, wire v10, zone state v7, coordinator log (cargo).
 - **Not yet**: no explicit load or unload; which containers fill is their
   order in the zone. Trucks carry energy almost only (metal rarely
