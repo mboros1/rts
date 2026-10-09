@@ -53,6 +53,9 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 15 | AI slots | Teams with gaps still play | A slot nobody plays, or whose player left, is AI-held: one bot per side drives every AI-held slot (units and economy) alongside the humans; a teammate can take its units; a returning player gets the slot back; an 8v8 bot benchmark records its cost |
 | 16 | Containers | Resources cross zones | A mobile container holds part of its owner's resources and carries them through transporters; in the zone it reaches, they join its owner's economy there |
 | 17 | Command grid | Everything a selection can do is on screen | BAR's layout: the build grid (items on QWER ASDF, tabs on ZXCV) over the info pane, the orders grid beside them, resources at the top, the team bottom right; every button clickable and keyed; placeholders where later spikes go; played by hand |
+| 18 | Commanders | A player is somewhere | Each player starts with only a commander (it builds the basics; engineers come from the first factory); no free income or storage in a zone without yours; a headquarters per side, no player's, where commanders respawn every 60 s; warp home (energy streamed as building is, cast, cooldown), automatic 30 s after logging out |
+| 18b | Bots with commanders | Bots open and play as players now do | The commander-only opening; bots keep their commanders useful and alive, and warp home |
+| 18c | Winning | A game ends | Destroying a side's headquarters ends the game |
 
 Then the UI spikes: the command grid and selection panel, the strategic map
 as the logistics console with pings and chat, minimap, control groups and
@@ -856,19 +859,25 @@ restart).
   unit's owner, scaled by damage and range: cheap units nearly free,
   artillery more, and heavy drainers when there are any; a unit that can't
   pay holds its fire. Bots keep a reserve at the front and count being short
-  of energy as a reason for trucks.
-- Gate expansion metagame: seed energy cost, distance scaling on the zone
-  graph, which units can travel without a gate (drop pods, commandos).
-- Logout exploits: logging out to escape a fight (needs a logout timer), and
-  converting units to defenses only in friendly territory. Entrenching is
-  instant today.
-- Coordinator log compaction and replay segment pruning (spike 6 limits).
-- Offline defenses piling up: upkeep so static defenses decay unless supplied.
-- Economy growth over a war that never ends: war resets or hard resource sinks.
+  of energy as a reason for trucks. And the zones' size and metal: 32 spots
+  shared by sixteen players keeps an 8v8 small (spike 15).
+- Commander economics: a respawn's cost, and the headquarters' own (spike 18
+  makes them free).
+- The war's length: a game ends when a headquarters falls (spike 18c); how a
+  persistent world is balanced over a long war is open (perhaps games
+  shorter than a season), as is what carries over between games.
+- The transporter metagame: distance on the zone graph, units that travel
+  without one (drop pods, commandos).
+- Logging out to escape a fight: units are handed to the bot 30 s after,
+  and commanders warp home (spike 18); whether that's exploitable.
+- Replay segment pruning (each zone's replays grow forever; the
+  coordinator's log is compacted since spike 10).
+- Defenses piling up: upkeep so entrenched units and vaults decay unless
+  supplied.
 - Use-based skills and XP: farming with alt accounts, the experience for new
   players.
-- Unit ownership rules: in the pool, in play, persisted, destroyed.
-- Per-zone commander caps plus time dilation for overloaded zones.
-- Real pathfinding (QTPFS port or our own), graphics, anti-cheat, real
-  internet networking.
+- Per-zone player caps, with time dilation for overloaded zones.
+- Real pathfinding (QTPFS port or our own), graphics, anti-cheat,
+  authentication (a client can ask for the whole map today), real internet
+  networking, the Windows build run (it's compiled, never run).
 - GPL: porting Recoil code makes the engine GPL; a clean-room spec avoids it.
