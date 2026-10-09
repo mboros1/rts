@@ -1119,8 +1119,6 @@ static void test_entrench(void)
 // Each player's economy: income to the earner, past storage to teammates;
 // each pays for their own (builders, factories) and stalls alone; shares
 // move only what the giver has and the taker has room for.
-// (A player's store is set through held_*: what they have is rebuilt from it
-// and their containers each tick.)
 static void test_economies(void)
 {
 	SimConfig c = sim_config_default();
@@ -1133,7 +1131,7 @@ static void test_economies(void)
 	Economy *e0 = &f->economy[0], *e1 = &f->economy[1];
 	Units *u = &f->units;
 	// Player 0 is full of metal: its income spills to player 1.
-	e0->metal = e0->held_metal = e0->metal_cap;
+	e0->metal = e0->metal_cap;
 	float before = e1->metal;
 	sim_step(&sim, nullptr, 0);
 	CHECK(e0->metal == e0->metal_cap);
@@ -1144,7 +1142,7 @@ static void test_economies(void)
 	before = e1->metal;
 	sim_step(&sim, &share, 1);    // 0 is full: nothing moves (but its income spills)
 	CHECK(e1->metal >= before);
-	e0->metal = e0->held_metal = 0.0f;
+	e0->metal = 0.0f;
 	before = e1->metal;
 	share = share_command((FactionId){0}, (PlayerSlot){1}, (PlayerSlot){0}, 100.0f, 1e9f);
 	sim_step(&sim, &share, 1);
@@ -1161,9 +1159,9 @@ static void test_economies(void)
 	for (int p = 0; p < 2; p++)
 		produce[p] = (Command){.faction = {0}, .player = {(uint8_t)p}, .kind = COMMAND_PRODUCE, .count = 1,
 		                       .units = &h[p], .unit_type = UNIT_RAIDER, .amount = 1};
-	e0->metal = e0->held_metal = 0.0f;
-	e1->metal = e1->held_metal = 500.0f;
-	e0->energy = e1->energy = e0->held_energy = e1->held_energy = 3000.0f;   // power for both: only metal differs
+	e0->metal = 0.0f;
+	e1->metal = 500.0f;
+	e0->energy = e1->energy = 3000.0f;   // power for both: only metal differs
 	sim_step(&sim, produce, 2);
 	for (int t = 0; t < 30; t++) sim_step(&sim, nullptr, 0);
 	float work0 = u->work[units_find(u, h[0])], work1 = u->work[units_find(u, h[1])];
@@ -1227,12 +1225,11 @@ static void test_take(void)
 	arena_destroy(&a);
 }
 
-// Containers: storage that moves. Their room adds to their owner's, income
-// past the held store fills them, spending empties them first (the held
-// store stays full while it can); a dead one loses its cargo; dug in as a
-// vault it keeps it; sent, its cargo leaves with it, and arriving, unloads
-// into the owner's store there.
-static void test_containers(void)
+// Trucks: storage that moves. Their room adds to their owner's cap where
+// they are; leaving or changing hands, one takes a full load (or what there
+// is) and brings it, with its room, to where it goes; storage lost loses
+// what's past the cap. Dug in as a vault, a truck's room stays.
+static void test_trucks(void)
 {
 	SimConfig c = sim_config_default();
 	c.economy = true;
@@ -1242,77 +1239,73 @@ static void test_containers(void)
 	sim_init(&sim, c);
 	Faction *f = &sim.factions[0];
 	Units *u = &f->units;
-	Economy *e = &f->economy[0];
-	Command spawn = {.faction = {0}, .player = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_CONTAINER, .amount = 2,
-	                 .target = {100, 256}, .radius = 2};
-	Command gen = {.faction = {0}, .player = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_TRANSPORTER, .amount = 1,
-	               .target = {110, 256}, .radius = 0};
-	Command both[2] = {spawn, gen};
-	sim_step(&sim, both, 2);
-	CHECK(e->metal_cap == 2000.0f + 2.0f * CONTAINER_METAL && e->energy_cap == 10000.0f + 2.0f * CONTAINER_ENERGY);
-	// Full held store: income goes into the containers, not to the teammate.
-	e->held_metal = 2000.0f;
-	float teammate = f->economy[1].metal;
+	Economy *e = &f->economy[0], *e1 = &f->economy[1];
+	Command setup[3] = {
+		{.faction = {0}, .player = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_ENERGY_TRUCK, .amount = 2, .target = {100, 256}, .radius = 2},
+		{.faction = {0}, .player = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_METAL_TRUCK, .amount = 1, .target = {100, 260}, .radius = 0},
+		{.faction = {0}, .player = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_TRANSPORTER, .amount = 1, .target = {110, 256}, .radius = 0},
+	};
+	sim_step(&sim, setup, 3);
+	sim_step(&sim, nullptr, 0);
+	CHECK(e->energy_cap == BASE_ENERGY_CAP + 2.0f * TRUCK_ENERGY && e->metal_cap == BASE_METAL_CAP + TRUCK_METAL);
+	CHECK(e1->energy_cap == BASE_ENERGY_CAP);
+	// Room is room: past the base, income stays with player 0, not spilling to 1.
+	e->energy = BASE_ENERGY_CAP;
+	float e1_before = e1->energy;
 	for (int t = 0; t < 30; t++) sim_step(&sim, nullptr, 0);
-	float cargo = 0.0f;
-	ptrdiff_t box[2] = {-1, -1};
-	for (ptrdiff_t i = 0, k = 0; i < u->count; i++)
-		if (u->type[i] == UNIT_CONTAINER) {
-			cargo += u->cargo_metal[i];
-			box[k++] = i;
-		}
-	CHECK(cargo > 0.9f && cargo < 1.1f);                // a second of base income
-	CHECK(f->economy[1].metal < teammate + 1.01f + 0.01f); // only the teammate's own trickle
-	CHECK(e->metal > 2000.9f && e->held_metal == 2000.0f);
-	// Spending empties the containers first: give 500 away.
-	Command share = share_command((FactionId){0}, (PlayerSlot){0}, (PlayerSlot){1}, 500.0f, 0.0f);
-	sim_step(&sim, &share, 1);
-	CHECK(e->held_metal < 1600.0f && u->cargo_metal[box[0]] == 0.0f);
-	// Fill the first container, then dig it in: a vault, cargo and all.
-	e->held_metal = 2000.0f;
-	u->cargo_metal[box[0]] = 800.0f;
-	UnitHandle h0 = units_handle(u, box[0]), h1 = units_handle(u, box[1]);
-	Command dig = {.faction = {0}, .player = {0}, .kind = COMMAND_ENTRENCH, .count = 1, .units = &h0};
+	CHECK(e->energy > BASE_ENERGY_CAP + 29.0f && e1->energy < e1_before + 31.0f);
+	UnitHandle truck[3];
+	for (ptrdiff_t i = 0, n = 0; i < u->count; i++)
+		if (unit_is_truck(u->type[i])) truck[n++] = units_handle(u, i);
+	// Given to player 1, an energy truck takes a full load and its room with it.
+	e->energy = 18000.0f;
+	ptrdiff_t first = units_find(u, truck[0]);
+	UnitHandle energy_truck = u->type[first] == UNIT_ENERGY_TRUCK ? truck[0] : truck[1];
+	float e1_had = e1->energy;
+	Command give = {.faction = {0}, .player = {0}, .to = {1}, .kind = COMMAND_GIVE, .count = 1, .units = &energy_truck};
+	sim_step(&sim, &give, 1);
+	CHECK(e->energy_cap == BASE_ENERGY_CAP + TRUCK_ENERGY && e1->energy_cap == BASE_ENERGY_CAP + TRUCK_ENERGY);
+	CHECK(e->energy > 12990.0f && e->energy < 13100.0f);           // 18000 less a load, plus a tick's income
+	CHECK(e1->energy > e1_had + TRUCK_ENERGY - 1.0f);
+	// Dug in as a vault, the room stays.
+	UnitHandle other = unit_handle_eq(energy_truck, truck[0]) ? truck[1] : truck[0];
+	if (u->type[units_find(u, other)] != UNIT_ENERGY_TRUCK) other = truck[2];
+	Command dig = {.faction = {0}, .player = {0}, .kind = COMMAND_ENTRENCH, .count = 1, .units = &other};
 	sim_step(&sim, &dig, 1);
 	for (int t = 0; t < 200; t++) sim_step(&sim, nullptr, 0);
-	ptrdiff_t v = units_find(u, h0);
-	CHECK(v >= 0 && u->type[v] == UNIT_VAULT && u->cargo_metal[v] >= 750.0f); // less the digging in, paid from it
-	// The other, filled and sent through the transporter: its cargo goes with it.
-	ptrdiff_t b1 = units_find(u, h1);
-	u->cargo_metal[b1] = 300.0f;
-	u->cargo_energy[b1] = 2000.0f;
-	e->held_energy = 10000.0f;
-	Command send = {.faction = {0}, .player = {0}, .to = {1}, .kind = COMMAND_SEND, .amount = 1, .count = 1, .units = &h1};
+	CHECK(u->type[units_find(u, other)] == UNIT_ENERGY_VAULT && e->energy_cap == BASE_ENERGY_CAP + TRUCK_ENERGY);
+	// The metal truck sent through the transporter, for player 1: a full load
+	// leaves, even from below the base (the player chose to send it).
+	UnitHandle metal_truck = truck[0];
+	for (int k = 0; k < 3; k++)
+		if (u->type[units_find(u, truck[k])] == UNIT_METAL_TRUCK) metal_truck = truck[k];
+	e->metal = 1500.0f;
+	Command send = {.faction = {0}, .player = {0}, .to = {1}, .kind = COMMAND_SEND, .amount = 1, .count = 1, .units = &metal_truck};
 	sim_step(&sim, &send, 1);
-	float left_m = 0.0f, left_e = 0.0f;
-	for (int t = 0; t < 600 && left_m == 0.0f; t++) {
+	float left_m = -1.0f;
+	for (int t = 0; t < 600 && left_m < 0.0f; t++) {
 		sim_step(&sim, nullptr, 0);
 		for (ptrdiff_t k = 0; k < f->departure_count; k++)
-			if (f->departures[k].type == UNIT_CONTAINER) {
-				left_m += f->departures[k].metal;
-				left_e += f->departures[k].energy;
-				CHECK(player_eq(f->departures[k].owner, (PlayerSlot){1}));
+			if (f->departures[k].type == UNIT_METAL_TRUCK) {
+				left_m = f->departures[k].metal;
+				CHECK(player_eq(f->departures[k].owner, (PlayerSlot){1}) && f->departures[k].energy == 0.0f);
 			}
 	}
-	CHECK(left_m >= 299.0f && left_m <= 301.0f && left_e >= 1900.0f); // less the transporter's charge
-	sim_step(&sim, nullptr, 0);                          // what a player has is counted as each tick starts
-	CHECK(e->metal_cap == 2000.0f + CONTAINER_METAL);    // the vault's room only
-	// Arriving: two containers for player 1, carrying 1200 metal between them.
-	float before = f->economy[1].metal;
-	Command arrive = {.faction = {0}, .player = {1}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_CONTAINER, .amount = 2,
-	                  .target = {110, 256}, .metal = 1200.0f, .energy = 0.0f};
+	CHECK(left_m == TRUCK_METAL);
+	CHECK(e->metal < 600.0f);                                        // 1500 less the load, plus income
+	// Arriving: two metal trucks for player 1 bring their room and 1500 metal.
+	sim_step(&sim, nullptr, 0);
+	float m1 = e1->metal;
+	Command arrive = {.faction = {0}, .player = {1}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_METAL_TRUCK, .amount = 2,
+	                  .target = {110, 256}, .metal = 1500.0f};
 	sim_step(&sim, &arrive, 1);
+	CHECK(e1->metal_cap == BASE_METAL_CAP + 2.0f * TRUCK_METAL && e1->metal > m1 + 1499.0f);
+	// The vault destroyed: the room goes, and what's past the cap with it.
+	e->energy = e->energy_cap;
+	u->hp[units_find(u, other)] = 0.0f;
 	sim_step(&sim, nullptr, 0);
-	CHECK(f->economy[1].metal > before + 1199.0f);
-	// A vault destroyed: its cargo is gone with it.
-	e->held_metal = HELD_METAL_CAP;                      // full: the vault can't unload
 	sim_step(&sim, nullptr, 0);
-	ptrdiff_t vault = units_find(u, h0);
-	float had = e->metal, in_vault = u->cargo_metal[vault];
-	u->hp[vault] = 0.0f;
-	sim_step(&sim, nullptr, 0);                          // it dies
-	sim_step(&sim, nullptr, 0);                          // and isn't counted
-	CHECK(in_vault > 100.0f && e->metal < had - in_vault + 1.0f);
+	CHECK(e->energy_cap == BASE_ENERGY_CAP && e->energy <= BASE_ENERGY_CAP);
 	sim_destroy(&sim);
 }
 
@@ -1456,7 +1449,7 @@ static const Test tests[] = {
 	{"ownership", test_ownership},
 	{"economies", test_economies},
 	{"take", test_take},
-	{"containers", test_containers},
+	{"trucks", test_trucks},
 };
 
 // tests            run all, in order

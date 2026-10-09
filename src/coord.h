@@ -5,7 +5,7 @@
 //
 //   transfer ID SRC DST FACTION PLAYER paired|unpaired SEQ ROUTE X,Z TYPE:N ... [cargo:M,E]
 //       units left SRC for DST, to arrive owned by PLAYER (a slot of FACTION),
-//       their containers carrying M metal and E energy
+//       their trucks carrying M metal and E energy
 //       (SEQ: SRC's own number for it), going on
 //       along ROUTE (a Route, in hex) from there; unpaired ones land at X,Z
 //   delivered ID                            DST took them in
@@ -62,7 +62,7 @@ typedef struct {
 void put_leg(ByteBuf *b, const Leg *l);
 bool get_leg(ByteReader *r, Leg *l);
 
-// What a transfer's containers carry, all together. On the wire: f32 metal, energy.
+// What a transfer's trucks carry, all together. On the wire: f32 metal, energy.
 typedef struct {
 	float metal, energy;
 } Cargo;

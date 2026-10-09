@@ -125,13 +125,15 @@ void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Are
 	r->unit_mesh[UNIT_ENGINEER] = GenMeshCube(1.0f, 1.0f, 1.0f);
 	r->unit_mesh[UNIT_SAPPER] = GenMeshCube(1.0f, 1.0f, 1.0f);
 	r->unit_mesh[UNIT_SCOUT] = GenMeshSphere(0.5f, 6, 8);
-	r->unit_mesh[UNIT_CONTAINER] = GenMeshCube(1.0f, 1.0f, 1.6f);
+	r->unit_mesh[UNIT_METAL_TRUCK] = GenMeshCube(1.0f, 1.0f, 1.6f);
+	r->unit_mesh[UNIT_ENERGY_TRUCK] = GenMeshCylinder(0.5f, 1.0f, 8); // a tanker
 	r->unit_mesh[UNIT_EXTRACTOR] = GenMeshCylinder(0.5f, 1.0f, 10);
 	r->unit_mesh[UNIT_GENERATOR] = GenMeshCylinder(0.3f, 1.0f, 6);
 	r->unit_mesh[UNIT_FACTORY] = GenMeshCube(1.0f, 1.0f, 1.0f);
 	r->unit_mesh[UNIT_TRANSPORTER] = GenMeshCylinder(0.5f, 1.0f, 20);
 	r->unit_mesh[UNIT_TURRET] = GenMeshCone(0.5f, 1.0f, 6);
-	r->unit_mesh[UNIT_VAULT] = GenMeshCube(1.0f, 1.0f, 1.0f);
+	r->unit_mesh[UNIT_METAL_VAULT] = GenMeshCube(1.0f, 1.0f, 1.0f);
+	r->unit_mesh[UNIT_ENERGY_VAULT] = GenMeshCylinder(0.5f, 1.0f, 12);
 	r->shell_mesh = GenMeshSphere(1.0f, 6, 8);
 	r->terrain = build_terrain(terrain);
 	r->terrain_vertices = r->terrain.meshes[0].vertexCount;
@@ -234,7 +236,7 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 				h *= unit_digs_in(u->type[i]) ? 1.0f - 0.6f * w : 0.4f + 0.6f * w;
 			}
 			bool from_base = t == UNIT_ARTILLERY || t == UNIT_SIEGE || t == UNIT_EXTRACTOR || t == UNIT_GENERATOR || t == UNIT_TRANSPORTER
-			              || t == UNIT_TURRET || t == UNIT_VAULT;
+			              || t == UNIT_TURRET || t == UNIT_METAL_VAULT || t == UNIT_ENERGY_VAULT || t == UNIT_ENERGY_TRUCK;
 			float y = u->py[i] + (from_base ? 0.0f : 0.5f * h);
 			float yaw = unit_is_structure(u->type[i]) ? 0.0f : heading[slot];
 			if (t == UNIT_ENGINEER || t == UNIT_SAPPER) h *= 0.7f;

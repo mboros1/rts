@@ -180,15 +180,15 @@ static void send_or_drop(Server *s, Client *c, uint8_t kind, const ByteBuf *b, d
 // away from the start. Recorded as COMMAND_AI_SLOTS by the script runner.
 static constexpr int64_t AWAY_GRACE = 30 * 30;   // ticks: 30 game seconds
 
-// Side f's players here (bit per slot) short of metal or energy: under half
-// a held store's worth, containers parked here included. Where their
-// containers would help.
-static uint8_t side_short_of(const Sim *sim, int f)
+// Side f's players here (bit per slot) short of metal (energy): under half
+// the base storage's worth. Where their trucks would help.
+static uint8_t side_short_of(const Sim *sim, int f, bool energy)
 {
 	uint8_t mask = 0;
 	for (int p = 0; sim->config.economy && p < sim->config.players[f]; p++) {
 		const Economy *e = &sim->factions[f].economy[p];
-		if (e->metal < 0.5f * HELD_METAL_CAP || e->energy < 0.5f * HELD_ENERGY_CAP) mask |= (uint8_t)(1u << p);
+		bool short_of = energy ? e->energy < 0.5f * BASE_ENERGY_CAP : e->metal < 0.5f * BASE_METAL_CAP;
+		mask |= (uint8_t)(short_of << p);
 	}
 	return mask;
 }
@@ -452,8 +452,9 @@ static void on_deliver(Server *s, ByteReader *r, double now)
 		s->queued[s->queued_count++] = (Command){.faction = {faction}, .kind = COMMAND_ARRIVE, .target = at,
 		                                         .player = leg.owner,
 		                                         .unit_type = (UnitType)k, .amount = counts[k], .route = leg.route,
-		                                         .metal = k == UNIT_CONTAINER ? cargo.metal : 0.0f,
-		                                         .energy = k == UNIT_CONTAINER ? cargo.energy : 0.0f,
+		                                         // metal trucks bring the metal, energy trucks the energy
+		                                         .metal = k == UNIT_METAL_TRUCK ? cargo.metal : 0.0f,
+		                                         .energy = k == UNIT_ENERGY_TRUCK ? cargo.energy : 0.0f,
 		                                         .flags = leg.unpaired ? COMMAND_UNPAIRED : 0};
 	}
 	s->confirm[s->confirm_count++] = id;
@@ -512,7 +513,8 @@ static void coord_service(Server *s, double now)
 			st.units[f] = (uint16_t)(units < 65535 ? units : 65535);
 			st.structures[f] = (uint16_t)(structures < 65535 ? structures : 65535);
 			st.transporters[f] = (uint8_t)(transporters < 255 ? transporters : 255);
-			st.short_of[f] = side_short_of(&s->sim, f);
+			st.short_metal[f] = side_short_of(&s->sim, f, false);
+			st.short_energy[f] = side_short_of(&s->sim, f, true);
 			st.intel[f] = (Intel){.contact = s->contact[f], .seen_age = age_of(s, s->contact_tick[f]),
 			                      .transporters = s->transporters_seen[f],
 			                      .transporter_age = age_of(s, s->transporter_tick[f])};
@@ -538,7 +540,7 @@ static void coord_service(Server *s, double now)
 //   "RTSZ" u32 version, config (wire_put_config), u64 last departure number,
 //   u32 n, n x outgoing departure, u32 m, m x u64 applied transfer, sim_save
 
-enum { ZONE_STATE_VERSION = 7 };
+enum { ZONE_STATE_VERSION = 8 };
 
 static void put_outgoing(ByteBuf *b, const Outgoing *o)
 {
@@ -795,7 +797,8 @@ static void update_bot_worlds(Server *s)
 		for (ptrdiff_t i = 0; i < u->count; i++) mine += unit_is_structure(u->type[i]) ? 2 : unit_is_combat(u->type[i]);
 		w->mine[s->here] = mine;
 		w->ours[s->here] = has_transporter(s, s->here, (uint8_t)f);
-		w->short_of[s->here] = side_short_of(&s->sim, f);
+		w->short_metal[s->here] = side_short_of(&s->sim, f, false);
+		w->short_energy[s->here] = side_short_of(&s->sim, f, true);
 		w->contact[s->here] = s->contact[f];
 		w->seen_age[s->here] = age_of(s, s->contact_tick[f]);
 		w->transporter_age[s->here] = s->transporters_seen[f] ? age_of(s, s->transporter_tick[f]) : BOT_NEVER;

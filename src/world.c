@@ -119,7 +119,8 @@ void put_zone_status(ByteBuf *b, const ZoneStatus *s)
 		put16(b, s->units[f]);
 		put16(b, s->structures[f]);
 		put8(b, s->transporters[f]);
-		put8(b, s->short_of[f]);
+		put8(b, s->short_metal[f]);
+		put8(b, s->short_energy[f]);
 		put8(b, s->intel[f].contact);
 		put32(b, s->intel[f].seen_age);
 		put8(b, s->intel[f].transporters);
@@ -134,14 +135,14 @@ bool get_zone_status(ByteReader *r, ZoneStatus *s)
 		s->units[f] = get16(r);
 		s->structures[f] = get16(r);
 		s->transporters[f] = get8(r);
-		uint8_t short_of = get8(r);
+		s->short_metal[f] = get8(r);
+		s->short_energy[f] = get8(r);
 		uint8_t contact = get8(r);
 		s->intel[f].seen_age = get32(r);
 		s->intel[f].transporters = get8(r);
 		s->intel[f].transporter_age = get32(r);
 		if (contact > 1) return false;
 		s->intel[f].contact = contact;
-		s->short_of[f] = short_of;
 	}
 	return !r->bad && s->tick >= 0;
 }
@@ -287,7 +288,8 @@ void bot_world_build(BotWorld *w, const Directory *d, int here, uint8_t f)
 		if (!dz->reported) continue;
 		const Intel *in = &dz->status.intel[f];
 		w->ours[z] = dz->status.transporters[f] > 0;
-		w->short_of[z] = dz->status.short_of[f];
+		w->short_metal[z] = dz->status.short_metal[f];
+		w->short_energy[z] = dz->status.short_energy[f];
 		w->mine[z] = dz->status.units[f] + 2 * dz->status.structures[f];
 		w->contact[z] = in->contact;
 		w->seen_age[z] = in->seen_age;
@@ -316,7 +318,7 @@ void directory_fog(Directory *d, uint8_t viewer)
 		s->units[enemy] = 0;
 		s->structures[enemy] = 0;
 		s->transporters[enemy] = 0;
-		s->short_of[enemy] = 0;
+		s->short_metal[enemy] = s->short_energy[enemy] = 0;
 		s->intel[enemy] = (Intel){.seen_age = INTEL_NEVER, .transporter_age = INTEL_NEVER};
 	}
 	d->players[enemy] = 0;

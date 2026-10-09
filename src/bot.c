@@ -174,7 +174,7 @@ static bool own_transporter(const Bot *bot, const Units *u, bool finished_only)
 }
 
 
-enum { BOT_CONTAINERS = 2 };   // kept waiting to be filled and shipped, at most
+enum { BOT_TRUCKS = 2 };   // of each kind kept waiting in a zone, at most
 
 // An economy, kept simply: factories cycle a mix of units (with engineers
 // while there are too few); idle engineers take the most useful job.
@@ -183,18 +183,17 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	FactionId f = bot->faction;
 	const Faction *me = &sim->factions[f.v];
 	const Units *u = &me->units;
-	// Containers are cargo to ship, not a budget: plan on the held store.
+	// Trucks' room is for shipping, not a budget: plan on the base storage.
 	Economy plan = me->economy[bot->player.v];
-	plan.metal = plan.held_metal;
-	plan.energy = plan.held_energy;
-	plan.metal_cap = HELD_METAL_CAP;
-	plan.energy_cap = HELD_ENERGY_CAP;
+	plan.metal_cap = BASE_METAL_CAP;
+	plan.energy_cap = BASE_ENERGY_CAP;
 	const Economy *e = &plan;
 	const Doctrine *d = &bot->doctrine;
-	int engineers = 0, factories = 0, army = 0, scouts = 0, sappers = 0, containers = 0;
+	int engineers = 0, factories = 0, army = 0, scouts = 0, sappers = 0, metal_trucks = 0, energy_trucks = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (!mine(bot, u, i)) continue;
-		containers += u->type[i] == UNIT_CONTAINER && u->order[i] != ORDER_SEND;
+		metal_trucks += u->type[i] == UNIT_METAL_TRUCK && u->order[i] != ORDER_SEND;
+		energy_trucks += u->type[i] == UNIT_ENERGY_TRUCK && u->order[i] != ORDER_SEND;
 		engineers += u->type[i] == UNIT_ENGINEER;
 		sappers += u->type[i] == UNIT_SAPPER;
 		scouts += u->type[i] == UNIT_SCOUT;
@@ -216,9 +215,10 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	amount[UNIT_ENGINEER] = engineers < want_engineers;
 	amount[UNIT_SCOUT] = bot->world && scouts < d->scouts;
 	amount[UNIT_SAPPER] = bot->world && d->crew_builder == UNIT_SAPPER && sappers < d->crew_builders;
-	// Storage nearly full: containers, to ship it to the front (bot_strategy).
-	bool full = e->metal >= 0.9f * e->metal_cap || e->energy >= 0.9f * e->energy_cap;
-	amount[UNIT_CONTAINER] = bot->world && !opening && full && containers < BOT_CONTAINERS;
+	// A resource's base storage nearly full: trucks of it, to ship loads to
+	// the front (bot_strategy).
+	amount[UNIT_METAL_TRUCK] = bot->world && !opening && e->metal >= 0.9f * e->metal_cap && metal_trucks < BOT_TRUCKS;
+	amount[UNIT_ENERGY_TRUCK] = bot->world && !opening && e->energy >= 0.9f * e->energy_cap && energy_trucks < BOT_TRUCKS;
 	// Enough here (spend it first), or enough everywhere: a zone that sends
 	// its army away would otherwise make one forever.
 	int32_t everywhere = 0;
@@ -244,8 +244,8 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		c.amount = 0; // clear, then queue the cycle
 		emit(out, count, cap, c);
 		// Builders and eyes first, then the army.
-		const UnitType order[] = {UNIT_ENGINEER, UNIT_SAPPER, UNIT_SCOUT, UNIT_CONTAINER, UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY,
-		                          UNIT_SIEGE};
+		const UnitType order[] = {UNIT_ENGINEER, UNIT_SAPPER, UNIT_SCOUT, UNIT_METAL_TRUCK, UNIT_ENERGY_TRUCK, UNIT_RAIDER,
+		                          UNIT_TANK, UNIT_ARTILLERY, UNIT_SIEGE};
 		for (int k = 0; k < (int)countof(order); k++) {
 			int32_t n = for_us ? amount[order[k]] : unit_is_combat(order[k]) ? d->mix[order[k]] : 0;
 			if (!n) continue;
@@ -363,10 +363,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	FactionId f = bot->faction;
 	const Faction *me = &sim->factions[f.v];
 	const Units *u = &me->units;
-	Economy plan = me->economy[bot->player.v]; // the held store, as bot_economy plans
-	plan.metal = plan.held_metal;
-	plan.energy = plan.held_energy;
-	const Economy *e = &plan;
+	const Economy *e = &me->economy[bot->player.v];
 	int here = w->here;
 	bool sending = false;
 	int32_t idle_army = 0, idle_builders = 0, idle_crew = 0, idle_raiders = 0, scouts = 0, turrets = 0;
@@ -472,38 +469,40 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 			target = z;
 		}
 	}
-	// Empty containers beyond a few go home to be filled again, like trucks.
-	int32_t idle_boxes = 0;
-	ptrdiff_t empty_box = -1;
-	for (ptrdiff_t i = 0; i < u->count; i++) {
-		if (!mine(bot, u, i) || u->type[i] != UNIT_CONTAINER || u->order[i] != ORDER_IDLE) continue;
-		idle_boxes++;
-		if (u->cargo_metal[i] < 1.0f && u->cargo_energy[i] < 1.0f) empty_box = i;
-	}
+	// Trucks, each kind by its own resource: one waiting here goes, with a
+	// full load, to the zone of ours furthest forward where this player is
+	// short of that resource, if there's a full load to take; one too many
+	// in a zone that isn't home goes home when there's little to take.
 	int home = -1;
 	for (int z = 0; z < w->count; z++)
 		if (w->home[z]) home = z;
-	if (home >= 0 && home != here && w->ours[home] && idle_boxes > BOT_CONTAINERS && empty_box >= 0) {
+	for (int r = 0; r < 2; r++) {
+		UnitType kind = r ? UNIT_ENERGY_TRUCK : UNIT_METAL_TRUCK;
+		float have = r ? e->energy : e->metal, base = r ? BASE_ENERGY_CAP : BASE_METAL_CAP;
+		const uint8_t *short_of = r ? w->short_energy : w->short_metal;
+		int32_t idle = 0;
+		ptrdiff_t truck = -1;
+		for (ptrdiff_t i = 0; i < u->count; i++) {
+			if (!mine(bot, u, i) || u->type[i] != kind || u->order[i] != ORDER_IDLE) continue;
+			idle++;
+			truck = i;
+		}
+		if (truck < 0) continue;
+		int dest = -1;
+		if (have >= 0.9f * base) {
+			int32_t best_short = front_score(w, here) + FRONT_MARGIN;
+			for (int z = 0; z < w->count; z++) {
+				if (z == here || !w->ours[z] || !(short_of[z] >> bot->player.v & 1) || front_score(w, z) <= best_short) continue;
+				best_short = front_score(w, z);
+				dest = z;
+			}
+		} else if (have < 0.5f * base && idle > BOT_TRUCKS && home >= 0 && home != here && w->ours[home]) {
+			dest = home;
+		}
+		if (dest < 0) continue;
 		UnitHandle *h = PUSH(arena, UnitHandle, 1);
-		*h = units_handle(u, empty_box);
-		bot_send(bot, arena, out, count, cap, home, h, 1);
-		return;
-	}
-	// Containers at least half full go to the zone of ours furthest forward
-	// that's short of resources: to where they're spent.
-	int needy = -1;
-	int32_t needy_best = front_score(w, here) + FRONT_MARGIN;
-	for (int z = 0; z < w->count; z++) {
-		if (z == here || !w->ours[z] || !(w->short_of[z] >> bot->player.v & 1) || front_score(w, z) <= needy_best) continue;
-		needy_best = front_score(w, z);
-		needy = z;
-	}
-	for (ptrdiff_t i = 0; i < u->count && needy >= 0; i++) {
-		if (!mine(bot, u, i) || u->type[i] != UNIT_CONTAINER || u->order[i] != ORDER_IDLE) continue;
-		if (u->cargo_metal[i] < 0.5f * CONTAINER_METAL && u->cargo_energy[i] < 0.5f * CONTAINER_ENERGY) continue;
-		UnitHandle *h = PUSH(arena, UnitHandle, 1);
-		*h = units_handle(u, i);
-		bot_send(bot, arena, out, count, cap, needy, h, 1);
+		*h = units_handle(u, truck);
+		bot_send(bot, arena, out, count, cap, dest, h, 1);
 		return;
 	}
 	if (target < 0) return;

@@ -7,11 +7,11 @@
 //   ctrl+right-click    move                     X            stop
 //   engineers: E / G / F / R then click to place an extractor, generator,
 //   factory or transporter (shift keeps placing; right-click or esc cancels)
-//   factories: 1-8 queue raider, tank, artillery, engineer, scout, sapper, siege,
-//   container
+//   factories: 1-9 queue raider, tank, artillery, engineer, scout, sapper, siege,
+//   metal truck, energy truck
 //   (shift: repeat),
 //   0 clears
-//   V: selected combat units entrench as turrets, containers as vaults;
+//   V: selected combat units entrench as turrets, trucks as vaults;
 //   selected entrenched turrets and vaults mobilize (both paid for as they
 //   go, and helpless while they do)
 //   T then a zone's number: send the selection there through our nearest

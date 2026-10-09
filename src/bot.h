@@ -36,7 +36,8 @@ typedef struct {
 	bool contact[ZONE_MAX];    // we see them there now
 	uint32_t seen_age[ZONE_MAX], transporter_age[ZONE_MAX]; // game seconds, or BOT_NEVER
 	bool neighbours_enemy[ZONE_MAX]; // linked to a zone we believe is theirs
-	uint8_t short_of[ZONE_MAX]; // our players (bit per slot) short of metal or energy there: containers help
+	uint8_t short_metal[ZONE_MAX];  // our players (bit per slot) short of metal there: metal trucks help
+	uint8_t short_energy[ZONE_MAX]; // ... of energy
 } BotWorld;
 
 // Do we believe the enemy holds zone z: seen there lately, or a transporter of

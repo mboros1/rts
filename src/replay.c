@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 13; // 13: containers (a command's metal and energy)
+static constexpr uint32_t REPLAY_VERSION = 14; // 14: metal and energy trucks (a command's metal and energy)
 
 // ---------------------------------------------------------------- writing
 

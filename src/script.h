@@ -45,8 +45,8 @@
 //   at 600 expect red lost > 50       # side fields: units lost fired shells spawned
 //                                     #   metal energy metal_income energy_income
 //                                     #   and finished counts: raiders tanks artillery
-//                                     #   engineers scouts sappers containers extractors generators
-//                                     #   factories transporters turrets vaults
+//                                     #   engineers scouts sappers metal-trucks energy-trucks extractors
+//                                     #   generators factories transporters turrets metal-vaults energy-vaults
 //                                     #   departed arrived
 //   at 600 expect blue.1 tanks >= 5   # a player's: units and finished counts
 //   at 600 expect column alive >= 15  # group field: alive

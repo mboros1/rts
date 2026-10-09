@@ -41,13 +41,15 @@ typedef enum : uint8_t {
 	UNIT_ENGINEER,      // builds structures; unarmed
 	UNIT_SAPPER,        // builds too, armoured and armed: a beachhead in seconds
 	UNIT_SCOUT,         // fast, sees far; unarmed: intel
-	UNIT_CONTAINER,     // a truck of its owner's metal and energy: storage that moves
+	UNIT_METAL_TRUCK,   // metal storage that moves: more room where it is, a load when it goes
+	UNIT_ENERGY_TRUCK,  // the same, for energy
 	UNIT_EXTRACTOR,     // structures: never move
 	UNIT_GENERATOR,
 	UNIT_FACTORY,
 	UNIT_TRANSPORTER,   // sends units to other zones; charges on energy
 	UNIT_TURRET,        // a static gun; also what units entrench into
-	UNIT_VAULT,         // a container entrenched: hardened storage that doesn't move
+	UNIT_METAL_VAULT,   // a truck entrenched: hardened storage that doesn't move
+	UNIT_ENERGY_VAULT,
 	UNIT_TYPE_COUNT,
 } UnitType;
 
@@ -56,17 +58,16 @@ enum { COMBAT_TYPE_COUNT = UNIT_ENGINEER };
 static inline bool unit_is_structure(UnitType t) { return t >= UNIT_EXTRACTOR; }
 static inline bool unit_is_combat(UnitType t) { return (int)t < (int)COMBAT_TYPE_COUNT; }
 static inline bool unit_is_builder(UnitType t) { return t == UNIT_ENGINEER || t == UNIT_SAPPER; }
-static inline bool unit_holds_cargo(UnitType t) { return t == UNIT_CONTAINER || t == UNIT_VAULT; }
-// What entrenching applies to: combat units become turrets, containers vaults.
-static inline bool unit_digs_in(UnitType t) { return unit_is_combat(t) || t == UNIT_CONTAINER; }
+static inline bool unit_is_truck(UnitType t) { return t == UNIT_METAL_TRUCK || t == UNIT_ENERGY_TRUCK; }
+// What entrenching applies to: combat units become turrets, trucks vaults.
+static inline bool unit_digs_in(UnitType t) { return unit_is_combat(t) || unit_is_truck(t); }
 
-// What a zone holds for a player, at most, outside containers.
-static constexpr float HELD_METAL_CAP = 2000.0f;
-static constexpr float HELD_ENERGY_CAP = 10000.0f;
-
-// What a container (or vault) holds at most.
-static constexpr float CONTAINER_METAL = 1000.0f;
-static constexpr float CONTAINER_ENERGY = 5000.0f;
+// Storage: a player's room for metal and energy in a zone is the base plus
+// what their trucks and vaults there add.
+static constexpr float BASE_METAL_CAP = 2000.0f;
+static constexpr float BASE_ENERGY_CAP = 10000.0f;
+static constexpr float TRUCK_METAL = 1000.0f;   // a metal truck or vault's room; a load
+static constexpr float TRUCK_ENERGY = 5000.0f;  // an energy truck or vault's
 
 // What a unit type is. Content, not state: never changes during a run.
 typedef struct {
@@ -174,7 +175,6 @@ typedef struct {
 	uint32_t *route;       // ... and the hops after it (a Route), | ROUTE_UNPAIRED
 	uint8_t *seeded;       // turrets: an entrenched unit, of type build_type
 	                       // (entrenching or mobilizing: order TRANSFORM, work the progress)
-	float *cargo_metal, *cargo_energy; // containers and vaults: part of their owner's store
 	PlayerSlot *owner;     // the only player whose orders it takes
 	PlayerSlot *output;    // factories: who what they make belongs to;
 	                       // units on a send order: who they arrive owned by
@@ -216,7 +216,7 @@ typedef struct {
 	bool unpaired;
 	V2 landing;
 	PlayerSlot owner;    // who they arrive owned by
-	float metal, energy; // containers: what they carry, all together
+	float metal, energy; // trucks: their loads, all together
 } Departure;
 
 enum { FACTORY_QUEUE = 8 };
@@ -349,17 +349,14 @@ typedef struct {
 // transporter's charge by its owner, a transform by the unit's owner.
 // Income past a player's storage spills to teammates with room.
 //
-// What a player has is what the zone holds for them (held_*, up to the base
-// storage) plus what their containers here carry: metal and energy, and the
-// caps, count both. Income past the held store fills containers; spending
-// empties containers first; and a container unloads into the held store
-// whenever it has room, so one arriving where its owner is short empties,
-// while one where the store is full stays full (pool_put in sim.c). A
-// container that dies takes its cargo with it; one that leaves takes it away.
+// Storage is room: the caps are the base plus the player's trucks and vaults
+// here (counted as each economy step starts; storage lost means what's past
+// the new cap is lost). A truck carries a load only when it leaves (through a
+// transporter) or changes hands: as much of its resource as its room, or as
+// the player has; it brings that, and its room, to where it arrives.
 typedef struct {
-	float metal, energy;                // everything the player has here
-	float metal_cap, energy_cap;        // the base storage plus their containers'
-	float held_metal, held_energy;      // the part not in containers
+	float metal, energy;
+	float metal_cap, energy_cap;        // the base storage plus their trucks' and vaults'
 	float metal_income, energy_income;  // last tick, per second
 	float metal_spent, energy_spent;    // last tick, per second
 	float metal_wanted, energy_wanted;  // last tick, per second: before stalls
@@ -421,7 +418,7 @@ typedef enum : uint8_t {
 	                    // then `route`; UNPAIRED: no transporter there, land at target
 	COMMAND_ARRIVE,     // `amount` of unit_type come in: around our transporter nearest
 	                    // target, or (UNPAIRED) spread around target; then on to `route`
-	COMMAND_ENTRENCH,   // these combat units dig in as turrets where they stand, containers as vaults
+	COMMAND_ENTRENCH,   // these combat units dig in as turrets where they stand, trucks as vaults
 	COMMAND_MOBILIZE,   // these entrenched turrets and vaults become what they were
 	COMMAND_GIVE,       // these units now belong to player `to`
 	COMMAND_OUTPUT,     // these factories' units go to player `to` from now on
@@ -496,7 +493,7 @@ typedef struct {
 	float radius;
 	uint8_t flags;
 	Route route;        // SEND, ARRIVE: hops after the next
-	float metal, energy; // SHARE: how much; ARRIVE: what arriving containers carry, all together
+	float metal, energy; // SHARE: how much; ARRIVE: the arriving trucks' loads, all together
 } Command;
 
 // A share: `metal` and `energy` from the player to `to`, at once, as much

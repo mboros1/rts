@@ -51,8 +51,13 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.height = 0.8f, .hp = 40.0f,
 		.metal_cost = 20.0f, .energy_cost = 150.0f, .build_time = 20.0f,
 	},
-	[UNIT_CONTAINER] = {
-		.name = "container", .speed = 5.0f, .accel = 10.0f, .radius = 1.1f, .sight = 16.0f,
+	[UNIT_METAL_TRUCK] = {
+		.name = "metal-truck", .speed = 5.0f, .accel = 10.0f, .radius = 1.1f, .sight = 16.0f,
+		.height = 1.3f, .hp = 120.0f,
+		.metal_cost = 100.0f, .energy_cost = 1000.0f, .build_time = 60.0f,
+	},
+	[UNIT_ENERGY_TRUCK] = {
+		.name = "energy-truck", .speed = 5.0f, .accel = 10.0f, .radius = 1.1f, .sight = 16.0f,
 		.height = 1.3f, .hp = 120.0f,
 		.metal_cost = 100.0f, .energy_cost = 1000.0f, .build_time = 60.0f,
 	},
@@ -78,8 +83,12 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.range = 38.0f, .reload = 24, .shell_speed = 46.0f, .damage = 30.0f, .splash = 1.0f, .spread = 0.6f,
 		.metal_cost = 120.0f, .energy_cost = 900.0f, .build_time = 120.0f,
 	},
-	[UNIT_VAULT] = {
-		.name = "vault", .radius = 1.4f, .sight = 16.0f, .height = 1.2f, .hp = 900.0f,
+	[UNIT_METAL_VAULT] = {
+		.name = "metal-vault", .radius = 1.4f, .sight = 16.0f, .height = 1.2f, .hp = 900.0f,
+		.metal_cost = 100.0f, .energy_cost = 1000.0f, .build_time = 60.0f,
+	},
+	[UNIT_ENERGY_VAULT] = {
+		.name = "energy-vault", .radius = 1.4f, .sight = 16.0f, .height = 1.2f, .hp = 900.0f,
 		.metal_cost = 100.0f, .energy_cost = 1000.0f, .build_time = 60.0f,
 	},
 };
@@ -185,8 +194,6 @@ static void units_init(Units *u, Arena *a, ptrdiff_t cap)
 	u->dest = PUSH(a, uint8_t, cap);
 	u->route = PUSH(a, uint32_t, cap);
 	u->seeded = PUSH(a, uint8_t, cap);
-	u->cargo_metal = PUSH(a, float, cap);
-	u->cargo_energy = PUSH(a, float, cap);
 	u->owner = PUSH(a, PlayerSlot, cap);
 	u->output = PUSH(a, PlayerSlot, cap);
 	// Free list pops from the end, so the first spawn gets slot 0.
@@ -250,8 +257,6 @@ static ptrdiff_t units_spawn(Units *u, UnitType type, PlayerSlot owner, float x,
 	u->dest[d] = 0;
 	u->route[d] = 0;
 	u->seeded[d] = 0;
-	u->cargo_metal[d] = 0.0f;
-	u->cargo_energy[d] = 0.0f;
 	u->owner[d] = owner;
 	u->output[d] = owner;
 	return d;
@@ -270,7 +275,7 @@ static void units_kill(Units *u, ptrdiff_t d)
 		MOVE(cooldown); MOVE(target); MOVE(engaged);
 		MOVE(progress); MOVE(build_type); MOVE(building); MOVE(work);
 		MOVE(queue); MOVE(queue_len); MOVE(repeat); MOVE(dest); MOVE(route); MOVE(seeded);
-		MOVE(owner); MOVE(output); MOVE(cargo_metal); MOVE(cargo_energy);
+		MOVE(owner); MOVE(output);
 #undef MOVE
 		u->slot_dense[u->dense_slot[d]] = (int32_t)d;
 	}
@@ -536,7 +541,10 @@ static void finish_transform(Units *u, ptrdiff_t i)
 {
 	UnitType from = u->type[i];
 	bool dig_in = unit_digs_in(from);
-	UnitType to = !dig_in ? u->build_type[i] : from == UNIT_CONTAINER ? UNIT_VAULT : UNIT_TURRET;
+	UnitType to = !dig_in                      ? u->build_type[i]
+	            : from == UNIT_METAL_TRUCK     ? UNIT_METAL_VAULT
+	            : from == UNIT_ENERGY_TRUCK    ? UNIT_ENERGY_VAULT
+	                                           : UNIT_TURRET;
 	u->hp[i] *= unit_defs[to].hp / unit_defs[from].hp;
 	u->type[i] = to;
 	u->build_type[i] = dig_in ? from : UNIT_EXTRACTOR;
@@ -558,7 +566,7 @@ static void apply_transform(Faction *f, const Command *c)
 	for (ptrdiff_t k = 0; k < c->count; k++) {
 		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0 || u->order[d] == ORDER_TRANSFORM) continue;
-		bool can = dig_in ? unit_digs_in(u->type[d]) : (u->type[d] == UNIT_TURRET || u->type[d] == UNIT_VAULT) && u->seeded[d];
+		bool can = dig_in ? unit_digs_in(u->type[d]) : (u->type[d] == UNIT_TURRET || u->type[d] == UNIT_METAL_VAULT || u->type[d] == UNIT_ENERGY_VAULT) && u->seeded[d];
 		if (!can) continue;
 		u->order[d] = ORDER_TRANSFORM;
 		u->work[d] = 0.0f;
@@ -633,6 +641,64 @@ static void apply_send(Faction *f, const Sim *sim, const Command *c)
 	}
 }
 
+// What a unit adds to its owner's storage: trucks and vaults.
+static float storage_metal(UnitType t) { return t == UNIT_METAL_TRUCK || t == UNIT_METAL_VAULT ? TRUCK_METAL : 0.0f; }
+static float storage_energy(UnitType t) { return t == UNIT_ENERGY_TRUCK || t == UNIT_ENERGY_VAULT ? TRUCK_ENERGY : 0.0f; }
+
+// Each player's caps from their storage here; what's past them is lost.
+static void count_storage(Faction *f, int players)
+{
+	for (int p = 0; p < players; p++) {
+		f->economy[p].metal_cap = BASE_METAL_CAP;
+		f->economy[p].energy_cap = BASE_ENERGY_CAP;
+	}
+	const Units *u = &f->units;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->owner[i].v >= players || u->progress[i] < 1.0f) continue;
+		f->economy[u->owner[i].v].metal_cap += storage_metal(u->type[i]);
+		f->economy[u->owner[i].v].energy_cap += storage_energy(u->type[i]);
+	}
+	for (int p = 0; p < players; p++) {
+		Economy *e = &f->economy[p];
+		e->metal = f_min(e->metal, e->metal_cap);
+		e->energy = f_min(e->energy, e->energy_cap);
+	}
+}
+
+// A truck's load, taken from its owner's store: as much as its room, or as
+// they have.
+static void take_load(Faction *f, ptrdiff_t i, float *metal, float *energy)
+{
+	Economy *e = &f->economy[f->units.owner[i].v];
+	*metal = f_min(storage_metal(f->units.type[i]), e->metal);
+	*energy = f_min(storage_energy(f->units.type[i]), e->energy);
+	e->metal -= *metal;
+	e->energy -= *energy;
+}
+
+// A unit changing hands. Storage takes its room to the new owner, and a load
+// with it: as much as its room, or as the old owner has.
+static void hand_over(Faction *f, int players, ptrdiff_t i, PlayerSlot to)
+{
+	Units *u = &f->units;
+	float room_m = storage_metal(u->type[i]), room_e = storage_energy(u->type[i]);
+	if ((room_m > 0.0f || room_e > 0.0f) && u->progress[i] >= 1.0f && u->owner[i].v < players && to.v < players
+	    && !player_eq(u->owner[i], to)) {
+		float m, e;
+		take_load(f, i, &m, &e);
+		Economy *from = &f->economy[u->owner[i].v], *dst = &f->economy[to.v];
+		from->metal_cap -= room_m;
+		from->energy_cap -= room_e;
+		from->metal = f_min(from->metal, from->metal_cap);
+		from->energy = f_min(from->energy, from->energy_cap);
+		dst->metal_cap += room_m;
+		dst->energy_cap += room_e;
+		dst->metal = f_min(dst->metal + m, dst->metal_cap);
+		dst->energy = f_min(dst->energy + e, dst->energy_cap);
+	}
+	u->owner[i] = to;
+}
+
 // Units come in: paired, around our transporter nearest target; unpaired
 // (or with no transporter left), spread around target in our strip. Those
 // with hops still to go wait at the transporter to go on; the rest clear
@@ -653,14 +719,9 @@ static void apply_arrive(Faction *f, const Sim *sim, const Command *c)
 	V2 inward = v2(t->size_x * 0.5f - at.x, t->size_z * 0.5f - at.z);
 	float len = v2_len(inward);
 	V2 clear = len > 1.0f ? v2_add(at, v2_scale(inward, (LANDING_RADIUS + 8.0f) / len)) : at;
-	bool cargo = unit_holds_cargo(c->unit_type) && c->amount > 0 && c->metal >= 0.0f && c->energy >= 0.0f;
 	for (int32_t k = 0; k < c->amount && u->count < u->cap; k++) {
 		V2 p = clamp_to_map(t, v2(at.x + rng_range(&f->rng, -ring, ring), at.z + rng_range(&f->rng, -ring, ring)), 2.0f);
 		ptrdiff_t d = units_spawn(u, c->unit_type, c->player, p.x, p.z, terrain_height(t, p.x, p.z));
-		if (cargo) {
-			u->cargo_metal[d] = f_min(c->metal / (float)c->amount, CONTAINER_METAL);
-			u->cargo_energy[d] = f_min(c->energy / (float)c->amount, CONTAINER_ENERGY);
-		}
 		f->stats.units_spawned++;
 		f->stats.units_arrived++;
 		if (onward) {
@@ -677,19 +738,27 @@ static void apply_arrive(Faction *f, const Sim *sim, const Command *c)
 			u->tz[d] = to.z;
 		}
 	}
+	// Trucks bring their room, and their loads into it.
+	if (unit_is_truck(c->unit_type) && c->player.v < sim->config.players[f->id.v] && c->metal >= 0.0f && c->energy >= 0.0f) {
+		count_storage(f, sim->config.players[f->id.v]);
+		Economy *e = &f->economy[c->player.v];
+		e->metal = f_min(e->metal + c->metal, e->metal_cap);
+		e->energy = f_min(e->energy + c->energy, e->energy_cap);
+	}
 }
 
 // Give: the units change hands as they are, mid-order and all; the new owner
 // carries on or re-orders them. Output: these factories' units go to `to`.
-static void apply_give(Faction *f, const Command *c)
+static void apply_give(Faction *f, const Sim *sim, const Command *c)
 {
+	int players = sim->config.players[f->id.v];
 	if (!player_ok(c->to)) return;
 	Units *u = &f->units;
 	for (ptrdiff_t k = 0; k < c->count; k++) {
 		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0) continue;
 		if (c->kind == COMMAND_GIVE) {
-			u->owner[d] = c->to;
+			hand_over(f, players, d, c->to);
 			// A factory's output stays where it was pointed; anything else
 			// (a unit on its way out included) is now wholly theirs.
 			if (u->type[d] != UNIT_FACTORY) u->output[d] = c->to;
@@ -699,71 +768,6 @@ static void apply_give(Faction *f, const Command *c)
 	}
 }
 
-// Everything player p has here, and room for: the held store and their
-// finished containers' cargo.
-static void pool_sync(Faction *f, int p)
-{
-	Economy *e = &f->economy[p];
-	const Units *u = &f->units;
-	float m = e->held_metal, en = e->held_energy, mc = HELD_METAL_CAP, ec = HELD_ENERGY_CAP;
-	for (ptrdiff_t i = 0; i < u->count; i++) {
-		if (!unit_holds_cargo(u->type[i]) || u->owner[i].v != p) continue;
-		m += u->cargo_metal[i];
-		en += u->cargo_energy[i];
-		mc += CONTAINER_METAL;
-		ec += CONTAINER_ENERGY;
-	}
-	e->metal = m;
-	e->energy = en;
-	e->metal_cap = mc;
-	e->energy_cap = ec;
-}
-
-// One resource's change since pool_sync, put where it goes, each cargo
-// staying in its own container: a gain fills the held store, then
-// containers in order; a loss comes out of containers first, in order, then
-// the held store. Then containers unload into the held store as far as it
-// has room. So a full container stays full where the store is full, and
-// empties where it's short.
-static void pool_change(float *held, float held_cap, float *cargo, const uint8_t *mine, ptrdiff_t n, float cap, float delta)
-{
-	if (delta > 0.0f) {
-		float take = f_min(delta, held_cap - *held);
-		*held += take;
-		delta -= take;
-	}
-	for (ptrdiff_t i = 0; i < n && delta != 0.0f; i++) {
-		if (!mine[i]) continue;
-		float take = delta > 0.0f ? f_min(delta, cap - cargo[i]) : f_max(delta, -cargo[i]);
-		cargo[i] += take;
-		delta -= take;
-	}
-	if (delta < 0.0f) *held = f_max(0.0f, *held + delta);
-	for (ptrdiff_t i = 0; i < n; i++) {
-		if (!mine[i]) continue;
-		float unload = f_min(cargo[i], held_cap - *held);
-		cargo[i] -= unload;
-		*held += unload;
-	}
-}
-
-// And back where it goes: whatever changed player p's total since pool_sync.
-static void pool_put(Faction *f, int p)
-{
-	Economy *e = &f->economy[p];
-	Units *u = &f->units;
-	uint8_t *mine = PUSH(&f->scratch, uint8_t, u->count > 0 ? u->count : 1);
-	float had_m = e->held_metal, had_e = e->held_energy;
-	for (ptrdiff_t i = 0; i < u->count; i++) {
-		mine[i] = unit_holds_cargo(u->type[i]) && u->owner[i].v == p;
-		if (!mine[i]) continue;
-		had_m += u->cargo_metal[i];
-		had_e += u->cargo_energy[i];
-	}
-	pool_change(&e->held_metal, HELD_METAL_CAP, u->cargo_metal, mine, u->count, CONTAINER_METAL, e->metal - had_m);
-	pool_change(&e->held_energy, HELD_ENERGY_CAP, u->cargo_energy, mine, u->count, CONTAINER_ENERGY, e->energy - had_e);
-}
-
 // A share: as much of what was asked as the giver has and the taker has room for.
 static void apply_share(Faction *f, const Sim *sim, const Command *c)
 {
@@ -771,8 +775,6 @@ static void apply_share(Faction *f, const Sim *sim, const Command *c)
 	if (!sim->config.economy || c->player.v >= players || c->to.v >= players || player_eq(c->player, c->to)) return;
 	float metal = c->metal, energy = c->energy;
 	if (!(metal >= 0.0f && energy >= 0.0f)) return; // and not NaN
-	pool_sync(f, c->player.v);
-	pool_sync(f, c->to.v);
 	Economy *from = &f->economy[c->player.v], *to = &f->economy[c->to.v];
 	metal = f_min(f_min(metal, from->metal), to->metal_cap - to->metal);
 	energy = f_min(f_min(energy, from->energy), to->energy_cap - to->energy);
@@ -780,8 +782,6 @@ static void apply_share(Faction *f, const Sim *sim, const Command *c)
 	to->metal += metal;
 	from->energy -= energy;
 	to->energy += energy;
-	pool_put(f, c->player.v);
-	pool_put(f, c->to.v);
 }
 
 // Orders keep the group's shape: each unit aims at the target plus its offset
@@ -812,7 +812,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		return;
 	}
 	if (c->kind == COMMAND_GIVE || c->kind == COMMAND_OUTPUT) {
-		apply_give(f, c);
+		apply_give(f, sim, c);
 		return;
 	}
 	if (c->kind == COMMAND_SHARE) {
@@ -833,7 +833,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 			// A factory keeps making for whoever it was pointed at, unless
 			// that was its old owner.
 			if (u->type[i] != UNIT_FACTORY || player_eq(u->output[i], u->owner[i])) u->output[i] = c->player;
-			u->owner[i] = c->player;
+			hand_over(f, sim->config.players[f->id.v], i, c->player);
 		}
 		return;
 	}
@@ -1300,7 +1300,7 @@ static void run_economy(Faction *f, const Sim *sim)
 {
 	Units *u = &f->units;
 	int players = sim->config.players[f->id.v];
-	for (int p = 0; p < players; p++) pool_sync(f, p);
+	count_storage(f, players);
 	float income_m[MAX_PLAYERS], income_e[MAX_PLAYERS];
 	for (int p = 0; p < players; p++) {
 		income_m[p] = BASE_METAL_INCOME;
@@ -1451,7 +1451,6 @@ static void run_economy(Faction *f, const Sim *sim)
 		e->energy = f_max(0.0f, e->energy - spent_e[p]);
 		e->metal_spent = spent_m[p] / SIM_DT;
 		e->energy_spent = spent_e[p] / SIM_DT;
-		pool_put(f, p);
 	}
 }
 
@@ -1492,8 +1491,7 @@ static void fire_transporters(Faction *f)
 		                 .owner = u->output[leaving[0]]};
 		for (ptrdiff_t k = 0; k < n; k++) {
 			dep.type = u->type[leaving[k]];
-			dep.metal = u->cargo_metal[leaving[k]];
-			dep.energy = u->cargo_energy[leaving[k]];
+			take_load(f, leaving[k], &dep.metal, &dep.energy);
 			add_departure(f, &dep);
 		}
 		UnitHandle gh = units_handle(u, g);
@@ -1683,7 +1681,7 @@ void sim_init(Sim *sim, SimConfig config)
 
 		f->away = (uint8_t)((1u << config.players[k]) - 1); // until someone plays them
 		for (int pl = 0; pl < MAX_PLAYERS; pl++)
-			f->economy[pl] = (Economy){START_METAL, START_ENERGY, HELD_METAL_CAP, HELD_ENERGY_CAP, START_METAL, START_ENERGY, .rate = 1.0f};
+			f->economy[pl] = (Economy){START_METAL, START_ENERGY, BASE_METAL_CAP, BASE_ENERGY_CAP, .rate = 1.0f};
 		if (config.economy) {
 			// Each player: a factory facing the middle, and two engineers
 			// beside it; the first at the base, the others above and below it
@@ -1763,8 +1761,6 @@ static Hash hash_units(Hash h, const Units *u)
 		h = hash_u32(h, (uint32_t)u->queue_len[i] << 24 | (uint32_t)u->repeat[i] << 16 | (uint32_t)u->dest[i] << 8 | u->seeded[i]);
 		h = hash_u32(h, u->route[i]);
 		h = hash_u32(h, (uint32_t)u->owner[i].v << 8 | u->output[i].v);
-		h = hash_f32(h, u->cargo_metal[i]);
-		h = hash_f32(h, u->cargo_energy[i]);
 	}
 	return h;
 }
@@ -1827,8 +1823,8 @@ Hash faction_hash(const Faction *f)
 	h = hash_u64(h, (uint64_t)f->stats.units_arrived);
 	for (int pl = 0; pl < MAX_PLAYERS; pl++) {
 		const Economy *e = &f->economy[pl];
-		float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->held_metal, e->held_energy, e->metal_income,
-		              e->energy_income, e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
+		float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
+		              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
 		for (int k = 0; k < (int)countof(ef); k++) h = hash_f32(h, ef[k]);
 	}
 	h = hash_u64(h, f->spots);
@@ -1887,8 +1883,6 @@ void faction_write(const Faction *f, ByteBuf *b)
 		put8(b, u->seeded[i]);
 		put8(b, u->owner[i].v);
 		put8(b, u->output[i].v);
-		putf(b, u->cargo_metal[i]);
-		putf(b, u->cargo_energy[i]);
 	}
 	const Projectiles *p = &f->incoming;
 	put32(b, (uint32_t)p->count);
@@ -1923,8 +1917,8 @@ void faction_write(const Faction *f, ByteBuf *b)
 	put64(b, (uint64_t)f->stats.units_arrived);
 	for (int pl = 0; pl < MAX_PLAYERS; pl++) {
 		const Economy *e = &f->economy[pl];
-		float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->held_metal, e->held_energy, e->metal_income,
-		              e->energy_income, e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
+		float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
+		              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
 		for (int k = 0; k < (int)countof(ef); k++) putf(b, ef[k]);
 	}
 	put64(b, f->spots);
@@ -1998,11 +1992,6 @@ bool faction_read(Faction *f, ByteReader *r)
 		u->seeded[i] = get8(r);
 		u->owner[i] = (PlayerSlot){get8(r)};
 		u->output[i] = (PlayerSlot){get8(r)};
-		u->cargo_metal[i] = getf(r);
-		u->cargo_energy[i] = getf(r);
-		if (!(u->cargo_metal[i] >= 0.0f && u->cargo_metal[i] <= CONTAINER_METAL && u->cargo_energy[i] >= 0.0f
-		      && u->cargo_energy[i] <= CONTAINER_ENERGY))
-			return false;
 		if (!player_ok(u->owner[i]) || !player_ok(u->output[i])) return false;
 		if (type >= UNIT_TYPE_COUNT || order >= ORDER_KIND_COUNT || u->engaged[i] > 1 || u->cooldown[i] < 0
 		    || build_type >= UNIT_TYPE_COUNT || u->queue_len[i] > FACTORY_QUEUE || u->repeat[i] > 1 || u->seeded[i] > 1
@@ -2064,7 +2053,7 @@ bool faction_read(Faction *f, ByteReader *r)
 	f->stats.units_arrived = (int64_t)get64(r);
 	for (int pl = 0; pl < MAX_PLAYERS; pl++) {
 		Economy *e = &f->economy[pl];
-		float *ef[] = {&e->metal, &e->energy, &e->metal_cap, &e->energy_cap, &e->held_metal, &e->held_energy,
+		float *ef[] = {&e->metal, &e->energy, &e->metal_cap, &e->energy_cap,
 		               &e->metal_income, &e->energy_income, &e->metal_spent, &e->energy_spent, &e->metal_wanted,
 		               &e->energy_wanted, &e->rate};
 		for (int k = 0; k < (int)countof(ef); k++) {

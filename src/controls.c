@@ -212,7 +212,7 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 		}
 		if (selection_has(c, sim, UNIT_FACTORY)) {
 			const UnitType keys[] = {UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_ENGINEER, UNIT_SCOUT, UNIT_SAPPER, UNIT_SIEGE,
-			                         UNIT_CONTAINER};
+			                         UNIT_METAL_TRUCK, UNIT_ENERGY_TRUCK};
 			for (int k = 0; k < (int)countof(keys); k++)
 				if (IsKeyPressed(KEY_ONE + k))
 					order(c, frame, out, cap, &n, (Order){.kind = COMMAND_PRODUCE, .type = keys[k], .amount = 1,
@@ -357,8 +357,8 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 	}
 	DrawText(sel, 14, y + 26, 18, RAYWHITE);
 	DrawText(sim->config.economy
-	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-8, 0 clear | T send | H give | K take"
-	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-8, 0 clear")
+	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-9, 0 clear | T send | H give | K take"
+	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-9, 0 clear")
 	             : "drag select | right attack-move | ctrl+right move | X stop | V entrench",
 	         14, y + 50, 14, GRAY);
 }

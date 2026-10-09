@@ -631,7 +631,9 @@ Done. A player nobody is playing has their bot play them.
 
 ## Spike 16 results (2026-10-09)
 
-Done. Resources cross zones in containers.
+Done. Resources cross zones in containers. (Spike 16b replaced the rules
+below: containers are now metal and energy trucks, storage is room, and a
+truck carries a load only when it leaves or changes hands.)
 
 - **Containers** are trucks of their owner's metal and energy (1000 and 5000
   at most): slow (5), fragile, unarmed, 100 metal and 1000 energy at a
@@ -677,6 +679,38 @@ Done. Resources cross zones in containers.
 - **Not yet**: no explicit load or unload; which containers fill is their
   order in the zone. Trucks carry energy almost only (metal rarely
   overflows). Demo 19's spectator view can't tell a player's units apart.
+
+## Spike 16b results (2026-10-09)
+
+Done. Storage is room; trucks carry it, split by resource like BAR.
+
+- **Metal trucks and energy trucks** (1000 metal, 5000 energy of room; the
+  same cost, speed and factory as containers were: keys 8 and 9), and their
+  vaults when dug in. A player's storage in a zone is the base plus their
+  trucks' and vaults' room there; there's no cargo in a truck at rest, just
+  one pool per resource. Storage lost (a truck killed, or leaving) loses
+  what's past the new cap.
+- **A load when it moves**: leaving through a transporter, or changing hands
+  (give, take), a truck takes a full load of its resource, or what the
+  player has, even from below the base (they chose to send it). It brings
+  that, and its room, to where it arrives, or to its new owner.
+- **Bots**: a bot whose base storage of a resource is nearly full keeps up to
+  two trucks of it; with a full load to take, one goes to a zone of ours
+  further forward where that player is short of that resource; one too many
+  in a zone that isn't home goes home when there's little to take. Zones
+  report shortages per player and resource. Bots budget against base
+  storage. In a team world it's rare: fronts float full energy and metal
+  seldom overflows (a balance question for later, not the trucks').
+- **Evidence**: `test_trucks` (room adds and keeps income from spilling; a
+  given truck takes a full load and its room; a vault keeps the room; a sent
+  truck takes a full load from below the base; arriving trucks bring room
+  and load; a destroyed vault loses what's past the cap). Demo 18 (renamed
+  18-trucks): blue.0's three energy trucks add 15,000 of room, which fills;
+  given to blue.1, they take 15,000 with them (25,000 -> 10,000, and 10,000
+  -> 25,000), and become vaults at the front. Demo 19 (19-truck-logistics):
+  a team world where bots ship a few loaded trucks. The other demos
+  re-render byte for byte. arm64 and x86-64 agree.
+- **Formats**: replay v14, wire v11, zone state v8.
 
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
