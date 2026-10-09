@@ -8,6 +8,7 @@
 	"send": "T",
 	"give": "H",
 	"take": "K",
+	"warp_home": "U",
 
 	"build_1": "Q", "build_2": "W", "build_3": "E", "build_4": "R",
 	"build_5": "A", "build_6": "S", "build_7": "D", "build_8": "F",

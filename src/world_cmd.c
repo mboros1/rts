@@ -262,7 +262,7 @@ int world_main(int argc, char **argv)
 				for (const char *c = check.zones[k].name; *c; c++) seed = (seed ^ (uint8_t)*c) * 1099511628211u;
 				// Only a side's home zone starts with its base; elsewhere it has to get in.
 				int8_t home = check.zones[k].home;
-				const char *script = fmt("scenario economy\nseed %llu\nbases %s\nplayers blue %d\nplayers red %d\n%s%s%s%s%s%s",
+				const char *script = fmt("scenario economy\ncommanders on\nseed %llu\nbases %s\nplayers blue %d\nplayers red %d\n%s%s%s%s%s%s",
 				                         (unsigned long long)(seed % 1000000007u),
 				                         home == 0 ? "blue" : home == 1 ? "red" : "none", check.players[0], check.players[1],
 				                         world_doctrine(&check, k, 0)[0] ? "doctrine blue " : "", world_doctrine(&check, k, 0),

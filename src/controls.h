@@ -30,6 +30,7 @@
 //                       output; shift: the factories themselves), or with nothing
 //                       selected, a quarter of your metal and energy
 //   take                every unit here of teammates who are away (BAR's /take)
+//   warp home           commanders: to the headquarters (paid, takes time, a hit stops it)
 //
 // You select and order only your own units; teammates' are drawn in their
 // own shades of the side's colour.

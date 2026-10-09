@@ -41,6 +41,7 @@ typedef enum : uint8_t {
 	UNIT_ENGINEER,      // builds structures; unarmed
 	UNIT_SAPPER,        // builds too, armoured and armed: a beachhead in seconds
 	UNIT_SCOUT,         // fast, sees far; unarmed: intel
+	UNIT_COMMANDER,     // a player's presence: builds, fights, warps home; one each
 	UNIT_METAL_TRUCK,   // metal storage that moves: more room where it is, a load when it goes
 	UNIT_ENERGY_TRUCK,  // the same, for energy
 	UNIT_EXTRACTOR,     // structures: never move
@@ -50,6 +51,7 @@ typedef enum : uint8_t {
 	UNIT_TURRET,        // a static gun; also what units entrench into
 	UNIT_METAL_VAULT,   // a truck entrenched: hardened storage that doesn't move
 	UNIT_ENERGY_VAULT,
+	UNIT_HEADQUARTERS,  // a side's, no player's: commanders respawn here; lose it, lose the game
 	UNIT_TYPE_COUNT,
 } UnitType;
 
@@ -57,7 +59,9 @@ enum { COMBAT_TYPE_COUNT = UNIT_ENGINEER };
 
 static inline bool unit_is_structure(UnitType t) { return t >= UNIT_EXTRACTOR; }
 static inline bool unit_is_combat(UnitType t) { return (int)t < (int)COMBAT_TYPE_COUNT; }
-static inline bool unit_is_builder(UnitType t) { return t == UNIT_ENGINEER || t == UNIT_SAPPER; }
+static inline bool unit_is_builder(UnitType t) { return t == UNIT_ENGINEER || t == UNIT_SAPPER || t == UNIT_COMMANDER; }
+// What stays with its player: never given, taken or entrenched (the headquarters is the side's).
+static inline bool unit_is_personal(UnitType t) { return t == UNIT_COMMANDER || t == UNIT_HEADQUARTERS; }
 static inline bool unit_is_truck(UnitType t) { return t == UNIT_METAL_TRUCK || t == UNIT_ENERGY_TRUCK; }
 // What entrenching applies to: combat units become turrets, trucks vaults.
 static inline bool unit_digs_in(UnitType t) { return unit_is_combat(t) || unit_is_truck(t); }
@@ -104,6 +108,7 @@ typedef enum : uint8_t {
 	ORDER_BUILD,        // engineers: go to the site, then place or assist
 	ORDER_SEND,         // go to a transporter and leave through it when it fires
 	ORDER_TRANSFORM,    // entrenching or mobilizing: still, silent, paying (work: progress)
+	ORDER_WARP,         // a commander warping home: still, silent, paying (work: progress); a hit stops it
 	ORDER_KIND_COUNT,
 } OrderKind;
 
@@ -120,6 +125,11 @@ typedef struct {
 	bool economy;
 	uint8_t bases;            // economy: which factions start with a base (bit per faction)
 	uint8_t players[FACTION_COUNT]; // slots per side, 1..MAX_PLAYERS: each starts its own base
+	// Economy: each player starts with only a commander (and a side with a
+	// base, its headquarters), and has base storage and income only where
+	// their commander is. Off: the older start (a factory and two engineers
+	// each), base storage and income everywhere.
+	bool commanders;
 } SimConfig;
 
 SimConfig sim_config_default(void);
@@ -131,6 +141,7 @@ static inline bool sim_config_equal(const SimConfig *a, const SimConfig *b)
 	         && a->spawn_interval == b->spawn_interval && a->max_units == b->max_units
 	         && a->max_projectiles == b->max_projectiles && a->economy == b->economy && a->bases == b->bases;
 	for (int f = 0; f < FACTION_COUNT; f++) same = same && a->players[f] == b->players[f];
+	same = same && a->commanders == b->commanders;
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) same = same && a->type_weight[k] == b->type_weight[k];
 	return same;
 }
@@ -175,6 +186,8 @@ typedef struct {
 	uint32_t *route;       // ... and the hops after it (a Route), | ROUTE_UNPAIRED
 	uint8_t *seeded;       // turrets: an entrenched unit, of type build_type
 	                       // (entrenching or mobilizing: order TRANSFORM, work the progress)
+	int32_t *recharge;     // commanders: ticks until warp home can be used again
+	uint8_t *warp_free;    // commanders warping: at no cost
 	PlayerSlot *owner;     // the only player whose orders it takes
 	PlayerSlot *output;    // factories: who what they make belongs to;
 	                       // units on a send order: who they arrive owned by
@@ -206,6 +219,17 @@ enum : uint32_t { ROUTE_UNPAIRED = 1u << 31 }; // Units.route: an unpaired send
 static constexpr float LANDING_RADIUS = 16.0f;
 enum { LANDING_ROOM = 60 };
 
+// A departure's destination when it's the side's home zone, whichever that
+// is (the zone server knows): warps and commanders to respawn.
+enum : uint8_t { DEST_HOME = 254 };
+
+// Why units leave a zone.
+typedef enum : uint8_t {
+	LEAVE_SEND,         // through a transporter
+	LEAVE_WARP,         // a commander warping home
+	LEAVE_DIED,         // a commander lost: it respawns at home
+} LeaveKind;
+
 // Leaving through a transporter this tick: `count` units of `type` for zone
 // `dest`, then `route`. Unpaired sends land at `landing` in the destination.
 typedef struct {
@@ -217,6 +241,7 @@ typedef struct {
 	V2 landing;
 	PlayerSlot owner;    // who they arrive owned by
 	float metal, energy; // trucks: their loads, all together
+	LeaveKind why;
 } Departure;
 
 enum { FACTORY_QUEUE = 8 };
@@ -394,6 +419,7 @@ typedef struct {
 	Economy economy[MAX_PLAYERS]; // each player's; those past config.players stay as they started
 	uint64_t spots;            // metal spots it extracts from (an effect)
 	uint8_t away;              // players (bit per slot) nobody is playing: their bots are; set by COMMAND_AI_SLOTS
+	int64_t respawn_at[MAX_PLAYERS]; // home zone: the tick each player's lost commander reappears; -1: none
 	static_assert(MAX_PLAYERS <= 8, "away is a byte: widen it with the slots");
 	EnemyView view;            // built from `seen` each tick, in scratch
 	Departure *departures;     // left through transporters this tick (in scratch)
@@ -426,13 +452,30 @@ typedef enum : uint8_t {
 	COMMAND_AI_SLOTS,   // the zone's say: these players (bit per slot, in amount) are away, their bots playing
 	COMMAND_TAKE,       // the player takes every unit of every away teammate here (BAR's /take)
 	COMMAND_SET_REPEAT, // these factories repeat (flags COMMAND_REPEAT) or don't, queue as it is
+	COMMAND_WARP,       // these commanders warp home (flags COMMAND_FREE: at no cost, a logged-out player's)
 	COMMAND_KIND_COUNT,
 } CommandKind;
 
 enum : uint8_t {
 	COMMAND_REPEAT = 1,     // PRODUCE: finished items requeue
 	COMMAND_UNPAIRED = 2,   // SEND, ARRIVE: no transporter at the destination
+	COMMAND_FREE = 4,       // WARP: costs nothing
+	COMMAND_WARPED = 8,     // ARRIVE: commanders warping in (their warp recharging)
+	COMMAND_RESPAWN = 16,   // ARRIVE: a player's commander died elsewhere: respawn it here
 };
+
+// Commanders. Each player has one, in the world; it builds what engineers
+// build, at twice the pace, and fights. Where a player's commander is, they
+// have the base storage and the free income; elsewhere, only what they build
+// and ship. Lost, it respawns at the side's headquarters (in the home zone)
+// RESPAWN_TIME later. Warp home takes it there: WARP_TIME at full rate, paid
+// like building (WARP_ENERGY, slower in a stall), still and silent meanwhile,
+// stopped by a hit; then it can't warp for WARP_RECHARGE.
+static constexpr float RESPAWN_TIME = 60.0f;
+static constexpr float WARP_TIME = 10.0f;
+static constexpr float WARP_ENERGY = 5000.0f;
+static constexpr float WARP_RECHARGE = 300.0f;
+
 
 // Transporters. A send leaves from one of ours. Paired (we have a
 // transporter at the destination): any units, a batch of up to
@@ -452,7 +495,7 @@ static constexpr int32_t UNPAIRED_BATCH = 8;
 static constexpr float SEND_REACH = 7.0f;   // beyond the transporter's radius
 static inline bool unpaired_can_send(UnitType t)
 {
-	return t == UNIT_RAIDER || t == UNIT_ENGINEER || t == UNIT_SAPPER || t == UNIT_SCOUT;
+	return t == UNIT_RAIDER || t == UNIT_ENGINEER || t == UNIT_SAPPER || t == UNIT_SCOUT || t == UNIT_COMMANDER;
 }
 
 // Each side lands unpaired sends in its own strip of a zone: blue the west

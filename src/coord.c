@@ -57,6 +57,7 @@ void put_leg(ByteBuf *b, const Leg *l)
 	put32(b, l->route);
 	putf(b, l->landing.x);
 	putf(b, l->landing.z);
+	put8(b, l->why);
 }
 
 bool get_leg(ByteReader *r, Leg *l)
@@ -65,6 +66,9 @@ bool get_leg(ByteReader *r, Leg *l)
 	l->owner = (PlayerSlot){get8(r)};
 	l->route = get32(r);
 	l->landing = v2(getf(r), getf(r));
+	uint8_t why = get8(r);
+	if (why > LEAVE_DIED) return false;
+	l->why = (LeaveKind)why;
 	l->unpaired = unpaired;
 	// Comparisons are false for NaN, so this refuses those too.
 	bool sane = l->landing.x >= -1e5f && l->landing.x <= 1e5f && l->landing.z >= -1e5f && l->landing.z <= 1e5f;
@@ -72,6 +76,12 @@ bool get_leg(ByteReader *r, Leg *l)
 }
 
 // ---------------------------------------------------------------- the log
+
+// A transfer's kind in the log.
+static const char *leg_kind(const Leg *l)
+{
+	return l->why == LEAVE_WARP ? "warp" : l->why == LEAVE_DIED ? "respawn" : l->unpaired ? "unpaired" : "paired";
+}
 
 static void log_line(Ledger *l, const char *line)
 {
@@ -183,9 +193,10 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 			if (faction < 0 || faction >= FACTION_COUNT) return false;
 			long player = strtol(owner, nullptr, 10);
 			if (player < 0 || player >= MAX_PLAYERS) return false;
-			Leg leg = {.unpaired = !strcmp(kind, "unpaired"), .route = (Route)strtoul(route_s, nullptr, 16),
-			           .owner = {(uint8_t)player}};
-			if (!leg.unpaired && strcmp(kind, "paired")) return false;
+			Leg leg = {.unpaired = strcmp(kind, "paired") != 0, .route = (Route)strtoul(route_s, nullptr, 16),
+			           .owner = {(uint8_t)player},
+			           .why = !strcmp(kind, "warp") ? LEAVE_WARP : !strcmp(kind, "respawn") ? LEAVE_DIED : LEAVE_SEND};
+			if (strcmp(kind, "paired") && strcmp(kind, "unpaired") && strcmp(kind, "warp") && strcmp(kind, "respawn")) return false;
 			if (sscanf(at_s, "%f,%f", &leg.landing.x, &leg.landing.z) != 2) return false;
 			if (!route_ok(leg.route) || (leg.unpaired && leg.route)) return false;
 			uint64_t seq = strtoull(seq_s, nullptr, 10), *max = seq_of(l, src);
@@ -226,7 +237,7 @@ Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *ds
 	char line[512], list[384];
 	format_counts(list, sizeof list, counts, cargo);
 	snprintf(line, sizeof line, "transfer %llu %s %s %u %u %s %llu %x %.9g,%.9g%s", (unsigned long long)l->next_id, src, dst,
-	         faction, leg->owner.v, leg->unpaired ? "unpaired" : "paired", (unsigned long long)seq, leg->route, (double)leg->landing.x,
+	         faction, leg->owner.v, leg_kind(leg), (unsigned long long)seq, leg->route, (double)leg->landing.x,
 	         (double)leg->landing.z, list);
 	log_line(l, line);
 	return add_transfer(l, l->next_id, src, dst, faction, leg, counts, cargo);
@@ -263,7 +274,7 @@ static void format_transfer(char *line, size_t size, const Transfer *t, uint64_t
 	char list[384];
 	format_counts(list, sizeof list, t->counts, &t->cargo);
 	snprintf(line, size, "transfer %llu %s %s %u %u %s %llu %x %.9g,%.9g%s", (unsigned long long)t->id, t->src, t->dst,
-	         t->faction, t->leg.owner.v, t->leg.unpaired ? "unpaired" : "paired", (unsigned long long)seq, t->leg.route,
+	         t->faction, t->leg.owner.v, leg_kind(&t->leg), (unsigned long long)seq, t->leg.route,
 	         (double)t->leg.landing.x, (double)t->leg.landing.z, list);
 }
 

@@ -206,8 +206,8 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		if (n < 3 || n > 5) return bad(p, "produce GROUP TYPE [N] [repeat]", nullptr);
 		if (!(a = new_action(p, tick, ACTION_ORDER, text))) return bad(p, "too many actions", nullptr);
 		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
-		if (!parse_type(tok[2], &a->type, false) || unit_is_structure((UnitType)a->type))
-			return bad(p, "factories make units, not structures", tok[2]);
+		if (!parse_type(tok[2], &a->type, false) || unit_is_structure((UnitType)a->type) || a->type == UNIT_COMMANDER)
+			return bad(p, "factories make units, not structures (or commanders)", tok[2]);
 		a->command = COMMAND_PRODUCE;
 		a->limit = 1;
 		for (int i = 3; i < n; i++) {
@@ -263,6 +263,14 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		if (!parse_i64(tok[3], &amount) || amount <= 0 || amount > SPAWN_MAX) return bad(p, "amount out of range", tok[3]);
 		a->limit = (int32_t)amount;
 		a->flags = 0xff; // marks an arrival rather than a spawn
+		return true;
+	}
+	if (!strcmp(verb, "warp")) {
+		// warp GROUP: its commanders warp home
+		if (n != 2) return bad(p, "warp GROUP", nullptr);
+		if (!(a = new_action(p, tick, ACTION_ORDER, text))) return bad(p, "too many actions", nullptr);
+		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
+		a->command = COMMAND_WARP;
 		return true;
 	}
 	if (!strcmp(verb, "entrench") || !strcmp(verb, "mobilize")) {
@@ -345,11 +353,11 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		                               "", "departed", "arrived"};
 		static const char *counts[UNIT_TYPE_COUNT] = {
 			[UNIT_RAIDER] = "raiders", [UNIT_TANK] = "tanks", [UNIT_ARTILLERY] = "artillery", [UNIT_SIEGE] = "sieges",
-			[UNIT_ENGINEER] = "engineers", [UNIT_SAPPER] = "sappers", [UNIT_SCOUT] = "scouts",
+			[UNIT_ENGINEER] = "engineers", [UNIT_SAPPER] = "sappers", [UNIT_SCOUT] = "scouts", [UNIT_COMMANDER] = "commanders",
 			[UNIT_METAL_TRUCK] = "metal-trucks", [UNIT_ENERGY_TRUCK] = "energy-trucks",
 			[UNIT_EXTRACTOR] = "extractors", [UNIT_GENERATOR] = "generators",
 			[UNIT_FACTORY] = "factories", [UNIT_TRANSPORTER] = "transporters", [UNIT_TURRET] = "turrets",
-			[UNIT_METAL_VAULT] = "metal-vaults", [UNIT_ENERGY_VAULT] = "energy-vaults",
+			[UNIT_METAL_VAULT] = "metal-vaults", [UNIT_ENERGY_VAULT] = "energy-vaults", [UNIT_HEADQUARTERS] = "headquarters",
 		};
 		for (int k = 0; k < UNIT_TYPE_COUNT; k++) ASSERT(counts[k]); // a name for every type
 		static const char *ops[] = {"<", "<=", ">", ">=", "==", "!="};
@@ -453,6 +461,12 @@ static bool parse_line(Parser *p, char *line)
 		if (p->s->action_count > 0) return bad(p, "zones must come before actions", nullptr);
 		for (int k = 1; k < n; k++) s->zones[k - 1] = copy_str(p->arena, tok[k]);
 		s->zone_count = n - 1;
+		return true;
+	}
+	if (!strcmp(key, "commanders")) {
+		bool on;
+		if (n != 2 || !parse_on(tok[1], &on)) return bad(p, "commanders on|off", nullptr);
+		s->config.commanders = on;
 		return true;
 	}
 	if (!strcmp(key, "economy")) {

@@ -3,7 +3,7 @@
 // Every change is a line in an append-only log, written and fsynced before
 // anyone is told, so a restarted coordinator rebuilds exactly what it had:
 //
-//   transfer ID SRC DST FACTION PLAYER paired|unpaired SEQ ROUTE X,Z TYPE:N ... [cargo:M,E]
+//   transfer ID SRC DST FACTION PLAYER paired|unpaired|warp|respawn SEQ ROUTE X,Z TYPE:N ... [cargo:M,E]
 //       units left SRC for DST, to arrive owned by PLAYER (a slot of FACTION),
 //       their trucks carrying M metal and E energy
 //       (SEQ: SRC's own number for it), going on
@@ -50,13 +50,14 @@ typedef enum : uint8_t {
 enum : uint8_t { SIDE_FULL = 255 };
 
 // How a transfer goes on: unpaired or not, who the units arrive owned by,
-// the route after its destination, and where unpaired ones land.
-// On the wire: u8 unpaired, u8 owner, u32 route, f32 x, z.
+// the route after its destination, where unpaired ones land, and why they
+// left. On the wire: u8 unpaired, u8 owner, u32 route, f32 x, z, u8 why.
 typedef struct {
 	bool unpaired;
 	PlayerSlot owner;
 	Route route;
 	V2 landing;
+	LeaveKind why;          // a send, a commander's warp, a lost commander
 } Leg;
 
 void put_leg(ByteBuf *b, const Leg *l);

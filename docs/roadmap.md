@@ -819,6 +819,46 @@ can see and use the controls as a player does.
 - **Not yet**: a script's positions are pixels, so it depends on where the
   camera starts and units stand; good enough for the base at the start.
 
+## Spike 18 results (2026-10-09)
+
+Done, with bots' expansion left for 18b. A player is where their commander is.
+
+- **Commanders on** (a game setting: `commanders on` in a script, and every
+  new world): each player starts with only a commander, the side with only
+  a headquarters too. The commander builds what engineers build, at twice
+  the pace, and fights (2400 hp, range 30); engineers come from the first
+  factory. Older scripts keep the older start (a factory and two
+  engineers): every existing demo re-renders byte for byte.
+- **Presence**: a player has the base storage and the free income only in a
+  zone their commander is in. Elsewhere, what they've built or shipped.
+- **The headquarters**: one per side in its home zone, no player's (it
+  can't be given or taken, nor can commanders). A commander lost anywhere
+  reappears beside it 60 s later; one lost in another zone is reported home
+  through the coordinator (a `respawn` transfer), and the home zone keeps
+  the time.
+- **Warp home**: an order for commanders. 5000 energy, paid as building is
+  (10 s at full rate, slower in a stall), still and silent meanwhile; a hit
+  stops it; then 5 minutes before it can warp again. At home it steps out
+  beside the headquarters; elsewhere it leaves (a `warp` transfer) and lands
+  there. A player gone 30 s has their commanders warp home, free, so their
+  bot never plays a commander away from home. U in the client.
+- **Bots, as far as this spike goes**: a bot's commander builds at home (the
+  first factory before anything, then the transporter); a bot with no
+  transporter in a zone starts one at once, not at its next strategy turn.
+- **Evidence**: `test_commanders` (the start; presence; give refused; the
+  respawn in 60 s; a warp's price, time, recharge, and a hit stopping one;
+  a warp and a loss elsewhere leaving for home). Demo 21, played: the
+  commander-only start, the first factory, an engineer, warp home (its
+  zone gives blue generators to pay for the warp in the demo's time).
+  The world smoke test's bob now plays 900 ticks (with the commander's
+  start, his bot's first orders come later). A 3-minute zone soak passes.
+- **Formats**: replay v15, wire v12, zone state v9; the coordinator's log
+  has `warp` and `respawn` transfers.
+- **Not yet** (18b): bots' crews land where they have no commander and so
+  no economy, and stand there (28 idle engineers in north after two and a
+  half minutes); home armies pile up. They need to bring trucks or their
+  commander. The world soak would fail its expansion check until then.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

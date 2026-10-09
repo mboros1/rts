@@ -1421,6 +1421,112 @@ static void test_keymap(void)
 	arena_destroy(&a);
 }
 
+// Commanders: the start (a headquarters and a commander each), presence
+// (base storage and income only where your commander is), respawning at
+// the headquarters, warp home (its price, its cooldown, a hit stopping
+// it), and leaving for home from a zone without the headquarters.
+static void test_commanders(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.commanders = true;
+	c.bases = 1;
+	c.players[0] = 2;
+	Sim sim;
+	sim_init(&sim, c);
+	Faction *f = &sim.factions[0];
+	Units *u = &f->units;
+	int hq = 0, cmd = 0, other = 0;
+	UnitHandle boss[2] = {NO_UNIT, NO_UNIT};
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		hq += u->type[i] == UNIT_HEADQUARTERS;
+		if (u->type[i] == UNIT_COMMANDER) boss[u->owner[i].v] = units_handle(u, i), cmd++;
+		other += u->type[i] != UNIT_HEADQUARTERS && u->type[i] != UNIT_COMMANDER;
+	}
+	CHECK(hq == 1 && cmd == 2 && other == 0);
+	sim_step(&sim, nullptr, 0);
+	CHECK(f->economy[1].metal_cap == BASE_METAL_CAP && f->economy[1].metal_income > 0.0f);
+	// Can't be given away.
+	Command give = {.faction = {0}, .player = {1}, .to = {0}, .kind = COMMAND_GIVE, .count = 1, .units = &boss[1]};
+	sim_step(&sim, &give, 1);
+	CHECK(u->owner[units_find(u, boss[1])].v == 1);
+	// blue.1's commander lost: no base storage or income here until it's back, 60 s on.
+	u->hp[units_find(u, boss[1])] = 0.0f;
+	sim_step(&sim, nullptr, 0);
+	sim_step(&sim, nullptr, 0);
+	CHECK(f->economy[1].metal_cap == 0.0f && f->economy[1].metal == 0.0f && f->economy[1].metal_income == 0.0f);
+	CHECK(f->respawn_at[1] > sim.tick.v);
+	int64_t due = f->respawn_at[1];
+	while (sim.tick.v <= due) sim_step(&sim, nullptr, 0);
+	sim_step(&sim, nullptr, 0);
+	int back = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) back += u->type[i] == UNIT_COMMANDER && u->owner[i].v == 1;
+	CHECK(back == 1 && f->respawn_at[1] == -1 && f->economy[1].metal_cap == BASE_METAL_CAP);
+	// blue.0 warps home: 10 s at full rate, 5000 energy, then beside the
+	// headquarters, recharging; it can't warp again meanwhile.
+	ptrdiff_t b0 = units_find(u, boss[0]);
+	u->px[b0] = u->tx[b0] = 200.0f;
+	f->economy[0].energy = f->economy[0].energy_cap;
+	float before = f->economy[0].energy;
+	Command warp = {.faction = {0}, .player = {0}, .kind = COMMAND_WARP, .count = 1, .units = &boss[0]};
+	sim_step(&sim, &warp, 1);
+	CHECK(u->order[units_find(u, boss[0])] == ORDER_WARP);
+	for (int t = 0; t < 298; t++) sim_step(&sim, nullptr, 0);
+	CHECK(u->order[units_find(u, boss[0])] == ORDER_WARP);          // not quite
+	sim_step(&sim, nullptr, 0);
+	sim_step(&sim, nullptr, 0);
+	b0 = units_find(u, boss[0]);
+	CHECK(u->order[b0] == ORDER_IDLE && u->px[b0] < 120.0f && u->recharge[b0] > 0);
+	float paid = before + 300.0f * 30.0f * SIM_DT - f->economy[0].energy; // less the base income meanwhile
+	CHECK(paid > 4500.0f && paid < 5600.0f);
+	sim_step(&sim, &warp, 1);
+	CHECK(u->order[units_find(u, boss[0])] != ORDER_WARP);          // recharging
+	sim_destroy(&sim);
+
+	// A zone without the headquarters: a warp and a loss both leave for home.
+	c.bases = 0;
+	sim_init(&sim, c);
+	f = &sim.factions[0];
+	u = &f->units;
+	Command spawn = {.faction = {0}, .player = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_COMMANDER, .amount = 1,
+	                 .target = {200, 256}, .radius = 0};
+	Command spawn1 = spawn;
+	spawn1.player = (PlayerSlot){1};
+	Command both[2] = {spawn, spawn1};
+	sim_step(&sim, both, 2);
+	UnitHandle away0 = units_handle(u, 0), away1 = units_handle(u, 1);
+	if (u->owner[0].v == 1) away0 = units_handle(u, 1), away1 = units_handle(u, 0);
+	Command warp0 = {.faction = {0}, .player = {0}, .kind = COMMAND_WARP, .flags = COMMAND_FREE, .count = 1, .units = &away0};
+	sim_step(&sim, &warp0, 1);
+	bool warped = false, died = false;
+	for (int t = 0; t < 320 && !warped; t++) {
+		if (t == 5) u->hp[units_find(u, away1)] = 0.0f;
+		sim_step(&sim, nullptr, 0);
+		for (ptrdiff_t k = 0; k < f->departure_count; k++) {
+			const Departure *d = &f->departures[k];
+			CHECK(d->dest == DEST_HOME && d->type == UNIT_COMMANDER);
+			warped = warped || (d->why == LEAVE_WARP && d->owner.v == 0);
+			died = died || (d->why == LEAVE_DIED && d->owner.v == 1);
+		}
+	}
+	CHECK(warped && died && units_find(u, away0) < 0);
+	// A hit stops a warp: red tanks beside a warping commander.
+	Command again = spawn, tanks = {.faction = {1}, .kind = COMMAND_SPAWN, .unit_type = UNIT_TANK, .amount = 4,
+	                                .target = {215, 256}, .radius = 2};
+	Command setup[2] = {again, tanks};
+	sim_step(&sim, setup, 2);
+	UnitHandle hit = NO_UNIT;
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->type[i] == UNIT_COMMANDER) hit = units_handle(u, i);
+	Command warp_hit = {.faction = {0}, .player = {0}, .kind = COMMAND_WARP, .count = 1, .units = &hit};
+	sim_step(&sim, &warp_hit, 1);
+	CHECK(u->order[units_find(u, hit)] == ORDER_WARP);
+	for (int t = 0; t < 150 && u->order[units_find(u, hit)] == ORDER_WARP; t++) sim_step(&sim, nullptr, 0);
+	ptrdiff_t h = units_find(u, hit);
+	CHECK(h >= 0 && u->order[h] == ORDER_IDLE && u->hp[h] < unit_defs[UNIT_COMMANDER].hp && u->recharge[h] == 0);
+	sim_destroy(&sim);
+}
+
 // Players: every unit has an owner and only the owner's orders move it;
 // giving, factory output and sends name who units go to; each player
 // starts a base of their own; ownership survives a snapshot.
@@ -1564,6 +1670,7 @@ static const Test tests[] = {
 	{"trucks", test_trucks},
 	{"menu", test_menu},
 	{"keymap", test_keymap},
+	{"commanders", test_commanders},
 };
 
 // tests            run all, in order

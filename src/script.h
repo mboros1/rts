@@ -9,6 +9,8 @@
 //   scenario skirmish                 # starting config and bot behaviour
 //   seed 7 | units 400 | weights 6 3 2 | respawn off | economy on
 //   players blue 3                    # a side's players (1..8), each with their own base
+//   commanders on                     # economy: each player starts with only a commander
+//                                     #   (and a side with a base, its headquarters); see sim.h
 //   bases blue | bases red | bases none | bases both  # economy: who starts with a base
 //   doctrine red turtle army_cap=500  # how a side's bot plays (bot.h); default balanced
 //   bot red off                       # at tick 0; bot red.1 off: one player's
@@ -41,6 +43,7 @@
 //   at 57  take blue.1                # blue.1 takes every unit of away teammates
 //                                     #   (a script's player is away while its bot is on)
 //   at 60  send army to gamma for 2   # they arrive belonging to player 2
+//   at 65  warp boss                  # the group's commanders warp home (paid, takes time)
 //   at 70  entrench line              # combat units dig in as turrets (paid, takes time);
 //   at 90  mobilize line              #   mobilize turns entrenched turrets back
 //   at 60  bot red on

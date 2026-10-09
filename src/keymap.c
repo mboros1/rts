@@ -5,7 +5,7 @@
 static const char *const action_names[BIND_COUNT] = {
 	[BIND_MOVE] = "move", [BIND_FIGHT] = "fight", [BIND_STOP] = "stop", [BIND_ENTRENCH] = "entrench",
 	[BIND_REPEAT] = "repeat", [BIND_CLEAR_QUEUE] = "clear_queue", [BIND_SEND] = "send", [BIND_GIVE] = "give",
-	[BIND_TAKE] = "take",
+	[BIND_TAKE] = "take", [BIND_WARP_HOME] = "warp_home",
 	[BIND_BUILD_1] = "build_1", [BIND_BUILD_2] = "build_2", [BIND_BUILD_3] = "build_3", [BIND_BUILD_4] = "build_4",
 	[BIND_BUILD_5] = "build_5", [BIND_BUILD_6] = "build_6", [BIND_BUILD_7] = "build_7", [BIND_BUILD_8] = "build_8",
 	[BIND_TAB_1] = "tab_1", [BIND_TAB_2] = "tab_2", [BIND_TAB_3] = "tab_3", [BIND_TAB_4] = "tab_4",
@@ -20,6 +20,7 @@ Keymap keymap_default(void)
 	const int defaults[BIND_COUNT] = {
 		[BIND_MOVE] = 'M', [BIND_FIGHT] = 'G', [BIND_STOP] = KEYCODE_SPACE, [BIND_ENTRENCH] = 'B',
 		[BIND_REPEAT] = 'Y', [BIND_CLEAR_QUEUE] = 'J', [BIND_SEND] = 'T', [BIND_GIVE] = 'H', [BIND_TAKE] = 'K',
+		[BIND_WARP_HOME] = 'U',
 		// BAR's grid keys.
 		[BIND_BUILD_1] = 'Q', [BIND_BUILD_2] = 'W', [BIND_BUILD_3] = 'E', [BIND_BUILD_4] = 'R',
 		[BIND_BUILD_5] = 'A', [BIND_BUILD_6] = 'S', [BIND_BUILD_7] = 'D', [BIND_BUILD_8] = 'F',

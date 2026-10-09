@@ -193,6 +193,21 @@ static uint8_t side_short_of(const Sim *sim, int f, bool energy)
 	return mask;
 }
 
+// A player gone: their commander here warps home, at no cost, so it isn't
+// left for their bot (or the enemy) to throw away.
+static void warp_away_commander(Server *s, int f, int p)
+{
+	const Units *u = &s->sim.factions[f].units;
+	for (ptrdiff_t i = 0; i < u->count && s->queued_count < MAX_COMMANDS; i++) {
+		if (u->type[i] != UNIT_COMMANDER || u->owner[i].v != p) continue;
+		UnitHandle *h = PUSH(&s->tick, UnitHandle, 1);
+		*h = units_handle(u, i);
+		s->queued[s->queued_count++] = (Command){.faction = {(uint32_t)f}, .player = {(uint8_t)p}, .kind = COMMAND_WARP,
+		                                         .flags = COMMAND_FREE, .count = 1, .units = h};
+		printf("server %s: %s.%d's commander warps home\n", s->zone_name, f ? "red" : "blue", p);
+	}
+}
+
 static void update_presence(Server *s)
 {
 	int64_t now = s->sim.tick.v;
@@ -215,6 +230,7 @@ static void update_presence(Server *s)
 			if (gone != was)
 				printf("server %s: %s.%d %s\n", s->zone_name, f ? "red" : "blue", p,
 				       gone ? (s->bot_allowed[f][p] ? "is away: its bot plays" : "is away") : "is back");
+			if (gone && !was && s->sim.config.commanders) warp_away_commander(s, f, p);
 			s->run.bots[f][p].enabled = gone && s->bot_allowed[f][p];
 		}
 		s->run.away[f] = away;
@@ -278,7 +294,8 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	// paired is the server's to say (route_send).
 	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE || kind == COMMAND_SEND
 	            || kind == COMMAND_ENTRENCH || kind == COMMAND_MOBILIZE || kind == COMMAND_GIVE || kind == COMMAND_OUTPUT
-	            || kind == COMMAND_SHARE || kind == COMMAND_TAKE || kind == COMMAND_SET_REPEAT;
+	            || kind == COMMAND_SHARE || kind == COMMAND_TAKE || kind == COMMAND_SET_REPEAT
+	            || kind == COMMAND_WARP;
 	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && to.v < s->sim.config.players[c->faction] && unit_type < UNIT_TYPE_COUNT
 	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : ZONE_MAX)
 	       && flags <= COMMAND_REPEAT && route_ok(route)
@@ -413,6 +430,18 @@ static void on_deliver(Server *s, ByteReader *r, double now)
 			if (s->applied[k] == id) send_id(s, COORD_DELIVERED, id, now);
 		return;
 	}
+	if (leg.why == LEAVE_DIED) {
+		// A commander lost elsewhere: the headquarters here brings it back, in time.
+		if (s->queued_count == MAX_COMMANDS || s->confirm_count == (int)countof(s->confirm)) {
+			send_id(s, COORD_HOLD, id, now);
+			return;
+		}
+		s->queued[s->queued_count++] = (Command){.faction = {faction}, .player = leg.owner, .kind = COMMAND_ARRIVE,
+		                                         .unit_type = UNIT_COMMANDER, .amount = 1, .flags = COMMAND_RESPAWN};
+		s->confirm[s->confirm_count++] = id;
+		printf("server %s: %s.%d's commander was lost: it respawns here\n", s->zone_name, faction ? "red" : "blue", leg.owner.v);
+		return;
+	}
 	const Faction *f = &s->sim.factions[faction];
 	int32_t batch = 0;
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) batch += counts[k];
@@ -455,7 +484,7 @@ static void on_deliver(Server *s, ByteReader *r, double now)
 		                                         // metal trucks bring the metal, energy trucks the energy
 		                                         .metal = k == UNIT_METAL_TRUCK ? cargo.metal : 0.0f,
 		                                         .energy = k == UNIT_ENERGY_TRUCK ? cargo.energy : 0.0f,
-		                                         .flags = leg.unpaired ? COMMAND_UNPAIRED : 0};
+		                                         .flags = (uint8_t)((leg.unpaired ? COMMAND_UNPAIRED : 0) | (leg.why == LEAVE_WARP ? COMMAND_WARPED : 0))};
 	}
 	s->confirm[s->confirm_count++] = id;
 	printf("server %s: transfer %llu arrives (%s, %s%s)\n", s->zone_name, (unsigned long long)id, faction ? "red" : "blue",
@@ -623,7 +652,16 @@ static bool load_zone(Server *s, Arena *scratch)
 static bool same_leg(const Departure *a, const Departure *b)
 {
 	return a->dest == b->dest && a->route == b->route && a->unpaired == b->unpaired && a->landing.x == b->landing.x
-	    && a->landing.z == b->landing.z && player_eq(a->owner, b->owner);
+	    && a->landing.z == b->landing.z && player_eq(a->owner, b->owner) && a->why == b->why;
+}
+
+// A departure's zone by name: DEST_HOME is the faction's home zone.
+static const char *departure_zone(const Server *s, const Departure *d, int faction)
+{
+	if (d->dest != DEST_HOME) return d->dest < s->zone_count ? s->zones[d->dest] : nullptr;
+	for (int k = 0; k < s->world.zone_count; k++)
+		if (s->world.zones[k].home == faction) return s->zones[k];
+	return nullptr;
 }
 
 static void report_to_coord(Server *s, double now)
@@ -638,7 +676,7 @@ static void report_to_coord(Server *s, double now)
 			bool first = true;
 			for (ptrdiff_t j = 0; j < k && first; j++) first = !same_leg(&fa->departures[j], d);
 			if (!first) continue;
-			const char *dst = d->dest < s->zone_count ? s->zones[d->dest] : nullptr;
+			const char *dst = departure_zone(s, d, f);
 			if (!dst) {
 				fprintf(stderr, "server %s: units left for zone %d, which isn't in the world\n", s->zone_name, d->dest);
 				continue;
@@ -646,7 +684,8 @@ static void report_to_coord(Server *s, double now)
 			if (s->outgoing_count == (int)countof(s->outgoing)) fatal("server %s: departure outbox full", s->zone_name);
 			Outgoing *o = &s->outgoing[s->outgoing_count++];
 			*o = (Outgoing){.seq = ++s->depart_seq, .faction = (uint8_t)f,
-			                .leg = {.unpaired = d->unpaired, .owner = d->owner, .route = d->route, .landing = d->landing}};
+			                .leg = {.unpaired = d->unpaired, .owner = d->owner, .route = d->route, .landing = d->landing,
+			                        .why = d->why}};
 			memcpy(o->dst, dst, strlen(dst) + 1); // zone names fit: world_parse saw to that
 			for (ptrdiff_t j = k; j < fa->departure_count; j++)
 				if (same_leg(&fa->departures[j], d)) {

@@ -51,6 +51,15 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.height = 0.8f, .hp = 40.0f,
 		.metal_cost = 20.0f, .energy_cost = 150.0f, .build_time = 20.0f,
 	},
+	// A player's commander: everything, at first. Builds what engineers build at
+	// twice the pace, with armour worth ten tanks. Never built: a game starts
+	// with one each, and a lost one reappears at the headquarters.
+	[UNIT_COMMANDER] = {
+		.name = "commander", .speed = 6.0f, .accel = 16.0f, .radius = 1.3f, .sight = 40.0f,
+		.height = 2.2f, .hp = 2400.0f, .range = 30.0f, .reload = 30,
+		.shell_speed = 45.0f, .damage = 40.0f, .splash = 1.0f, .spread = 0.6f,
+		.build_power = 20.0f,
+	},
 	[UNIT_METAL_TRUCK] = {
 		.name = "metal-truck", .speed = 5.0f, .accel = 10.0f, .radius = 1.1f, .sight = 16.0f,
 		.height = 1.3f, .hp = 120.0f,
@@ -90,6 +99,11 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 	[UNIT_ENERGY_VAULT] = {
 		.name = "energy-vault", .radius = 1.4f, .sight = 16.0f, .height = 1.2f, .hp = 900.0f,
 		.metal_cost = 100.0f, .energy_cost = 1000.0f, .build_time = 60.0f,
+	},
+	// A side's headquarters, in its home zone from the start: no player's.
+	// Lost commanders reappear beside it (Faction.respawn_at).
+	[UNIT_HEADQUARTERS] = {
+		.name = "headquarters", .radius = 4.5f, .sight = 40.0f, .height = 4.0f, .hp = 6000.0f,
 	},
 };
 
@@ -194,6 +208,8 @@ static void units_init(Units *u, Arena *a, ptrdiff_t cap)
 	u->dest = PUSH(a, uint8_t, cap);
 	u->route = PUSH(a, uint32_t, cap);
 	u->seeded = PUSH(a, uint8_t, cap);
+	u->recharge = PUSH(a, int32_t, cap);
+	u->warp_free = PUSH(a, uint8_t, cap);
 	u->owner = PUSH(a, PlayerSlot, cap);
 	u->output = PUSH(a, PlayerSlot, cap);
 	// Free list pops from the end, so the first spawn gets slot 0.
@@ -257,6 +273,8 @@ static ptrdiff_t units_spawn(Units *u, UnitType type, PlayerSlot owner, float x,
 	u->dest[d] = 0;
 	u->route[d] = 0;
 	u->seeded[d] = 0;
+	u->recharge[d] = 0;
+	u->warp_free[d] = 0;
 	u->owner[d] = owner;
 	u->output[d] = owner;
 	return d;
@@ -275,7 +293,7 @@ static void units_kill(Units *u, ptrdiff_t d)
 		MOVE(cooldown); MOVE(target); MOVE(engaged);
 		MOVE(progress); MOVE(build_type); MOVE(building); MOVE(work);
 		MOVE(queue); MOVE(queue_len); MOVE(repeat); MOVE(dest); MOVE(route); MOVE(seeded);
-		MOVE(owner); MOVE(output);
+		MOVE(owner); MOVE(output); MOVE(recharge); MOVE(warp_free);
 #undef MOVE
 		u->slot_dense[u->dense_slot[d]] = (int32_t)d;
 	}
@@ -645,12 +663,25 @@ static void apply_send(Faction *f, const Sim *sim, const Command *c)
 static float storage_metal(UnitType t) { return t == UNIT_METAL_TRUCK || t == UNIT_METAL_VAULT ? TRUCK_METAL : 0.0f; }
 static float storage_energy(UnitType t) { return t == UNIT_ENERGY_TRUCK || t == UNIT_ENERGY_VAULT ? TRUCK_ENERGY : 0.0f; }
 
-// Each player's caps from their storage here; what's past them is lost.
-static void count_storage(Faction *f, int players)
+// Which players have their commander here (bit per slot): with commanders,
+// only they have the base storage and the free income.
+static uint8_t commanders_here(const Faction *f)
 {
+	const Units *u = &f->units;
+	uint8_t here = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->type[i] == UNIT_COMMANDER) here |= (uint8_t)(1u << u->owner[i].v);
+	return here;
+}
+
+// Each player's caps from their storage here; what's past them is lost.
+static void count_storage(Faction *f, const Sim *sim)
+{
+	int players = sim->config.players[f->id.v];
+	uint8_t based = sim->config.commanders ? commanders_here(f) : 0xff;
 	for (int p = 0; p < players; p++) {
-		f->economy[p].metal_cap = BASE_METAL_CAP;
-		f->economy[p].energy_cap = BASE_ENERGY_CAP;
+		f->economy[p].metal_cap = based >> p & 1 ? BASE_METAL_CAP : 0.0f;
+		f->economy[p].energy_cap = based >> p & 1 ? BASE_ENERGY_CAP : 0.0f;
 	}
 	const Units *u = &f->units;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
@@ -710,6 +741,12 @@ static void apply_arrive(Faction *f, const Sim *sim, const Command *c)
 	if (c->unit_type >= UNIT_TYPE_COUNT || unit_is_structure(c->unit_type) || c->amount < 0 || c->amount > SPAWN_MAX
 	    || !route_ok(c->route) || !player_ok(c->player))
 		return;
+	if (c->flags & COMMAND_RESPAWN) {
+		// A commander lost elsewhere: it reappears here, at the headquarters, in time.
+		if (c->unit_type == UNIT_COMMANDER && c->player.v < sim->config.players[f->id.v] && f->respawn_at[c->player.v] < 0)
+			f->respawn_at[c->player.v] = sim->tick.v + (int64_t)(RESPAWN_TIME * SIM_HZ);
+		return;
+	}
 	bool unpaired = c->flags & COMMAND_UNPAIRED;
 	ptrdiff_t g = unpaired ? -1 : nearest_transporter(f, c->target, 1e4f);
 	V2 at = g >= 0 ? v2(u->px[g], u->pz[g]) : sim_strip_point(t, f->id, c->target);
@@ -724,6 +761,7 @@ static void apply_arrive(Faction *f, const Sim *sim, const Command *c)
 		ptrdiff_t d = units_spawn(u, c->unit_type, c->player, p.x, p.z, terrain_height(t, p.x, p.z));
 		f->stats.units_spawned++;
 		f->stats.units_arrived++;
+		if (c->flags & COMMAND_WARPED) u->recharge[d] = (int32_t)(WARP_RECHARGE * SIM_HZ);
 		if (onward) {
 			u->order[d] = ORDER_SEND;
 			u->tx[d] = u->px[g];
@@ -740,7 +778,7 @@ static void apply_arrive(Faction *f, const Sim *sim, const Command *c)
 	}
 	// Trucks bring their room, and their loads into it.
 	if (unit_is_truck(c->unit_type) && c->player.v < sim->config.players[f->id.v] && c->metal >= 0.0f && c->energy >= 0.0f) {
-		count_storage(f, sim->config.players[f->id.v]);
+		count_storage(f, sim);
 		Economy *e = &f->economy[c->player.v];
 		e->metal = f_min(e->metal + c->metal, e->metal_cap);
 		e->energy = f_min(e->energy + c->energy, e->energy_cap);
@@ -756,7 +794,7 @@ static void apply_give(Faction *f, const Sim *sim, const Command *c)
 	Units *u = &f->units;
 	for (ptrdiff_t k = 0; k < c->count; k++) {
 		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
-		if (d < 0) continue;
+		if (d < 0 || unit_is_personal(u->type[d])) continue; // a commander stays its player's
 		if (c->kind == COMMAND_GIVE) {
 			hand_over(f, players, d, c->to);
 			// A factory's output stays where it was pointed; anything else
@@ -819,6 +857,20 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		apply_share(f, sim, c);
 		return;
 	}
+	if (c->kind == COMMAND_WARP) {
+		Units *u = &f->units;
+		for (ptrdiff_t k = 0; k < c->count; k++) {
+			ptrdiff_t d = units_find_own(u, c->units[k], c->player);
+			if (d < 0 || u->type[d] != UNIT_COMMANDER || u->order[d] == ORDER_WARP || u->recharge[d] > 0) continue;
+			u->order[d] = ORDER_WARP;
+			u->work[d] = 0.0f;
+			u->warp_free[d] = (c->flags & COMMAND_FREE) != 0;
+			u->building[d] = NO_UNIT;
+			u->tx[d] = u->px[d];
+			u->tz[d] = u->pz[d];
+		}
+		return;
+	}
 	if (c->kind == COMMAND_SET_REPEAT) {
 		Units *u = &f->units;
 		for (ptrdiff_t k = 0; k < c->count; k++) {
@@ -837,7 +889,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		Units *u = &f->units;
 		if (!player_ok(c->player) || (f->away >> c->player.v & 1)) return;
 		for (ptrdiff_t i = 0; i < u->count; i++) {
-			if (!(f->away >> u->owner[i].v & 1)) continue;
+			if (!(f->away >> u->owner[i].v & 1) || unit_is_personal(u->type[i])) continue;
 			// A factory keeps making for whoever it was pointed at, unless
 			// that was its old owner.
 			if (u->type[i] != UNIT_FACTORY || player_eq(u->output[i], u->owner[i])) u->output[i] = c->player;
@@ -931,8 +983,8 @@ static void move_units(Faction *f, const Terrain *t)
 		}
 		V2 p = v2(u->px[i], u->pz[i]);
 		V2 desired = v2(0.0f, 0.0f);
-		if (u->order[i] == ORDER_TRANSFORM) {
-			// Digging in: stands still (the desired velocity stays zero).
+		if (u->order[i] == ORDER_TRANSFORM || u->order[i] == ORDER_WARP) {
+			// Digging in, or warping: stands still (the desired velocity stays zero).
 		} else if (u->order[i] == ORDER_BUILD || u->order[i] == ORDER_SEND) {
 			V2 to = v2_sub(v2(u->tx[i], u->tz[i]), p);
 			float d = v2_len(to);
@@ -992,6 +1044,15 @@ static void move_units(Faction *f, const Terrain *t)
 	}
 }
 
+// A hit stops a commander's warp: it can try again (its recharge starts only
+// when a warp completes).
+static void interrupt_warp(Units *u, ptrdiff_t i)
+{
+	if (u->order[i] != ORDER_WARP) return;
+	u->order[i] = ORDER_IDLE;
+	u->work[i] = 0.0f;
+}
+
 static V3 unit_centre(const Units *u, ptrdiff_t i)
 {
 	return v3(u->px[i], u->py[i] + unit_defs[u->type[i]].radius, u->pz[i]);
@@ -1011,6 +1072,7 @@ static void splash(Units *u, const Grid *grid, V3 at, const UnitDef *weapon, ptr
 		float edge = f_max(0.0f, d - rad);
 		if (edge >= weapon->splash) continue;
 		u->hp[j] -= 0.5f * weapon->damage * (1.0f - edge / weapon->splash);
+		interrupt_warp(u, j);
 	}
 }
 
@@ -1052,6 +1114,7 @@ static void fly_projectiles(Faction *f, const Terrain *t)
 		bool gone = false;
 		if (hit >= 0) {
 			u->hp[hit] -= weapon->damage;
+			interrupt_warp(u, hit);
 			splash(u, &grid, v3_add(p0, v3_scale(seg, hit_t)), weapon, hit);
 			gone = true;
 		} else if (p1.y <= terrain_height(t, p1.x, p1.z)) {
@@ -1126,7 +1189,7 @@ static void fire_weapons(Faction *f, const EnemyView *v, const Terrain *t, Tick 
 		const UnitDef *def = &unit_defs[u->type[i]];
 		if (u->cooldown[i] > 0) u->cooldown[i]--;
 		u->engaged[i] = 0;
-		if (def->range <= 0.0f || u->order[i] == ORDER_TRANSFORM) continue; // transforming: no firing
+		if (def->range <= 0.0f || u->order[i] == ORDER_TRANSFORM || u->order[i] == ORDER_WARP) continue; // no firing meanwhile
 
 		V2 p = v2(u->px[i], u->pz[i]);
 		ptrdiff_t e = view_find(v, u->target[i]);
@@ -1308,11 +1371,12 @@ static void run_economy(Faction *f, const Sim *sim)
 {
 	Units *u = &f->units;
 	int players = sim->config.players[f->id.v];
-	count_storage(f, players);
+	count_storage(f, sim);
+	uint8_t based = sim->config.commanders ? commanders_here(f) : 0xff;
 	float income_m[MAX_PLAYERS], income_e[MAX_PLAYERS];
 	for (int p = 0; p < players; p++) {
-		income_m[p] = BASE_METAL_INCOME;
-		income_e[p] = BASE_ENERGY_INCOME;
+		income_m[p] = based >> p & 1 ? BASE_METAL_INCOME : 0.0f;
+		income_e[p] = based >> p & 1 ? BASE_ENERGY_INCOME : 0.0f;
 	}
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (u->progress[i] < 1.0f) continue;
@@ -1393,6 +1457,9 @@ static void run_economy(Faction *f, const Sim *sim)
 		want_m[u->owner[i].v] += (dig_in ? ENTRENCH_METAL : MOBILIZE_METAL) * step;
 		want_e[u->owner[i].v] += (dig_in ? ENTRENCH_ENERGY : MOBILIZE_ENERGY) * step;
 	}
+	// Warps home: energy only, like a transporter's charge (a free one asks nothing).
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->order[i] == ORDER_WARP && !u->warp_free[i]) want_e[u->owner[i].v] += WARP_ENERGY * SIM_DT / WARP_TIME;
 	float rate_m[MAX_PLAYERS], rate_e[MAX_PLAYERS];
 	for (int p = 0; p < players; p++) {
 		Economy *e = &f->economy[p];
@@ -1453,6 +1520,13 @@ static void run_economy(Faction *f, const Sim *sim)
 		u->work[i] += step;
 		spent_e[p] += charge_cost[i] * step;
 	}
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->order[i] != ORDER_WARP) continue;
+		int p = u->owner[i].v;
+		float step = f_min(SIM_DT / WARP_TIME * (u->warp_free[i] ? 1.0f : rate_e[p]), 1.0f - u->work[i]);
+		u->work[i] += step;
+		if (!u->warp_free[i]) spent_e[p] += WARP_ENERGY * step;
+	}
 	for (int p = 0; p < players; p++) {
 		Economy *e = &f->economy[p];
 		e->metal = f_max(0.0f, e->metal - spent_m[p]);
@@ -1469,7 +1543,8 @@ static void add_departure(Faction *f, const Departure *dep)
 	for (ptrdiff_t k = 0; k < f->departure_count; k++) {
 		Departure *d = &f->departures[k];
 		if (d->dest == dep->dest && d->type == dep->type && d->route == dep->route && d->unpaired == dep->unpaired
-		    && d->landing.x == dep->landing.x && d->landing.z == dep->landing.z && player_eq(d->owner, dep->owner)) {
+		    && d->landing.x == dep->landing.x && d->landing.z == dep->landing.z && player_eq(d->owner, dep->owner)
+		    && d->why == dep->why) {
 			d->count++;
 			d->metal += dep->metal;
 			d->energy += dep->energy;
@@ -1483,8 +1558,6 @@ static void add_departure(Faction *f, const Departure *dep)
 static void fire_transporters(Faction *f)
 {
 	Units *u = &f->units;
-	f->departures = PUSH(&f->scratch, Departure, MAX_DEPARTURES);
-	f->departure_count = 0;
 	int32_t leaving[PAIRED_BATCH];
 	// Waiting at a transporter that's gone: stand down.
 	for (ptrdiff_t i = 0; i < u->count; i++)
@@ -1516,13 +1589,84 @@ static void fire_transporters(Faction *f)
 	}
 }
 
-static void remove_dead(Faction *f)
+// The side's headquarters here (its home zone), or -1.
+static ptrdiff_t headquarters(const Faction *f)
+{
+	const Units *u = &f->units;
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->type[i] == UNIT_HEADQUARTERS) return i;
+	return -1;
+}
+
+// A commander gone from here: lost, or warping home. At home it's a timer at
+// the headquarters; elsewhere a departure for home (the zone server knows
+// which that is), where it becomes one.
+static void commander_home(Faction *f, const Sim *sim, ptrdiff_t i, LeaveKind why)
+{
+	Units *u = &f->units;
+	int p = u->owner[i].v;
+	if (headquarters(f) >= 0) {
+		if (why == LEAVE_DIED && f->respawn_at[p] < 0) f->respawn_at[p] = sim->tick.v + (int64_t)(RESPAWN_TIME * SIM_HZ);
+		return;
+	}
+	if (f->departure_count == MAX_DEPARTURES) return; // full this tick: a bug's worth of departures; it's dropped
+	Departure dep = {.dest = DEST_HOME, .type = UNIT_COMMANDER, .count = 1, .unpaired = true, .landing = f->base,
+	                 .owner = u->owner[i], .why = why};
+	add_departure(f, &dep);
+}
+
+static void remove_dead(Faction *f, const Sim *sim)
 {
 	Units *u = &f->units;
 	for (ptrdiff_t i = u->count - 1; i >= 0; i--) {
 		if (u->hp[i] > 0.0f) continue;
+		if (u->type[i] == UNIT_COMMANDER) commander_home(f, sim, i, LEAVE_DIED);
 		units_kill(u, i);
 		f->stats.units_lost++;
+	}
+}
+
+// Warps done: at home the commander steps out beside the headquarters;
+// elsewhere it leaves for home. Either way its warp recharges.
+static void finish_warps(Faction *f, const Sim *sim)
+{
+	Units *u = &f->units;
+	for (ptrdiff_t i = u->count - 1; i >= 0; i--) {
+		if (u->order[i] != ORDER_WARP || u->work[i] < 1.0f) continue;
+		ptrdiff_t hq = headquarters(f);
+		u->order[i] = ORDER_IDLE;
+		u->work[i] = 0.0f;
+		u->recharge[i] = (int32_t)(WARP_RECHARGE * SIM_HZ);
+		if (hq >= 0) {
+			float ring = unit_defs[UNIT_HEADQUARTERS].radius + 4.0f;
+			V2 at = clamp_to_map(&sim->terrain, v2(u->px[hq] + rng_range(&f->rng, -ring, ring), u->pz[hq] + ring), 2.0f);
+			u->px[i] = u->tx[i] = at.x;
+			u->pz[i] = u->tz[i] = at.z;
+			u->py[i] = terrain_height(&sim->terrain, at.x, at.z);
+			u->vx[i] = u->vz[i] = 0.0f;
+			continue;
+		}
+		commander_home(f, sim, i, LEAVE_WARP);
+		units_kill(u, i);
+		f->stats.units_departed++;
+	}
+}
+
+// Commanders: warps recharging, and lost ones reappearing at the headquarters.
+static void run_commanders(Faction *f, const Sim *sim)
+{
+	Units *u = &f->units;
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->recharge[i] > 0) u->recharge[i]--;
+	ptrdiff_t hq = headquarters(f);
+	if (hq < 0) return;
+	for (int p = 0; p < sim->config.players[f->id.v]; p++) {
+		if (f->respawn_at[p] < 0 || sim->tick.v < f->respawn_at[p] || u->count == u->cap) continue;
+		f->respawn_at[p] = -1;
+		float ring = unit_defs[UNIT_HEADQUARTERS].radius + 3.0f;
+		V2 at = clamp_to_map(&sim->terrain, v2(u->px[hq] + ring, u->pz[hq] + rng_range(&f->rng, -ring, ring)), 2.0f);
+		units_spawn(u, UNIT_COMMANDER, (PlayerSlot){(uint8_t)p}, at.x, at.z, terrain_height(&sim->terrain, at.x, at.z));
+		f->stats.units_spawned++;
 	}
 }
 
@@ -1611,28 +1755,32 @@ static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const 
                           ptrdiff_t count)
 {
 	arena_reset(&f->scratch);
+	f->departures = PUSH(&f->scratch, Departure, MAX_DEPARTURES);
+	f->departure_count = 0;
 	apply_effects(f, fx, sim->tick);
 	build_view(f, &sim->terrain, sim->tick);
 	for (ptrdiff_t k = 0; k < count; k++)
 		if (commands[k].faction.v == f->id.v) apply_command(f, sim, &commands[k]);
 	spawn(f, sim);
 	move_units(f, &sim->terrain);
+	run_commanders(f, sim);
 	if (sim->config.economy) {
 		run_economy(f, sim);
 		fire_transporters(f);
 	} else {
-		f->departure_count = 0;
-		// No economy to pay from: transforms just take their time.
+		// No economy to pay from: transforms and warps just take their time.
 		Units *u = &f->units;
 		for (ptrdiff_t i = 0; i < u->count; i++) {
+			if (u->order[i] == ORDER_WARP) u->work[i] = f_min(1.0f, u->work[i] + SIM_DT / WARP_TIME);
 			if (u->order[i] != ORDER_TRANSFORM) continue;
 			u->work[i] = f_min(1.0f, u->work[i] + SIM_DT / (unit_digs_in(u->type[i]) ? ENTRENCH_TIME : MOBILIZE_TIME));
 			if (u->work[i] >= 1.0f) finish_transform(u, i);
 		}
 	}
+	finish_warps(f, sim);
 	fly_projectiles(f, &sim->terrain);
 	fire_weapons(f, &f->view, &sim->terrain, sim->tick);
-	remove_dead(f);
+	remove_dead(f, sim);
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -1688,6 +1836,7 @@ void sim_init(Sim *sim, SimConfig config)
 		f->scratch = arena_create(scratch_names[k], (ptrdiff_t)64 << 20);
 
 		f->away = (uint8_t)((1u << config.players[k]) - 1); // until someone plays them
+		for (int pl = 0; pl < MAX_PLAYERS; pl++) f->respawn_at[pl] = -1;
 		for (int pl = 0; pl < MAX_PLAYERS; pl++)
 			f->economy[pl] = (Economy){START_METAL, START_ENERGY, BASE_METAL_CAP, BASE_ENERGY_CAP, .rate = 1.0f};
 		if (config.economy) {
@@ -1696,6 +1845,19 @@ void sim_init(Sim *sim, SimConfig config)
 			// in turn. In a world, only in the faction's home zone.
 			if (!(config.bases >> k & 1)) continue;
 			float face = k == 0 ? 1.0f : -1.0f;
+			if (config.commanders) {
+				// The side's headquarters at the base, and each player's
+				// commander at their place beside it: that's all.
+				units_spawn(&f->units, UNIT_HEADQUARTERS, (PlayerSlot){0}, f->base.x, f->base.z,
+				            terrain_height(t, f->base.x, f->base.z));
+				f->stats.units_spawned++;
+				for (int pl = 0; pl < config.players[k]; pl++) {
+					V2 at = v2_add(sim_player_base(sim, f->id, (PlayerSlot){(uint8_t)pl}), v2(16.0f * face, 0.0f));
+					units_spawn(&f->units, UNIT_COMMANDER, (PlayerSlot){(uint8_t)pl}, at.x, at.z, terrain_height(t, at.x, at.z));
+					f->stats.units_spawned++;
+				}
+				continue;
+			}
 			for (int pl = 0; pl < config.players[k]; pl++) {
 				PlayerSlot owner = {(uint8_t)pl};
 				V2 at = v2_add(sim_player_base(sim, f->id, owner), v2(10.0f * face, 0.0f));
@@ -1769,6 +1931,8 @@ static Hash hash_units(Hash h, const Units *u)
 		h = hash_u32(h, (uint32_t)u->queue_len[i] << 24 | (uint32_t)u->repeat[i] << 16 | (uint32_t)u->dest[i] << 8 | u->seeded[i]);
 		h = hash_u32(h, u->route[i]);
 		h = hash_u32(h, (uint32_t)u->owner[i].v << 8 | u->output[i].v);
+		h = hash_u32(h, (uint32_t)u->recharge[i]);
+		h = hash_u32(h, u->warp_free[i]);
 	}
 	return h;
 }
@@ -1837,6 +2001,7 @@ Hash faction_hash(const Faction *f)
 	}
 	h = hash_u64(h, f->spots);
 	h = hash_u32(h, f->away);
+	for (int p = 0; p < MAX_PLAYERS; p++) h = hash_u64(h, (uint64_t)f->respawn_at[p]);
 	return hash_perception(h, &f->seen);
 }
 
@@ -1891,6 +2056,8 @@ void faction_write(const Faction *f, ByteBuf *b)
 		put8(b, u->seeded[i]);
 		put8(b, u->owner[i].v);
 		put8(b, u->output[i].v);
+		put32(b, (uint32_t)u->recharge[i]);
+		put8(b, u->warp_free[i]);
 	}
 	const Projectiles *p = &f->incoming;
 	put32(b, (uint32_t)p->count);
@@ -1931,6 +2098,7 @@ void faction_write(const Faction *f, ByteBuf *b)
 	}
 	put64(b, f->spots);
 	put8(b, f->away);
+	for (int pl = 0; pl < MAX_PLAYERS; pl++) put64(b, (uint64_t)f->respawn_at[pl]);
 	const Perception *seen = &f->seen;
 	uint32_t live = 0;
 	for (ptrdiff_t s = 0; s < seen->cap; s++) live += seen->live[s];
@@ -2000,6 +2168,9 @@ bool faction_read(Faction *f, ByteReader *r)
 		u->seeded[i] = get8(r);
 		u->owner[i] = (PlayerSlot){get8(r)};
 		u->output[i] = (PlayerSlot){get8(r)};
+		u->recharge[i] = (int32_t)get32(r);
+		u->warp_free[i] = get8(r);
+		if (u->recharge[i] < 0 || u->warp_free[i] > 1) return false;
 		if (!player_ok(u->owner[i]) || !player_ok(u->output[i])) return false;
 		if (type >= UNIT_TYPE_COUNT || order >= ORDER_KIND_COUNT || u->engaged[i] > 1 || u->cooldown[i] < 0
 		    || build_type >= UNIT_TYPE_COUNT || u->queue_len[i] > FACTORY_QUEUE || u->repeat[i] > 1 || u->seeded[i] > 1
@@ -2072,6 +2243,10 @@ bool faction_read(Faction *f, ByteReader *r)
 	}
 	f->spots = get64(r);
 	f->away = get8(r);
+	for (int pl = 0; pl < MAX_PLAYERS; pl++) {
+		f->respawn_at[pl] = (int64_t)get64(r);
+		if (f->respawn_at[pl] < -1) return false;
+	}
 	Perception *seen = &f->seen;
 	memset(seen->live, 0, (size_t)seen->cap);
 	uint32_t live = get32(r);

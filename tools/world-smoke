@@ -44,7 +44,7 @@ grep '^east ' "$out/status-blue.txt" | grep -q 'red 0 units 0 bldg 0 transporter
 	--netlog "$out/journey.netlog" --stats "$out/journey.txt" > "$out/journey.out" 2>&1 &
 alice=$!
 for i in $(seq 50); do grep -q ' plays ' "$out/journey.out" 2>/dev/null && break; sleep 0.1; done # alice first
-"$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --bot --name bob --zone west --quit-after 240 \
+"$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --bot --name bob --zone west --quit-after 900 \
 	--stats "$out/bob.txt" > "$out/bob.out" 2>&1 &
 bob=$!
 wait $alice || fail "the journey failed"

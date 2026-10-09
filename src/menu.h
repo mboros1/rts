@@ -27,6 +27,7 @@ typedef enum : uint8_t {
 	MENU_ORDER_SEND,        // through a transporter, to a zone
 	MENU_ORDER_GIVE,        // the selection to a teammate; with nothing selected, resources
 	MENU_ORDER_TAKE,        // away teammates' units here
+	MENU_ORDER_WARP,        // commanders: warp home
 	MENU_ORDER_COUNT,
 } MenuOrder;
 
@@ -57,6 +58,7 @@ typedef struct {
 	int32_t total;
 	bool builders, factories, mobile, digs_in, dug_in;
 	bool repeating;                   // a selected factory repeats
+	bool warp_ready;                  // a selected commander can warp now
 	int32_t queued[UNIT_TYPE_COUNT];  // over the selected factories
 } SelectionSummary;
 

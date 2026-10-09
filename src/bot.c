@@ -271,12 +271,16 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		if (k >= 0) taken |= (uint64_t)1 << k;
 	}
 	// In a world, a zone with no transporter of ours yet: the builders are
-	// for that (bot_strategy), before anything else.
-	if (bot->world && !own_transporter(bot, u, false)) return;
+	// for that (bot_strategy), before anything else; except at home before
+	// there's a factory (a commander-only start): the factory first.
+	bool factory_first = bot->world && bot->world->home[bot->world->here] && factories == 0;
+	if (bot->world && !own_transporter(bot, u, false) && !factory_first) return;
 	int want_factories = 1 + (int)(e->metal_income / 10.0f);
 	if (want_factories > 4) want_factories = 4;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
-		if (!mine(bot, u, i) || u->type[i] != UNIT_ENGINEER || u->order[i] != ORDER_IDLE) continue;
+		// Engineers, and the commander: it builds the start (and never leaves, here or anywhere: 18b).
+		bool builds = u->type[i] == UNIT_ENGINEER || u->type[i] == UNIT_COMMANDER;
+		if (!mine(bot, u, i) || !builds || u->order[i] != ORDER_IDLE) continue;
 		V2 p = v2(u->px[i], u->pz[i]);
 		// The nearest free metal spot, and whether it's within reach of home.
 		int32_t spot = -1;
@@ -367,7 +371,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	int here = w->here;
 	bool sending = false;
 	int32_t idle_army = 0, idle_builders = 0, idle_crew = 0, idle_raiders = 0, scouts = 0, turrets = 0;
-	int32_t transporters = 0;
+	int32_t transporters = 0, factories = 0;
 	ptrdiff_t free_scout = -1;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (!mine(bot, u, i)) continue;
@@ -380,12 +384,15 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		scouts += u->type[i] == UNIT_SCOUT;
 		turrets += u->type[i] == UNIT_TURRET && u->seeded[i];
 		transporters += u->type[i] == UNIT_TRANSPORTER;
+		factories += u->type[i] == UNIT_FACTORY;
 		if (u->type[i] == UNIT_SCOUT && u->order[i] != ORDER_SEND) free_scout = i; // patrolling will do
 	}
 	bool front = w->contact[here] || w->neighbours_enemy[here];
 
 	// Transporters: the first with every idle builder (the sooner it's up, the
-	// sooner help comes); more, one at a time, up to the doctrine's number.
+	// sooner help comes); more, one at a time, up to the doctrine's number. At
+	// home, only once there's a factory (bot_economy builds that first).
+	if (w->home[here] && factories == 0) return;
 	if (transporters == 0 || (own_transporter(bot, u, true) && transporters < d->transporters)) {
 		if (idle_builders == 0 || e->metal < 0.5f * unit_defs[UNIT_TRANSPORTER].metal_cost) return;
 		Promised none = {0};
@@ -395,6 +402,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		UnitHandle *h = PUSH(arena, UnitHandle, idle_builders);
 		int32_t n = pick_idle(bot, u, UNIT_SAPPER, take, h, 0);
 		n = pick_idle(bot, u, UNIT_ENGINEER, take - n, h, n);
+		n = pick_idle(bot, u, UNIT_COMMANDER, take - n, h, n); // a commander-only start builds it itself
 		emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_BUILD, .target = site, .count = n,
 		                                .units = h, .unit_type = UNIT_TRANSPORTER});
 		if (transporters == 0) return;
@@ -552,7 +560,12 @@ static void bot_think_side(Bot *bot, const Sim *sim, Arena *arena, Command *out,
 {
 	// Teammates think on ticks of their own.
 	int64_t t = sim->tick.v + bot->player.v * 4;
-	if (bot->world && sim->config.economy && (t + bot->player.v * 33 + 7 + bot->faction.v * 150) % STRATEGY_PERIOD == 0)
+	// The map every STRATEGY_PERIOD; with no transporter of ours here yet, at
+	// every decision: that's the first thing a zone needs (a commander-only
+	// start shouldn't wait ten seconds to begin).
+	const Units *mine_here = &sim->factions[bot->faction.v].units;
+	bool urgent = (t + bot->faction.v * 15) % bot->period == 0 && !own_transporter(bot, mine_here, false);
+	if (bot->world && sim->config.economy && (urgent || (t + bot->player.v * 33 + 7 + bot->faction.v * 150) % STRATEGY_PERIOD == 0))
 		bot_strategy(bot, sim, arena, out, count, cap);
 	if ((t + bot->faction.v * 15) % bot->period != 0) return;
 	if (sim->config.economy) bot_economy(bot, sim, arena, out, count, cap);

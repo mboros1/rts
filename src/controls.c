@@ -17,6 +17,7 @@ static const KeyBinding order_action[MENU_ORDER_COUNT] = {
 	[MENU_ORDER_MOVE] = BIND_MOVE, [MENU_ORDER_FIGHT] = BIND_FIGHT, [MENU_ORDER_STOP] = BIND_STOP,
 	[MENU_ORDER_ENTRENCH] = BIND_ENTRENCH, [MENU_ORDER_REPEAT] = BIND_REPEAT, [MENU_ORDER_CLEAR] = BIND_CLEAR_QUEUE,
 	[MENU_ORDER_SEND] = BIND_SEND, [MENU_ORDER_GIVE] = BIND_GIVE, [MENU_ORDER_TAKE] = BIND_TAKE,
+	[MENU_ORDER_WARP] = BIND_WARP_HOME,
 };
 
 static int key_of(const Controls *c, KeyBinding a) { return c->keys ? c->keys->key[a] : keymap_default().key[a]; }
@@ -251,6 +252,7 @@ static void press_order(Controls *c, const Sim *sim, const SelectionSummary *s, 
 	case MENU_ORDER_TAKE:
 		if (*n < cap) out[(*n)++] = (Order){.kind = COMMAND_TAKE, .to = c->player};
 		break;
+	case MENU_ORDER_WARP: order(c, frame, out, cap, n, (Order){.kind = COMMAND_WARP}); break;
 	case MENU_ORDER_NONE:
 	case MENU_ORDER_COUNT: break;
 	}
@@ -527,7 +529,8 @@ static void draw_resource(Rectangle r, const char *name, float have, float cap, 
 
 static const char *order_name(OrderKind o)
 {
-	static const char *names[ORDER_KIND_COUNT] = {"idle", "moving", "fighting", "building", "waiting to send", "digging in"};
+	static const char *names[ORDER_KIND_COUNT] = {"idle", "moving", "fighting", "building", "waiting to send", "digging in",
+	                                              "warping home"};
 	return o < ORDER_KIND_COUNT ? names[o] : "";
 }
 
@@ -608,6 +611,24 @@ static void draw_info(const Controls *c, const Sim *sim, const Layout *L, const 
 		}
 	}
 	if (u->progress[d] < 1.0f) text(TextFormat("under construction: %.0f%%", u->progress[d] * 100.0f), x, y + 96.0f * sc, 13.0f * sc, ORANGE);
+	if (u->type[d] == UNIT_COMMANDER) {
+		const char *warp = u->order[d] == ORDER_WARP ? TextFormat("warping home: %.0f%%", u->work[d] * 100.0f)
+		                 : u->recharge[d] > 0      ? TextFormat("warp home in %.0f s", (double)u->recharge[d] / SIM_HZ)
+		                                           : "warp home ready";
+		text(warp, x, y + 96.0f * sc, 13.0f * sc, u->recharge[d] > 0 ? TEXT_DIM : ENERGY);
+	}
+	if (u->type[d] == UNIT_HEADQUARTERS) {
+		// Who's coming back, and when.
+		const Faction *fa = &sim->factions[c->me.v];
+		char line2[160] = "";
+		int used2 = 0;
+		for (int p = 0; p < sim->config.players[c->me.v] && used2 < (int)sizeof line2; p++)
+			if (fa->respawn_at[p] >= 0)
+				used2 += snprintf(line2 + used2, sizeof line2 - (size_t)used2, "%s%s in %.0f s", used2 ? ", " : "respawning: ",
+				                  c->team[p] && c->team[p][0] ? c->team[p] : TextFormat("player %d", p + 1),
+				                  (double)(fa->respawn_at[p] - sim->tick.v) / SIM_HZ);
+		text(used2 ? line2 : "no commanders to respawn", x, y + 96.0f * sc, 13.0f * sc, used2 ? ENERGY : TEXT_DIM);
+	}
 }
 
 // What a prompt in progress is asking, above the orders grid.

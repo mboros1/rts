@@ -591,6 +591,7 @@ void wire_put_config(ByteBuf *b, const SimConfig *c)
 	put8(b, c->economy);
 	put8(b, c->bases);
 	for (int f = 0; f < FACTION_COUNT; f++) put8(b, c->players[f]);
+	put8(b, c->commanders);
 }
 
 bool wire_get_config(ByteReader *r, SimConfig *c)
@@ -615,6 +616,9 @@ bool wire_get_config(ByteReader *r, SimConfig *c)
 		c->players[f] = get8(r);
 		if (c->players[f] < 1 || c->players[f] > MAX_PLAYERS) return false;
 	}
+	uint8_t commanders = get8(r);
+	if (commanders > 1) return false;
+	c->commanders = commanders;
 	return !r->bad && sum > 0 && c->max_units > 0 && c->max_units <= 1 << 16
 	    && c->max_projectiles > 0 && c->max_projectiles <= 1 << 20 && c->spawn_interval > 0
 	    && c->initial_units >= 0 && c->initial_units <= c->population && c->population <= c->max_units;
