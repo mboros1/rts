@@ -2,21 +2,19 @@
 
 #include <math.h>
 
-void view_update(View *v, const Terrain *t, const Keymap *keys)
+void view_update(View *v, const Terrain *t, const Keymap *keys, const Input *in)
 {
-	float dt = GetFrameTime();
-	float pan = v->distance * 1.2f * dt;
-	if (IsKeyDown(keys->key[BIND_CAMERA_UP])) v->focus.z -= pan;
-	if (IsKeyDown(keys->key[BIND_CAMERA_DOWN])) v->focus.z += pan;
-	if (IsKeyDown(keys->key[BIND_CAMERA_LEFT])) v->focus.x -= pan;
-	if (IsKeyDown(keys->key[BIND_CAMERA_RIGHT])) v->focus.x += pan;
-	if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) {
-		Vector2 d = GetMouseDelta();
-		float k = v->distance / (float)GetScreenHeight();
-		v->focus.x -= d.x * k;
-		v->focus.z -= d.y * k;
+	float pan = v->distance * 1.2f * in->dt;
+	if (in->down[keys->key[BIND_CAMERA_UP]]) v->focus.z -= pan;
+	if (in->down[keys->key[BIND_CAMERA_DOWN]]) v->focus.z += pan;
+	if (in->down[keys->key[BIND_CAMERA_LEFT]]) v->focus.x -= pan;
+	if (in->down[keys->key[BIND_CAMERA_RIGHT]]) v->focus.x += pan;
+	if (in->held[2]) {
+		float k = v->distance / (float)(in->height > 0 ? in->height : 1);
+		v->focus.x -= in->mouse_delta.x * k;
+		v->focus.z -= in->mouse_delta.y * k;
 	}
-	float wheel = GetMouseWheelMove();
+	float wheel = in->wheel;
 	if (wheel != 0.0f) v->distance = f_clamp(v->distance * powf(0.88f, wheel), 25.0f, 700.0f);
 	v->focus = v2(f_clamp(v->focus.x, 0.0f, t->size_x), f_clamp(v->focus.z, 0.0f, t->size_z));
 

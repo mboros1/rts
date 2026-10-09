@@ -12,6 +12,8 @@
 //       [--journey STEP,STEP,...]          scripted: map:SECONDS or ZONE:SECONDS
 //       [--bot] [--doctrine SPEC]          the bot plays your side, as a player (bot.h)
 //       [--keys PATH]                      a keymap (keymap.h); else config/keys.json if there is one
+//       [--input PATH [--shots DIR]]       an input script plays the controls, in a hidden
+//                                          window, taking shots (input.h)
 //
 // With a coordinator and no --zone, the window opens on the strategic map
 // (map.h): click a zone to launch into it; Tab, or Esc when not placing a
@@ -64,6 +66,8 @@ typedef struct {
 	bool bot;
 	const char *doctrine;          // --doctrine, for --bot
 	const char *keys;              // --keys: a keymap file (else config/keys.json, if there is one)
+	const char *input;             // --input: an input script (input.h) plays the controls
+	const char *shots;             // --shots: where its shots go
 	char journey[16][ZONE_NAME];   // "map" or a zone name, each for journey_s seconds
 	double journey_s[16];
 	int journey_len;
@@ -115,6 +119,11 @@ typedef struct {
 	View view;
 	Controls controls;
 	Keymap keys;
+	Input in;                   // this frame's
+	InputScript script;         // --input
+	double ready_at;            // the zone's first snapshot: the script's time 0 (0: not yet)
+	RenderTexture2D target;     // --input: frames are drawn here, for shots
+	int64_t sent[COMMAND_KIND_COUNT];
 	bool overlay;
 } Client;
 
@@ -398,7 +407,10 @@ static void client_send_order(Client *c, CommandKind kind, V2 target, UnitType t
 		put32(&b, units[i].generation);
 	}
 	if (b.overflow) fatal("command buffer overflow"); // sized wrong above: a bug, not input
-	if (conn_send(&c->conn, MSG_COMMAND, b.data, b.len, client_now(c))) c->commands_sent++;
+	if (conn_send(&c->conn, MSG_COMMAND, b.data, b.len, client_now(c))) {
+		c->commands_sent++;
+		c->sent[kind]++;
+	}
 }
 
 static void client_send_command(Client *c, CommandKind kind, V2 target, const UnitHandle *units, ptrdiff_t n)
@@ -455,7 +467,7 @@ static void client_input(Client *c)
 	if (!c->player) return;
 	client_targets(c);
 	Order orders[16];
-	ptrdiff_t n = controls_input(&c->controls, &c->remote.sim, &c->view, &c->frame, orders, countof(orders));
+	ptrdiff_t n = controls_input(&c->controls, &c->in, &c->remote.sim, &c->view, &c->frame, orders, countof(orders));
 	for (ptrdiff_t k = 0; k < n; k++)
 		client_send_order(c, orders[k].kind, orders[k].target, orders[k].type, orders[k].amount, orders[k].flags,
 		                  orders[k].to, orders[k].metal, orders[k].energy, orders[k].units, orders[k].count);
@@ -530,13 +542,15 @@ static void client_banner(const Client *c, bool connected)
 	const char *text = TextFormat("zone %s   %s   %s", zone, side,
 	                              c->opt.coord ? TextFormat("%s: strategic map   %s: details", map, details)
 	                                           : TextFormat("%s: details", details));
-	DrawRectangle(5, 5, MeasureText(text, 20) + 20, 32, (Color){0, 0, 0, 150});
-	DrawText(text, 15, 11, 20, RAYWHITE);
+	// Top right: the top left is the minimap's.
+	int w = MeasureText(text, 20) + 20, x = c->in.width - w - 5;
+	DrawRectangle(x, 5, w, 32, (Color){0, 0, 0, 150});
+	DrawText(text, x + 10, 11, 20, RAYWHITE);
 	if (!connected) {
 		const char *msg = "connection lost: reconnecting...";
-		int w = MeasureText(msg, 30);
-		DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), (Color){0, 0, 0, 120});
-		DrawText(msg, (GetScreenWidth() - w) / 2, GetScreenHeight() / 2 - 15, 30, RAYWHITE);
+		int mw = MeasureText(msg, 30);
+		DrawRectangle(0, 0, c->in.width, c->in.height, (Color){0, 0, 0, 120});
+		DrawText(msg, (c->in.width - mw) / 2, c->in.height / 2 - 15, 30, RAYWHITE);
 	}
 }
 
@@ -567,6 +581,33 @@ static bool client_launch(Client *c, const char *zone, double now)
 	c->disconnected_since = now - c->opt.reconnect_after; // connect right away
 	c->lost_at = now;
 	return true;
+}
+
+// ---------------------------------------------------------------- input scripts
+
+// A shot or an expectation the script has due, once the frame is drawn.
+static void client_script_due(Client *c, const InputStep *due)
+{
+	if (!due) return;
+	if (due->kind == STEP_SHOT) {
+		if (!c->opt.shots) return;
+		Image frame = LoadImageFromTexture(c->target.texture);
+		ImageFlipVertical(&frame); // render textures are upside down
+		const char *path = TextFormat("%s/%s.png", c->opt.shots, due->name);
+		if (!ExportImage(frame, path)) fprintf(stderr, "client: cannot write %s\n", path);
+		UnloadImage(frame);
+		return;
+	}
+	double actual = 0.0;
+	switch (due->watch) {
+	case WATCH_SENT:
+		if (due->command >= 0) actual = (double)c->sent[due->command];
+		else for (int k = 0; k < COMMAND_KIND_COUNT; k++) actual += (double)c->sent[k];
+		break;
+	case WATCH_SELECTED: actual = (double)c->controls.selection_count; break;
+	case WATCH_BUSY: actual = controls_busy(&c->controls); break;
+	}
+	input_script_expect(&c->script, due, actual);
 }
 
 // ---------------------------------------------------------------- main
@@ -619,6 +660,8 @@ static int client_main(int argc, char **argv)
 		else if (!strcmp(a, "--quit-after")) c.opt.quit_after = atoll(v);
 		else if (!strcmp(a, "--doctrine")) c.opt.doctrine = v;
 		else if (!strcmp(a, "--keys")) c.opt.keys = v;
+		else if (!strcmp(a, "--input")) c.opt.input = v;
+		else if (!strcmp(a, "--shots")) c.opt.shots = v;
 		else if (!strcmp(a, "--journey")) {
 			static char steps[512];
 			snprintf(steps, sizeof steps, "%s", v);
@@ -640,6 +683,11 @@ static int client_main(int argc, char **argv)
 	c.program = arena_create("client program", (ptrdiff_t)1 << 30);
 	c.world = arena_create("client world", (ptrdiff_t)2 << 30);
 	c.frame = arena_create("client frame", (ptrdiff_t)256 << 20);
+	if (c.opt.input) {
+		char err[256];
+		if (c.opt.headless) fatal("--input plays the controls: not with --headless");
+		if (!input_script_load(&c.script, &c.program, c.opt.input, err, sizeof err)) fatal("%s", err);
+	}
 	conn_init(&c.conn, &c.program, -1, (ptrdiff_t)4 << 20, (ptrdiff_t)32 << 20);
 	conn_set_delay(&c.conn, c.opt.latency, c.opt.jitter, 0xc11e47u);
 	c.rng = rng_seed(0xa070u + c.opt.faction);
@@ -689,10 +737,13 @@ static int client_main(int argc, char **argv)
 	if (!c.on_map && (!c.opt.host || c.opt.port <= 0)) fatal("--connect HOST:PORT or --coord HOST:PORT");
 
 	if (!c.opt.headless) {
-		SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
+		// Scripted, the window is hidden and a fixed 1600 x 900, and frames go
+		// to a texture the shots are taken from.
+		SetConfigFlags(c.opt.input ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
 		InitWindow(1600, 900, c.opt.coord ? "rts" : TextFormat("rts client: %s:%d", c.opt.host, c.opt.port));
 		SetExitKey(KEY_NULL); // Esc goes to the map; close the window to quit
-		SetTargetFPS(120);
+		SetTargetFPS(c.opt.input ? 60 : 120);
+		if (c.opt.input) c.target = LoadRenderTexture(1600, 900);
 	}
 	for (int tries = 0; !c.on_map && !client_connect(&c); tries++) {
 		if (tries == 50) fatal("cannot connect to %s:%d", c.opt.host, c.opt.port);
@@ -759,20 +810,29 @@ static int client_main(int argc, char **argv)
 			continue;
 		}
 		if (WindowShouldClose()) break;
+		// This frame's input: a person's, or the script's.
+		const InputStep *due = nullptr;
+		bool quit = false;
+		if (c.opt.input) {
+			if (c.ready && c.ready_at == 0.0) c.ready_at = now;
+			if (c.ready_at > 0.0) input_script_frame(&c.script, now - c.ready_at, 1600, 900, GetFrameTime(), &c.in, &due, &quit);
+			else c.in = (Input){.width = 1600, .height = 900, .dt = GetFrameTime()};
+		} else {
+			input_from_raylib(&c.in);
+		}
+		if (quit) break;
 		BeginDrawing();
+		if (c.opt.input) BeginTextureMode(c.target);
 		ClearBackground((Color){24, 28, 34, 255});
 		if (c.on_map) {
-			Vector2 m = GetMousePosition();
-			int w = GetScreenWidth(), h = GetScreenHeight();
-			int hover = map_pick(&c.dir, m.x, m.y, w, h);
+			int w = c.in.width, h = c.in.height;
+			int hover = map_pick(&c.dir, c.in.mouse.x, c.in.mouse.y, w, h);
 			map_draw(&c.dir, c.opt.faction < FACTION_COUNT ? c.opt.faction : -1, hover, w, h);
-			if (hover >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && c.dir.zones[hover].up)
-				client_launch(&c, c.dir.zones[hover].name, now);
-			if (IsKeyPressed(c.keys.key[BIND_CANCEL])) { // on the map, cancel quits
-				EndDrawing();
-				break;
-			}
+			if (hover >= 0 && c.in.click[0] && c.dir.zones[hover].up) client_launch(&c, c.dir.zones[hover].name, now);
+			bool leave = c.in.pressed[c.keys.key[BIND_CANCEL]]; // on the map, cancel quits
+			if (c.opt.input) EndTextureMode();
 			EndDrawing();
+			if (leave) break;
 			continue;
 		}
 		if (c.have_world && !c.renderer_ready) {
@@ -784,7 +844,7 @@ static int client_main(int argc, char **argv)
 		}
 		bool was_busy = controls_busy(&c.controls); // then cancel cancels that, not the zone
 		if (c.renderer_ready && c.ready) {
-			view_update(&c.view, &c.terrain, &c.keys);
+			view_update(&c.view, &c.terrain, &c.keys, &c.in);
 			Scene scene = c.player ? remote_scene(&c.remote, c.base, &c.frame)
 			                       : scene_from_mirror(&c.mirror, &c.terrain, c.base, &c.frame);
 			if (c.player) {
@@ -803,17 +863,21 @@ static int client_main(int argc, char **argv)
 			BeginMode3D(c.view.camera);
 			renderer_draw_scene(&c.renderer, &scene, c.conn.open ? alpha : 0.0f, &c.frame, selected,
 			                    c.opt.faction < FACTION_COUNT ? c.opt.faction : -1);
-			if (c.player) controls_draw_world(&c.controls, &c.remote.sim, &c.view);
+			if (c.player) controls_draw_world(&c.controls, &c.remote.sim, &c.view, c.in.mouse);
 			EndMode3D();
-			if (c.player) controls_draw_screen(&c.controls, &c.remote.sim, GetScreenWidth(), GetScreenHeight(), true);
+			if (c.player) controls_draw_screen(&c.controls, &c.remote.sim, c.in.width, c.in.height, &c.in);
 		}
-		if (IsKeyPressed(c.keys.key[BIND_OVERLAY])) c.overlay = !c.overlay;
+		if (c.in.pressed[c.keys.key[BIND_OVERLAY]]) c.overlay = !c.overlay;
 		if (c.overlay) client_overlay(&c, c.conn.open);
 		else client_banner(&c, c.conn.open);
+		if (c.opt.input) {
+			EndTextureMode();
+			client_script_due(&c, due);
+		}
 		EndDrawing();
 		// To the map: map, or cancel when there's nothing in progress to cancel.
-		bool cancel = IsKeyPressed(c.keys.key[BIND_CANCEL]) && !was_busy;
-		if (c.opt.coord && (IsKeyPressed(c.keys.key[BIND_MAP]) || cancel)) client_to_map(&c, now);
+		bool cancel = c.in.pressed[c.keys.key[BIND_CANCEL]] && !was_busy;
+		if (c.opt.coord && (c.in.pressed[c.keys.key[BIND_MAP]] || cancel)) client_to_map(&c, now);
 		else if (!c.opt.coord && cancel) break;
 	}
 
@@ -838,6 +902,11 @@ static int client_main(int argc, char **argv)
 		        (long long)c.reconnects, (long long)c.gaps, (long long)c.malformed,
 		        (long long)c.commands_sent, (long long)client_tick(&c), (long long)c.conn.bytes_received);
 		fclose(f);
+	}
+	if (c.opt.input) {
+		printf("  %d of %d expectations held\n", c.script.expects - c.script.failures, c.script.expects);
+		if (c.script.failures) status = 1;
+		UnloadRenderTexture(c.target);
 	}
 	if (c.renderer_ready) renderer_unload(&c.renderer);
 	if (!c.opt.headless) CloseWindow();

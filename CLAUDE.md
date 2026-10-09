@@ -44,6 +44,12 @@ persistent map. Read these before changing anything:
   frame. Use `--from/--to` to pick the moment, `--out x.mp4` for video,
   `--replay` to render a recorded run (it refuses if the replay doesn't
   reproduce hash for hash).
+- **Play the controls yourself.** The client takes an input script
+  (`src/input.h`): keys, clicks and drags at times, in a hidden 1600 x 900
+  window, with shots and expectations. `tools/ui-smoke` (in `make check`)
+  plays `tools/ui/basics.input` against a zone; run the client with
+  `--input FILE --shots DIR` and read the `.png`s to see what a player sees.
+  Touched the controls or the panels? Play them before asking anyone to.
 
 ## Shipping a feature
 

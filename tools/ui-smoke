@@ -1,0 +1,21 @@
+#!/bin/sh
+# tools/ui-smoke BIN_DIR OUT_DIR: the controls, played. A zone server (the
+# economy scenario, blue's bot off) and a client playing blue from an input
+# script (tools/ui/basics.input) through the real controls, in a hidden
+# window: its expectations must hold, and its shots land in OUT_DIR.
+set -eu
+bin=$1; out=$2
+rm -rf "$out"; mkdir -p "$out"
+port=$((36000 + ($$ % 2000) * 3))
+"$bin/rts-server" --scenario economy --port "$port" --bot blue off --ticks 1200 > "$out/server.out" 2>&1 &
+server=$!
+trap 'kill $server 2>/dev/null || true' EXIT
+sleep 0.3
+"$bin/rts" --connect "127.0.0.1:$port" --faction blue --input tools/ui/basics.input --shots "$out" > "$out/client.out" 2>&1 \
+	&& status=0 || status=$?
+cat "$out/client.out" | grep -E '^  (ok|FAIL)|expectations held' || true
+# The last step leaves before its expectation: Escape with nothing to cancel quits.
+grep -q 'FAIL' "$out/client.out" && { echo "ui-smoke: an expectation failed"; exit 1; }
+[ "$status" = 0 ] || { echo "ui-smoke: the client exited $status"; tail -5 "$out/client.out"; exit 1; }
+for s in start base placing factory logistics; do [ -s "$out/$s.png" ] || { echo "ui-smoke: no $s.png"; exit 1; }; done
+echo "ui-smoke: ok"

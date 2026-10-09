@@ -774,6 +774,35 @@ as BAR's (from a screenshot of it).
 - **Not yet**: the text is small in a 960 x 540 clip (as in a window that
   size). No screen to rebind keys yet: edit the file.
 
+## Spike 17b results (2026-10-09)
+
+Done. The client can be played without a person, so an agent (or a test)
+can see and use the controls as a player does.
+
+- **Input is a record** (`input.h`): a frame's keys pressed and down, the
+  mouse, its buttons, the wheel, the window's size. The controls, the camera
+  and the client read only that; raylib fills it for a person.
+- **Input scripts**: `rts --connect ... --input FILE --shots DIR` plays a
+  script into the record instead, in a hidden 1600 x 900 window drawing into
+  a texture: keys (the keymap's names, with shift or ctrl), clicks, drags and
+  mouse moves at times after the zone's first snapshot; shots of the frame;
+  and expectations of what the client did (orders sent by kind, units
+  selected, a placement or prompt in progress), which fail the run.
+- **`make check` plays the controls** (`tools/ui-smoke`, 6 s, in parallel): a
+  zone, blue's bot off, and a client playing `tools/ui/basics.input`: select
+  the base by dragging, place an extractor and cancel it, place a factory
+  from the build tab, stop, move with a click, cancel a fight, narrow to the
+  factory with its tile, queue one raider and five tanks, switch repeat on,
+  open the logistics page, and leave with Esc. 14 expectations.
+- **Found by it, first run**: the click that placed a structure also started
+  a selection drag, which on release emptied the selection, so every order
+  key after a placement did nothing (probably most of what the playtest hit).
+  And from its shots: the bottom-right placeholders' text overlapped, the
+  order keys overlapped their labels, and the zone banner covered the
+  minimap's place. All fixed: the banner is top right now.
+- **Not yet**: a script's positions are pixels, so it depends on where the
+  camera starts and units stand; good enough for the base at the start.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

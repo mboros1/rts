@@ -37,7 +37,7 @@ SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
 # The zone smoke test drives these through processes; rebuild them together.
 
-.PHONY: play world-soak work-log demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench bench-teams determinism-x86 soak cross clips demos demos-restore share clean
+.PHONY: play world-soak work-log demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game check-ui bench bench-teams determinism-x86 soak cross clips demos demos-restore share clean
 
 all: $(B)/rts $(B)/rts-headless $(B)/rts-server $(B)/rts-coord
 
@@ -85,7 +85,7 @@ bench-teams: $(B)/rts-headless
 # (history in build/timings.log), so check costs about its slowest stage.
 CHECK := $(B)/check
 S := tools/stage
-CHECK_STAGES := check-tests check-replay check-split check-demo-scripts check-game check-server check-gcc check-net check-zones check-world
+CHECK_STAGES := check-tests check-replay check-split check-demo-scripts check-game check-server check-gcc check-net check-zones check-world check-ui
 check:
 	@rm -rf $(CHECK) && mkdir -p $(CHECK)
 	@$(S) "check (total)" $(MAKE) --no-print-directory -j8 $(CHECK_STAGES)
@@ -142,6 +142,11 @@ check-server: $(CHECK)/rts-server
 # A server and a headless client over a real socket, with latency, jitter and
 # a forced rejoin: every digest must match and the server's run must verify.
 NET := $(CHECK)/net
+# The controls, played through the client from an input script (tools/ui).
+check-ui: $(CHECK)/rts $(CHECK)/rts-server
+	@$(S) "ui: the controls, played" tools/ui-smoke $(CHECK) $(CHECK)/ui > $(CHECK)/ui.log 2>&1 \
+		|| { cat $(CHECK)/ui.log; exit 1; }
+
 check-net: $(CHECK)/rts $(CHECK)/rts-server $(CHECK)/headless
 	@mkdir -p $(NET)
 	@$(S) "net: server + client, 10 s with a rejoin" tools/net-smoke $(CHECK) $(NET) 300

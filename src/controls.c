@@ -20,7 +20,7 @@ static const KeyBinding order_action[MENU_ORDER_COUNT] = {
 };
 
 static int key_of(const Controls *c, KeyBinding a) { return c->keys ? c->keys->key[a] : keymap_default().key[a]; }
-static bool action_pressed(const Controls *c, KeyBinding a) { return IsKeyPressed(key_of(c, a)); }
+static bool action_pressed(const Controls *c, const Input *in, KeyBinding a) { return in->pressed[key_of(c, a)]; }
 static const char *action_key(const Controls *c, KeyBinding a) { return keymap_key_name(key_of(c, a)); }
 static KeyBinding build_action(int slot) { return (KeyBinding)(slot < BUILD_ITEMS ? BIND_BUILD_1 + slot : BIND_TAB_1 + slot - BUILD_ITEMS); }
 
@@ -71,7 +71,7 @@ static Layout layout(int w, int h)
 		L.item[k] = (Rectangle){L.build.x + pad + (float)(k % 4) * (bw + gap), L.build.y + pad + (float)(k / 4) * (bh + gap), bw, bh};
 	for (int k = 0; k < BUILD_TABS; k++)
 		L.tab[k] = (Rectangle){L.build.x + pad + (float)k * (bw + gap), L.build.y + pad + 2.0f * (bh + gap), bw, th};
-	float ow = 88.0f * s, oh = 30.0f * s;
+	float ow = 88.0f * s, oh = 38.0f * s;
 	L.orders = (Rectangle){L.info.x + L.info.width + gap, bottom - (3.0f * oh + 2.0f * gap + 2.0f * pad),
 	                       5.0f * ow + 4.0f * gap + 2.0f * pad, 3.0f * oh + 2.0f * gap + 2.0f * pad};
 	for (int k = 0; k < ORDER_SLOTS; k++)
@@ -177,10 +177,10 @@ static V2 placement_site(const Sim *sim, UnitType type, V2 at)
 // ---------------------------------------------------------------- orders
 
 // A teammate's number key this frame (1 is player 0), or -1.
-static int player_key(const Controls *c)
+static int player_key(const Controls *c, const Input *in)
 {
 	for (int k = 0; k < c->team_count; k++)
-		if (IsKeyPressed(KEY_ONE + k)) return k;
+		if (in->pressed[KEY_ONE + k]) return k;
 	return -1;
 }
 
@@ -259,14 +259,14 @@ static void press_order(Controls *c, const Sim *sim, const SelectionSummary *s, 
 
 // Send's prompts: a zone's number; then, paired with teammates, who for;
 // unpaired, where to land. The server decides the route.
-static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *frame, Order *out, ptrdiff_t cap,
-                       ptrdiff_t *n)
+static bool send_input(Controls *c, const Input *in, const Sim *sim, const View *view, Arena *frame, Order *out,
+                       ptrdiff_t cap, ptrdiff_t *n)
 {
 	const SendTargets *z = &c->targets;
 	if (c->sending) {
-		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->sending = false;
+		if (action_pressed(c, in, BIND_CANCEL) || in->click[1]) c->sending = false;
 		for (int k = 0; k < z->count && k < 9; k++) {
-			if (!IsKeyPressed(KEY_ONE + k) || k == z->here) continue;
+			if (!in->pressed[KEY_ONE + k] || k == z->here) continue;
 			c->sending = false;
 			if (z->transporter[k] && c->team_count > 1) c->send_for = k; // then: for whom
 			else if (z->transporter[k]) order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = k, .to = c->player});
@@ -275,9 +275,9 @@ static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *fra
 		return true;
 	}
 	if (c->send_for >= 0) {
-		int p = player_key(c);
-		bool self = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || action_pressed(c, BIND_SEND);
-		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->send_for = -1;
+		int p = player_key(c, in);
+		bool self = in->pressed[KEY_ENTER] || in->pressed[KEY_KP_ENTER] || action_pressed(c, in, BIND_SEND);
+		if (action_pressed(c, in, BIND_CANCEL) || in->click[1]) c->send_for = -1;
 		else if (p >= 0 || self) {
 			PlayerSlot to = p >= 0 ? (PlayerSlot){(uint8_t)p} : c->player;
 			order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = c->send_for, .to = to});
@@ -287,8 +287,8 @@ static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *fra
 	}
 	if (c->landing_for >= 0) {
 		V2 at;
-		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->landing_for = -1;
-		else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && pick_ground(view, &sim->terrain, GetMousePosition(), &at)) {
+		if (action_pressed(c, in, BIND_CANCEL) || in->click[1]) c->landing_for = -1;
+		else if (in->click[0] && pick_ground(view, &sim->terrain, in->mouse, &at)) {
 			at = sim_strip_point(&sim->terrain, c->me, at);
 			order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = c->landing_for, .target = at, .to = c->player});
 			c->landing_for = -1;
@@ -299,11 +299,11 @@ static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *fra
 }
 
 // Give's prompt: a player's number.
-static bool give_input(Controls *c, const Sim *sim, Arena *frame, Order *out, ptrdiff_t cap, ptrdiff_t *n)
+static bool give_input(Controls *c, const Input *in, const Sim *sim, Arena *frame, Order *out, ptrdiff_t cap, ptrdiff_t *n)
 {
 	if (!c->giving) return false;
-	int p = player_key(c);
-	if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+	int p = player_key(c, in);
+	if (action_pressed(c, in, BIND_CANCEL) || in->click[1]) {
 		c->giving = 0;
 	} else if (p >= 0 && c->giving == 4) {
 		const Economy *e = &sim->factions[c->me.v].economy[c->player.v];
@@ -322,23 +322,24 @@ bool controls_busy(const Controls *c)
 	return c->placing >= 0 || c->aiming >= 0 || c->sending || c->landing_for >= 0 || c->send_for >= 0 || c->giving;
 }
 
-ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *frame, Order *out, ptrdiff_t cap)
+ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const View *view, Arena *frame, Order *out,
+                         ptrdiff_t cap)
 {
 	ptrdiff_t n = 0;
-	Vector2 mouse = GetMousePosition();
-	bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-	Layout L = layout(GetScreenWidth(), GetScreenHeight());
+	Vector2 mouse = in->mouse;
+	bool shift = input_shift(in);
+	Layout L = layout(in->width, in->height);
 	SelectionSummary s = menu_summarize(own_units(c, sim), c->selection, c->selection_count);
 	MenuContext ctx = menu_context(c, sim);
 	BuildMenu build = menu_build(&s, c->tab);
 	OrdersMenu orders = menu_orders(&s, &ctx);
 
 	// A prompt in progress takes the keys and clicks it needs.
-	if (send_input(c, sim, view, frame, out, cap, &n) || give_input(c, sim, frame, out, cap, &n)) return n;
+	if (send_input(c, in, sim, view, frame, out, cap, &n) || give_input(c, in, sim, frame, out, cap, &n)) return n;
 	if (c->aiming >= 0) {
 		V2 at;
-		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->aiming = -1;
-		else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !over_panels(&L, mouse)
+		if (action_pressed(c, in, BIND_CANCEL) || in->click[1]) c->aiming = -1;
+		else if (in->click[0] && !over_panels(&L, mouse)
 		         && pick_ground(view, &sim->terrain, mouse, &at)) {
 			order(c, frame, out, cap, &n, (Order){.kind = (CommandKind)c->aiming, .target = at});
 			if (!shift) c->aiming = -1;
@@ -346,28 +347,31 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 		return n;
 	}
 	if (c->placing >= 0) {
-		// A click that places or cancels a structure isn't a selection.
+		// A click that places or cancels a structure is only that: not a
+		// selection too (it used to start a drag that emptied the selection).
 		V2 at;
-		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->placing = -1;
-		else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !over_panels(&L, mouse)
-		         && pick_ground(view, &sim->terrain, mouse, &at)) {
+		if (action_pressed(c, in, BIND_CANCEL) || in->click[1]) {
+			c->placing = -1;
+			return n;
+		}
+		if (in->click[0] && !over_panels(&L, mouse) && pick_ground(view, &sim->terrain, mouse, &at)) {
 			UnitType type = (UnitType)c->placing;
 			order(c, frame, out, cap, &n, (Order){.kind = COMMAND_BUILD, .target = placement_site(sim, type, at), .type = type});
 			if (!shift) c->placing = -1;
+			return n;
 		}
-		if (c->placing >= 0) return n;
 	}
 
 	// Keys: the build grid's while it's open; the orders' always (they never share a key: keymap.h).
 	if (menu_build_open(&s))
 		for (int k = 0; k < BUILD_ITEMS + BUILD_TABS; k++)
-			if (action_pressed(c, build_action(k))) press_build(c, &s, &build, k, shift, frame, out, cap, &n);
+			if (action_pressed(c, in, build_action(k))) press_build(c, &s, &build, k, shift, frame, out, cap, &n);
 	for (int k = 0; k < ORDER_SLOTS; k++)
-		if (orders.slot[k].shown && action_pressed(c, order_action[orders.slot[k].order]))
+		if (orders.slot[k].shown && action_pressed(c, in, order_action[orders.slot[k].order]))
 			press_order(c, sim, &s, &orders.slot[k], shift, frame, out, cap, &n);
 
 	// Clicks on the panels: buttons, and the selection's tiles.
-	if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over_panels(&L, mouse)) {
+	if (in->click[0] && over_panels(&L, mouse)) {
 		for (int k = 0; k < BUILD_ITEMS; k++)
 			if (CheckCollisionPointRec(mouse, L.item[k])) press_build(c, &s, &build, k, shift, frame, out, cap, &n);
 		for (int k = 0; k < BUILD_TABS; k++)
@@ -381,11 +385,12 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 		return n;
 	}
 
-	if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+	if (c->placing >= 0) return n; // the world's clicks are the placement's
+	if (in->click[0]) {
 		c->dragging = true;
 		c->drag_start = mouse;
 	}
-	if (c->dragging && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+	if (c->dragging && in->release[0]) {
 		c->dragging = false;
 		Rectangle box = {fminf(c->drag_start.x, mouse.x), fminf(c->drag_start.y, mouse.y),
 		                 fabsf(mouse.x - c->drag_start.x), fabsf(mouse.y - c->drag_start.y)};
@@ -394,8 +399,8 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 		select_units(c, sim, view, box, shift, click);
 	}
 	V2 at;
-	if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !over_panels(&L, mouse) && pick_ground(view, &sim->terrain, mouse, &at)) {
-		bool move = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+	if (in->click[1] && !over_panels(&L, mouse) && pick_ground(view, &sim->terrain, mouse, &at)) {
+		bool move = input_ctrl(in);
 		order(c, frame, out, cap, &n, (Order){.kind = move ? COMMAND_MOVE : COMMAND_ATTACK_MOVE, .target = at});
 	}
 	return n;
@@ -403,7 +408,7 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 
 // ---------------------------------------------------------------- drawing
 
-void controls_draw_world(const Controls *c, const Sim *sim, const View *view)
+void controls_draw_world(const Controls *c, const Sim *sim, const View *view, Vector2 mouse)
 {
 	if (c->landing_for >= 0) {
 		// Where an unpaired send may land: our strip, its edge traced on the ground.
@@ -414,13 +419,13 @@ void controls_draw_world(const Controls *c, const Sim *sim, const View *view)
 			DrawLine3D((Vector3){edge, terrain_height(t, edge, z) + 0.5f, z},
 			           (Vector3){edge, terrain_height(t, edge, z + 4.0f) + 0.5f, z + 4.0f}, line);
 		V2 at;
-		if (pick_ground(view, t, GetMousePosition(), &at)) {
+		if (pick_ground(view, t, mouse, &at)) {
 			at = sim_strip_point(t, c->me, at);
 			DrawCircle3D((Vector3){at.x, terrain_height(t, at.x, at.z) + 0.6f, at.z}, 8.0f, (Vector3){1, 0, 0}, 90.0f, line);
 		}
 	}
 	V2 ghost;
-	if (c->placing < 0 || !pick_ground(view, &sim->terrain, GetMousePosition(), &ghost)) return;
+	if (c->placing < 0 || !pick_ground(view, &sim->terrain, mouse, &ghost)) return;
 	UnitType type = (UnitType)c->placing;
 	ghost = placement_site(sim, type, ghost);
 	bool ok = placement_ok(sim, c->me, type, ghost);
@@ -447,11 +452,19 @@ static void under_construction(Rectangle r, const char *name, float s)
 {
 	panel(r, s);
 	text(name, r.x + 8.0f * s, r.y + 6.0f * s, 14.0f * s, TEXT_DIM);
-	const char *u = "UNDER CONSTRUCTION";
+	// On one line if it fits, else two.
+	Color amber = {230, 170, 60, 255};
 	float size = 12.0f * s;
-	while (size > 6.0f && (float)MeasureText(u, (int)size) > r.width - 12.0f * s) size -= 1.0f;
-	text(u, r.x + (r.width - (float)MeasureText(u, (int)size)) * 0.5f, r.y + r.height * 0.5f - size * 0.5f, size,
-	     (Color){230, 170, 60, 255});
+	const char *one = "UNDER CONSTRUCTION";
+	if ((float)MeasureText(one, (int)size) <= r.width - 12.0f * s) {
+		text(one, r.x + (r.width - (float)MeasureText(one, (int)size)) * 0.5f, r.y + r.height * 0.5f - size * 0.5f, size, amber);
+		return;
+	}
+	const char *lines[2] = {"UNDER", "CONSTRUCTION"};
+	while (size > 6.0f && (float)MeasureText(lines[1], (int)size) > r.width - 8.0f * s) size -= 1.0f;
+	for (int k = 0; k < 2; k++)
+		text(lines[k], r.x + (r.width - (float)MeasureText(lines[k], (int)size)) * 0.5f,
+		     r.y + r.height * 0.5f - size * 1.1f + (float)k * size * 1.2f, size, amber);
 }
 
 static void button_frame(Rectangle r, const MenuButton *b, bool hover, float s)
@@ -485,15 +498,16 @@ static void draw_text_button(Rectangle r, const MenuButton *b, const char *key, 
 		return;
 	}
 	button_frame(r, b, hover, s);
+	// The label low in the button; its key small in the top right, clear of it.
 	Color color = b->enabled ? TEXT : TEXT_DIM;
-	float size = 14.0f * s;
+	float size = 14.0f * s, key_size = 10.0f * s;
 	const char *label = b->label ? b->label : "";
-	text(label, r.x + (r.width - (float)MeasureText(label, (int)size)) * 0.5f, r.y + (r.height - size) * 0.5f, size, color);
-	if (key && key[0]) {
-		float key_size = 11.0f * s;
+	bool keyed = key && key[0];
+	float label_y = keyed && r.height > 32.0f * s ? r.y + r.height - size - 7.0f * s : r.y + (r.height - size) * 0.5f;
+	text(label, r.x + (r.width - (float)MeasureText(label, (int)size)) * 0.5f, label_y, size, color);
+	if (keyed)
 		text(key, r.x + r.width - (float)MeasureText(key, (int)key_size) - 4.0f * s, r.y + 3.0f * s, key_size,
 		     keys_live ? ENERGY : TEXT_DIM);
-	}
 	if (b->toggle) DrawRectangle((int)(r.x + 10.0f * s), (int)(r.y + r.height - 5.0f * s), (int)(r.width - 20.0f * s),
 		                         (int)fmaxf(2.0f, 2.0f * s), b->active ? ON : OFF);
 }
@@ -627,9 +641,10 @@ static void draw_prompt(const Controls *c, const Layout *L)
 	text(line, r.x + 8.0f * s, r.y + 5.0f * s, size, TEXT);
 }
 
-void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, bool live)
+void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, const Input *in)
 {
-	Vector2 mouse = live ? GetMousePosition() : (Vector2){-1.0f, -1.0f};
+	bool live = in != nullptr;
+	Vector2 mouse = live ? in->mouse : (Vector2){-1.0f, -1.0f};
 	if (live && c->dragging)
 		DrawRectangleLinesEx((Rectangle){fminf(c->drag_start.x, mouse.x), fminf(c->drag_start.y, mouse.y),
 		                                 fabsf(mouse.x - c->drag_start.x), fabsf(mouse.y - c->drag_start.y)},

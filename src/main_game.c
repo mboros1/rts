@@ -36,6 +36,7 @@
 #include "scene.c"
 #include "render.c"
 #include "keymap.c"
+#include "input.c"
 #include "view.c"
 #include "net.c"
 #include "coord.c"
@@ -94,14 +95,14 @@ static void start_clip(Game *g);
 
 // ---------------------------------------------------------------- input
 
-static void handle_input(Game *g)
+static void handle_input(Game *g, const Input *in)
 {
-	if (IsKeyPressed(g->keys.key[BIND_SANDBOX_PAUSE])) g->paused = !g->paused;
-	if (IsKeyPressed(g->keys.key[BIND_OVERLAY])) g->overlay = !g->overlay;
-	if (IsKeyPressed(g->keys.key[BIND_SANDBOX_BOT])) g->bots[0].enabled = !g->bots[0].enabled;
-	if (IsKeyPressed(g->keys.key[BIND_SANDBOX_CLIP])) start_clip(g);
+	if (in->pressed[g->keys.key[BIND_SANDBOX_PAUSE]]) g->paused = !g->paused;
+	if (in->pressed[g->keys.key[BIND_OVERLAY]]) g->overlay = !g->overlay;
+	if (in->pressed[g->keys.key[BIND_SANDBOX_BOT]]) g->bots[0].enabled = !g->bots[0].enabled;
+	if (in->pressed[g->keys.key[BIND_SANDBOX_CLIP]]) start_clip(g);
 	Order orders[16];
-	ptrdiff_t n = controls_input(&g->controls, &g->sim, &g->view, &g->commands, orders, countof(orders));
+	ptrdiff_t n = controls_input(&g->controls, in, &g->sim, &g->view, &g->commands, orders, countof(orders));
 	for (ptrdiff_t k = 0; k < n && g->queued_count < MAX_COMMANDS_PER_TICK; k++)
 		g->queued[g->queued_count++] = (Command){.faction = {0}, .kind = orders[k].kind, .target = orders[k].target,
 		                                       .count = orders[k].count, .units = orders[k].units,
@@ -295,8 +296,10 @@ int main(int argc, char **argv)
 	double accumulator = 0.0;
 	while (!WindowShouldClose()) {
 		arena_reset(&g.frame);
-		view_update(&g.view, &g.sim.terrain, &g.keys);
-		handle_input(&g);
+		Input in;
+		input_from_raylib(&in);
+		view_update(&g.view, &g.sim.terrain, &g.keys, &in);
+		handle_input(&g, &in);
 		poll_clip(&g);
 
 		if (!g.paused) {
@@ -314,9 +317,9 @@ int main(int argc, char **argv)
 		Scene scene = scene_from_sim(&g.sim);
 		renderer_draw_scene(&g.renderer, &scene, g.paused ? 0.0f : (float)(accumulator / SIM_DT),
 		                    &g.frame, selected, 0);
-		controls_draw_world(&g.controls, &g.sim, &g.view);
+		controls_draw_world(&g.controls, &g.sim, &g.view, in.mouse);
 		EndMode3D();
-		controls_draw_screen(&g.controls, &g.sim, GetScreenWidth(), GetScreenHeight(), true);
+		controls_draw_screen(&g.controls, &g.sim, GetScreenWidth(), GetScreenHeight(), &in);
 		if (g.overlay) draw_overlay(&g);
 		draw_toast(&g);
 		EndDrawing();

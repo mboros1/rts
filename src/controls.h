@@ -38,6 +38,7 @@
 #include <raylib.h>
 
 #include "arena.h"
+#include "input.h"
 #include "keymap.h"
 #include "menu.h"
 #include "sim.h"
@@ -93,9 +94,10 @@ typedef struct {
 void controls_init(Controls *c, FactionId me, Arena *a, ptrdiff_t max_units);
 void controls_clear(Controls *c);
 
-// This frame's mouse and keys, against sim's view of our own faction.
+// This frame's mouse and keys (input.h), against sim's view of our own faction.
 // Orders land in out (at most cap); returns how many.
-ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *frame, Order *out, ptrdiff_t cap);
+ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const View *view, Arena *frame, Order *out,
+                         ptrdiff_t cap);
 
 // A placement, a move or fight, or a prompt in progress (cancel cancels it
 // rather than leaving for the map).
@@ -105,7 +107,8 @@ bool controls_busy(const Controls *c);
 uint8_t *controls_selected(Controls *c, const Units *own, Arena *frame);
 
 // Inside BeginMode3D: the structure being placed, where it would go.
-void controls_draw_world(const Controls *c, const Sim *sim, const View *view);
+void controls_draw_world(const Controls *c, const Sim *sim, const View *view, Vector2 mouse);
 // After EndMode3D: the panels, in a screen of w x h pixels: the game's
-// window (live: the mouse hovers and drags), or a clip's frame.
-void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, bool live);
+// window (with its input: the mouse hovers and drags), or a clip's frame
+// (in: nullptr).
+void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, const Input *in);
