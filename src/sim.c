@@ -23,10 +23,27 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.spread = 2.0f, .high_arc = true, .weight = 2,
 		.metal_cost = 120.0f, .energy_cost = 900.0f, .build_time = 140.0f,
 	},
+	// Outranges everything, slowly: for lines that have dug in. Close up it
+	// can't fire at all, so it needs an army in front of it.
+	[UNIT_SIEGE] = {
+		.name = "siege", .speed = 2.5f, .accel = 5.0f, .radius = 1.3f, .sight = 30.0f,
+		.height = 1.6f, .hp = 150.0f, .range = 140.0f, .min_range = 35.0f, .reload = 180,
+		.shell_speed = 55.0f, .damage = 140.0f, .splash = 6.0f,
+		.spread = 3.0f, .high_arc = true, .weight = 0,
+		.metal_cost = 260.0f, .energy_cost = 2200.0f, .build_time = 260.0f,
+	},
 	[UNIT_ENGINEER] = {
 		.name = "engineer", .speed = 6.0f, .accel = 20.0f, .radius = 0.9f, .sight = 30.0f,
 		.height = 1.0f, .hp = 120.0f, .build_power = 10.0f,
 		.metal_cost = 60.0f, .energy_cost = 400.0f, .build_time = 70.0f,
+	},
+	// A combat engineer: builds at twice an engineer's pace, takes a beating,
+	// shoots back a little. Small enough to go unpaired: a beachhead's crew.
+	[UNIT_SAPPER] = {
+		.name = "sapper", .speed = 5.5f, .accel = 16.0f, .radius = 1.0f, .sight = 32.0f,
+		.height = 1.2f, .hp = 320.0f, .range = 22.0f, .reload = 30,
+		.shell_speed = 60.0f, .damage = 8.0f, .spread = 0.6f, .build_power = 20.0f,
+		.metal_cost = 140.0f, .energy_cost = 1000.0f, .build_time = 120.0f,
 	},
 	// Eyes: fast, far-sighted, fragile, unarmed. Cheap enough to lose.
 	[UNIT_SCOUT] = {
@@ -58,7 +75,7 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 	},
 };
 
-static constexpr float MAX_SIGHT = 48.0f;
+static constexpr float MAX_SIGHT = 70.0f;          // the furthest any unit sees (scouts): checked in sim_init
 static constexpr float MAX_RADIUS = 5.0f;           // transporters; separation reach
 
 // The economy's constants: what a faction starts with and earns for free
@@ -553,7 +570,22 @@ static void apply_send(Faction *f, const Sim *sim, const Command *c)
 		live++;
 	}
 	if (live == 0) return;
-	ptrdiff_t g = nearest_transporter(f, v2_scale(sum, 1.0f / (float)live), 1e4f);
+	// Our nearest transporter with nobody waiting at it, or failing that the
+	// nearest: with several, sends go out side by side.
+	V2 centre = v2_scale(sum, 1.0f / (float)live);
+	ptrdiff_t g = -1;
+	float best = 1e30f;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] != UNIT_TRANSPORTER || u->progress[i] < 1.0f) continue;
+		UnitHandle h = units_handle(u, i);
+		bool busy = false;
+		for (ptrdiff_t j = 0; j < u->count && !busy; j++) busy = u->order[j] == ORDER_SEND && unit_handle_eq(u->building[j], h);
+		float d2 = v2_len2(v2_sub(v2(u->px[i], u->pz[i]), centre)) + (busy ? 1e8f : 0.0f);
+		if (d2 < best) {
+			best = d2;
+			g = i;
+		}
+	}
 	if (g < 0) return;
 	if (unpaired) {
 		V2 land = clamp_to_map(&sim->terrain, c->target, 8.0f);
@@ -669,7 +701,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		if (d < 0 || unit_is_structure(u->type[d])) continue;
 		// Builders all go to the one site; others keep the group's shape.
 		bool build = c->kind == COMMAND_BUILD;
-		if (build && u->type[d] != UNIT_ENGINEER) continue;
+		if (build && !unit_is_builder(u->type[d])) continue;
 		V2 offset = v2_scale(v2_sub(v2(u->px[d], u->pz[d]), centre), squeeze);
 		V2 dest = build ? target : clamp_to_map(t, v2_add(target, offset), 1.0f);
 		u->order[d] = order_for_command[c->kind];
@@ -879,7 +911,7 @@ static void fly_projectiles(Faction *f, const Terrain *t)
 	}
 }
 
-static ptrdiff_t nearest_enemy(const EnemyView *v, V2 from, float range)
+static ptrdiff_t nearest_enemy(const EnemyView *v, V2 from, float range, float min_range)
 {
 	CellRange r = grid_range(&v->grid, from.x - range, from.z - range, from.x + range, from.z + range);
 	ptrdiff_t best = -1;
@@ -887,6 +919,7 @@ static ptrdiff_t nearest_enemy(const EnemyView *v, V2 from, float range)
 	int32_t j;
 	GRID_FOR(&v->grid, r, j) {
 		float d2 = v2_len2(v2_sub(v2(v->px[j], v->pz[j]), from));
+		if (d2 < min_range * min_range) continue; // too close to fire at
 		if (d2 < best_d2 || (d2 == best_d2 && best >= 0 && j < best)) {
 			best = j;
 			best_d2 = d2;
@@ -925,10 +958,13 @@ static void fire_weapons(Faction *f, const EnemyView *v, const Terrain *t, Tick 
 
 		V2 p = v2(u->px[i], u->pz[i]);
 		ptrdiff_t e = view_find(v, u->target[i]);
-		if (e >= 0 && v2_len2(v2_sub(v2(v->px[e], v->pz[e]), p)) > def->range * def->range) e = -1;
+		if (e >= 0) {
+			float d2 = v2_len2(v2_sub(v2(v->px[e], v->pz[e]), p));
+			if (d2 > def->range * def->range || d2 < def->min_range * def->min_range) e = -1;
+		}
 		// Retargeting is staggered by slot so the cost spreads across ticks.
 		if (e < 0 && (tick.v + u->dense_slot[i]) % RETARGET_PERIOD == 0) {
-			e = nearest_enemy(v, p, def->range);
+			e = nearest_enemy(v, p, def->range, def->min_range);
 			u->target[i] = e >= 0 ? v->handle[e] : NO_UNIT;
 		}
 		if (e < 0) continue;
@@ -1099,12 +1135,12 @@ static void run_economy(Faction *f, const Sim *sim)
 	float want_m = 0.0f, want_e = 0.0f;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		Job j = {(int32_t)i, -1, UNIT_RAIDER, 0.0f};
-		if (u->type[i] == UNIT_ENGINEER && u->order[i] == ORDER_BUILD) {
+		if (unit_is_builder(u->type[i]) && u->order[i] == ORDER_BUILD) {
 			ptrdiff_t s = engineer_site(f, sim, i);
 			if (s < 0) continue;
 			j.target = (int32_t)s;
 			j.type = u->type[s];
-			j.work = unit_defs[UNIT_ENGINEER].build_power * SIM_DT;
+			j.work = unit_defs[u->type[i]].build_power * SIM_DT;
 		} else if (u->type[i] == UNIT_FACTORY && u->progress[i] >= 1.0f && u->queue_len[i] > 0) {
 			j.type = queue_front(u, i);
 			j.work = unit_defs[UNIT_FACTORY].build_power * SIM_DT;
@@ -1378,6 +1414,7 @@ void sim_init(Sim *sim, SimConfig config)
 		weights += config.type_weight[k];
 	}
 	ASSERT(weights > 0);
+	for (int k = 0; k < UNIT_TYPE_COUNT; k++) ASSERT(unit_defs[k].sight <= MAX_SIGHT); // or sight searches miss it
 	*sim = (Sim){.config = config};
 	sim->zone = arena_create("zone", (ptrdiff_t)256 << 20);
 	sim->interaction = arena_create("interaction", (ptrdiff_t)64 << 20);

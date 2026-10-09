@@ -44,9 +44,9 @@ bool world_parse(World *w, Str text, const char *path, char *err, ptrdiff_t err_
 		i = j + 1;
 		char *hash = strchr(line, '#');
 		if (hash) *hash = 0;
-		char *tok[8], *save;
+		char *tok[32], *save;
 		int n = 0;
-		for (char *t = strtok_r(line, " \t\r", &save); t && n < 8; t = strtok_r(nullptr, " \t\r", &save)) tok[n++] = t;
+		for (char *t = strtok_r(line, " \t\r", &save); t && n < 32; t = strtok_r(nullptr, " \t\r", &save)) tok[n++] = t;
 		if (n == 0) continue;
 		if (!strcmp(tok[0], "port") && n == 2) {
 			long p = strtol(tok[1], nullptr, 10);
@@ -75,8 +75,22 @@ bool world_parse(World *w, Str text, const char *path, char *err, ptrdiff_t err_
 			if (w->link_count == WORLD_MAX_LINKS) return world_bad(err, err_len, path, line_no, "too many links");
 			w->links[w->link_count][0] = (uint8_t)a;
 			w->links[w->link_count++][1] = (uint8_t)b;
+		} else if (!strcmp(tok[0], "doctrine") && n >= 3) {
+			// Checked when a zone's setup reads it; here only where it goes.
+			int side = !strcmp(tok[1], "blue") ? 0 : !strcmp(tok[1], "red") ? 1 : -1;
+			if (side < 0) return world_bad(err, err_len, path, line_no, "doctrine blue|red [in ZONE] PRESET [FIELD=VALUE...]");
+			int first = 2, zone = -1;
+			if (!strcmp(tok[2], "in")) {
+				if (n < 5 || (zone = world_zone(w, tok[3])) < 0)
+					return world_bad(err, err_len, path, line_no, "doctrine SIDE in ZONE: a zone named before this line");
+				first = 4;
+			}
+			char spec[192] = "";
+			for (int k = first; k < n; k++) snprintf(spec + strlen(spec), sizeof spec - strlen(spec), "%s%s", k > first ? " " : "", tok[k]);
+			char *to = zone < 0 ? w->doctrine[side] : w->doctrine_in[zone][side];
+			snprintf(to, sizeof w->doctrine[side], "%s", spec);
 		} else {
-			return world_bad(err, err_len, path, line_no, "expected: port N | zone NAME X Y [home SIDE] | link A B");
+			return world_bad(err, err_len, path, line_no, "expected: port N | zone NAME X Y [home SIDE] | link A B | doctrine ...");
 		}
 	}
 	if (w->zone_count == 0) return world_bad(err, err_len, path, line_no, "no zones");

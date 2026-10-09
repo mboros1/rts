@@ -9,6 +9,7 @@
 //   scenario skirmish                 # starting config and bot behaviour
 //   seed 7 | units 400 | weights 6 3 2 | respawn off | economy on
 //   bases blue | bases red | bases none | bases both  # economy: who starts with a base
+//   doctrine red turtle army_cap=500  # how a side's bot plays (bot.h); default balanced
 //   bot red off                       # at tick 0
 //   clip 200..700                     # default clip window
 //   speed 4                           # time-lapse clips: a frame every 4 ticks
@@ -101,6 +102,7 @@ typedef struct {
 	const Scenario *scenario;
 	SimConfig config;
 	bool bots_on[FACTION_COUNT];   // at tick 0
+	Doctrine doctrine[FACTION_COUNT]; // how each side's bot plays (bot.h)
 	ScriptAction *actions;         // sorted by tick, then by line
 	ptrdiff_t action_count;
 	const char **groups;

@@ -138,14 +138,14 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 	if (send_input(c, sim, view, frame, out, cap, &n)) return n;
 
 	if (sim->config.economy) {
-		if (selection_has(c, sim, UNIT_ENGINEER)) {
+		if (selection_has(c, sim, UNIT_ENGINEER) || selection_has(c, sim, UNIT_SAPPER)) {
 			if (IsKeyPressed(KEY_E)) c->placing = UNIT_EXTRACTOR;
 			if (IsKeyPressed(KEY_G)) c->placing = UNIT_GENERATOR;
 			if (IsKeyPressed(KEY_F)) c->placing = UNIT_FACTORY;
 			if (IsKeyPressed(KEY_R)) c->placing = UNIT_TRANSPORTER;
 		}
 		if (selection_has(c, sim, UNIT_FACTORY)) {
-			const UnitType keys[] = {UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_ENGINEER, UNIT_SCOUT};
+			const UnitType keys[] = {UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_ENGINEER, UNIT_SCOUT, UNIT_SAPPER, UNIT_SIEGE};
 			for (int k = 0; k < (int)countof(keys); k++)
 				if (IsKeyPressed(KEY_ONE + k))
 					order(c, frame, out, cap, &n, (Order){.kind = COMMAND_PRODUCE, .type = keys[k], .amount = 1,
@@ -267,8 +267,8 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 		snprintf(sel, sizeof sel, "landing in %s: click where, in your strip (esc cancels)", z->name[c->landing_for]);
 	DrawText(sel, 14, y + 26, 18, RAYWHITE);
 	DrawText(sim->config.economy
-	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-5, 0 clear | T send"
-	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-5, 0 clear")
+	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear | T send"
+	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear")
 	             : "drag select | right attack-move | ctrl+right move | X stop | V entrench",
 	         14, y + 50, 14, GRAY);
 }

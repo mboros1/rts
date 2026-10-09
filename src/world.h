@@ -8,6 +8,8 @@
 //   zone east   0.8 0.5 home red
 //   link west middle                 both ways
 //   link middle east
+//   doctrine red turtle              how a side's bots play (bot.h), every zone
+//   doctrine blue in middle raider   ... or one zone (after its zone line)
 //
 // A world file only sets up a match. Everything after that is the game's.
 #pragma once
@@ -30,7 +32,15 @@ typedef struct {
 	uint8_t links[WORLD_MAX_LINKS][2];
 	int link_count;
 	int port;
+	char doctrine[FACTION_COUNT][192];                     // every zone ("": the default)
+	char doctrine_in[COORD_MAX_ZONES][FACTION_COUNT][192]; // one zone, over that
 } World;
+
+// The doctrine a side's bots play in zone z ("": the default).
+static inline const char *world_doctrine(const World *w, int z, int side)
+{
+	return w->doctrine_in[z][side][0] ? w->doctrine_in[z][side] : w->doctrine[side];
+}
 
 // False with "PATH:LINE: why" in err on a bad file.
 bool world_parse(World *w, Str text, const char *path, char *err, ptrdiff_t err_len);

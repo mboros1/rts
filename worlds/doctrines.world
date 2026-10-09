@@ -1,0 +1,22 @@
+# Five zones, two styles of war. Blue raids: raiders and scouts, three
+# transporters, packs of raiders landing in red's zones; from the south it
+# rushes instead. Red brings siege guns behind tanks, and at the centre,
+# its front, it digs in. Any preset can be tuned field by field (see
+# src/bot.h), for one zone or all of them. (A home that digs in never sends
+# its army out: red as a turtle at home loses everything else.)
+port 7700
+zone west   0.12 0.5  home blue
+zone north  0.4  0.08
+zone south  0.4  0.92
+zone centre 0.62 0.5
+zone east   0.88 0.5  home red
+link west north
+link west south
+link north centre
+link south centre
+link centre east
+link north south
+doctrine blue raider
+doctrine blue in south rush
+doctrine red siege
+doctrine red in centre turtle garrison=20 assault_army=60

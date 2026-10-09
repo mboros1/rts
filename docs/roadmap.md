@@ -429,6 +429,56 @@ Done. A side's map shows the enemy only as it has seen them.
   Sightings say when, not how many or where in the zone. Compare clips of
   two maps side by side are too small to read, so demo 13 shows one.
 
+## Spike 12 results (2026-10-08)
+
+Done. Doctrines and two new units; the same roster for both sides.
+
+- **Units**: the *siege* gun (range 140, but nothing closer than 35; slow,
+  big splash, sees only 30, so it needs spotters) for lines that have dug in;
+  the *sapper* (armoured, lightly armed, builds at twice an engineer's
+  pace, allowed unpaired) so a beachhead's transporter goes up in seconds.
+  Factory keys 6 and 7. Builders are now any mobile unit with build power.
+- **Doctrines** (`bot.h`): a preset, then any field by name, e.g.
+  `turtle army_cap=500 siege=3`. Presets: balanced, rush, turtle, raider,
+  siege. Fields: the factory cycle per combat type, army cap, garrison,
+  smallest send, the army it takes to assault, crew make-up (engineers or
+  sappers, and escort), scouts, transporters per zone, and whether it digs
+  in at the front, raids enemy zones with unpaired raider packs, or hunts.
+  Set per side in a zone's setup script (`doctrine red siege`), per side or
+  per side and zone in a world file (`doctrine blue in north raider`), or
+  for the client's `--bot` (`--doctrine`). `worlds/doctrines.world` is an
+  example.
+- **Sends spread out**: a send leaves from our nearest transporter with
+  nobody waiting at it, so a zone with several sends side by side.
+- **Matchups**, 10 minutes each in the five-zone world, counting zones
+  changing hands: balanced v balanced 5 (the land grab, then the old
+  standoff); rush v turtle 2, a rout: rush takes everything including red's
+  home while turtle never leaves it; raider v siege 9, with centre swinging
+  between red and contested over and over. Doctrines move fronts.
+- **Found by a test**: units' sight was capped at 48 by the interaction
+  phase's search radius, so scouts (70) saw no further than raiders. The cap
+  is now 70, and `sim_init` checks no unit sees further.
+- **Evidence**: `test_doctrine` (presets, overrides, nonsense refused,
+  scripts and world files carry them), `test_siege` (fires far with a
+  spotter, never close), the matchups above, and an hour's soak of
+  `worlds/doctrines.world` (blue raids and rushes, red brings siege and digs
+  in at the centre): 90 zone kills, 39 coordinator kills, 4557 units across,
+  none lost or duplicated, 95 replay segments chained; centre changed hands
+  7 times (9 front changes in all, short of the 10 asked of it beforehand).
+  Demo 14 is the doctrines world.
+- **Found by the soak**: a zone took deliveries it had no room for. A side's
+  units in a zone are capped (8192); past that the sim spawned no more, and
+  arrivals already confirmed were lost (24,000 in one run, as raider-doctrine
+  homes sent everything they made forward and a front zone filled up). A zone
+  now holds a delivery unless it has room for all of it, and bots stop
+  making army once their side is strong enough everywhere, and stop feeding
+  a zone that's full.
+- **Formats**: replay v9, wire v6 (four combat types).
+- **Not yet**: fronts move but settle: after the land grab the fighting
+  concentrates on one contested zone. No doctrine adapts (a rush keeps
+  rushing against a wall); turtle at home is too passive to win anything; the
+  presets' numbers are first guesses, to be tuned by running matchups.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

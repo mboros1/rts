@@ -247,8 +247,12 @@ int world_main(int argc, char **argv)
 				for (const char *c = check.zones[k].name; *c; c++) seed = (seed ^ (uint8_t)*c) * 1099511628211u;
 				// Only a side's home zone starts with its base; elsewhere it has to get in.
 				int8_t home = check.zones[k].home;
-				const char *script = fmt("scenario economy\nseed %llu\nbases %s\n", (unsigned long long)(seed % 1000000007u),
-				                         home == 0 ? "blue" : home == 1 ? "red" : "none");
+				const char *script = fmt("scenario economy\nseed %llu\nbases %s\n%s%s%s%s%s%s", (unsigned long long)(seed % 1000000007u),
+				                         home == 0 ? "blue" : home == 1 ? "red" : "none",
+				                         world_doctrine(&check, k, 0)[0] ? "doctrine blue " : "", world_doctrine(&check, k, 0),
+				                         world_doctrine(&check, k, 0)[0] ? "\n" : "",
+				                         world_doctrine(&check, k, 1)[0] ? "doctrine red " : "", world_doctrine(&check, k, 1),
+				                         world_doctrine(&check, k, 1)[0] ? "\n" : "");
 				if (!platform_write_file(live_path(&w, fmt("%s.script", check.zones[k].name)), script, (ptrdiff_t)strlen(script)))
 					fatal("cannot write the zone scripts");
 			}

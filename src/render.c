@@ -108,7 +108,9 @@ void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Are
 	r->unit_mesh[UNIT_RAIDER] = GenMeshCube(1.0f, 1.0f, 1.4f);
 	r->unit_mesh[UNIT_TANK] = GenMeshCube(1.0f, 1.0f, 1.0f);
 	r->unit_mesh[UNIT_ARTILLERY] = GenMeshCone(0.5f, 1.0f, 8);
+	r->unit_mesh[UNIT_SIEGE] = GenMeshCone(0.5f, 1.0f, 4);
 	r->unit_mesh[UNIT_ENGINEER] = GenMeshCube(1.0f, 1.0f, 1.0f);
+	r->unit_mesh[UNIT_SAPPER] = GenMeshCube(1.0f, 1.0f, 1.0f);
 	r->unit_mesh[UNIT_SCOUT] = GenMeshSphere(0.5f, 6, 8);
 	r->unit_mesh[UNIT_EXTRACTOR] = GenMeshCylinder(0.5f, 1.0f, 10);
 	r->unit_mesh[UNIT_GENERATOR] = GenMeshCylinder(0.3f, 1.0f, 6);
@@ -207,11 +209,11 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 				float w = u->work[i];
 				h *= unit_is_combat(u->type[i]) ? 1.0f - 0.6f * w : 0.4f + 0.6f * w;
 			}
-			bool from_base = t == UNIT_ARTILLERY || t == UNIT_EXTRACTOR || t == UNIT_GENERATOR || t == UNIT_TRANSPORTER
+			bool from_base = t == UNIT_ARTILLERY || t == UNIT_SIEGE || t == UNIT_EXTRACTOR || t == UNIT_GENERATOR || t == UNIT_TRANSPORTER
 			              || t == UNIT_TURRET;
 			float y = u->py[i] + (from_base ? 0.0f : 0.5f * h);
 			float yaw = unit_is_structure(u->type[i]) ? 0.0f : heading[slot];
-			if (t == UNIT_ENGINEER) h *= 0.7f;
+			if (t == UNIT_ENGINEER || t == UNIT_SAPPER) h *= 0.7f;
 			bucket[t][s][count[t][s]++] = transform(x, y, z, d, h, d, yaw);
 		}
 		Color building = ColorLerp(FACTION_COLOR[f], WHITE, 0.55f);

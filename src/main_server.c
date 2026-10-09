@@ -365,6 +365,17 @@ static void on_deliver(Server *s, ByteReader *r, double now)
 	const Faction *f = &s->sim.factions[faction];
 	int32_t batch = 0;
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) batch += counts[k];
+	// Room for every one of them, with what's already arriving this tick: the
+	// sim can't spawn past its capacity, and a confirmed arrival must arrive.
+	ptrdiff_t arriving = 0;
+	for (ptrdiff_t k = 0; k < s->queued_count; k++)
+		if (s->queued[k].kind == COMMAND_ARRIVE && s->queued[k].faction.v == faction) arriving += s->queued[k].amount;
+	if (f->units.count + arriving + batch > f->units.cap - 16) {
+		if (s->arrivals_held++ == 0)
+			printf("server %s: transfer %llu waits: no room for more units\n", s->zone_name, (unsigned long long)id);
+		send_id(s, COORD_HOLD, id, now);
+		return;
+	}
 	V2 at = v2(0.0f, 0.0f);
 	bool room = false, has_landing = false;
 	if (leg.unpaired) {

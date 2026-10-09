@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A self-playing world, for a long time, with things going wrong on purpose.
 
-    tools/world-soak.py BIN_DIR OUT_DIR --minutes M [--world FILE] [--speed S] [--seed N]
+    tools/world-soak.py BIN_DIR OUT_DIR --minutes M [--world FILE] [--speed S] [--seed N] [--min-changes N]
 
 `rts world` starts a world (worlds/five.world by default) with bots playing
 both sides everywhere. Every 20-60 s a random zone is killed with SIGKILL, and
@@ -68,6 +68,7 @@ def main():
     ap.add_argument("--world", default="worlds/five.world")
     ap.add_argument("--speed", type=float, default=8)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--min-changes", type=int, default=0, help="fail unless zones changed hands this often")
     a = ap.parse_args()
     rng = random.Random(a.seed)
     subprocess.run(["rm", "-rf", a.out], check=True)
@@ -139,6 +140,7 @@ def main():
     expected_down = set()
     next_sample, next_player, sessions = time.time() + 30, time.time() + 30, 0
     rss, held_beyond_home, failures = {}, {"blue": set(), "red": set()}, []
+    holder, changes, timeline = {}, 0, {}
     while time.time() < end:
         now = time.time()
         for name in zones + ["coord"]:
@@ -185,6 +187,14 @@ def main():
                     if not m:
                         continue
                     b, r = int(m[1]) + int(m[2]), int(m[3]) + int(m[4])
+                    # Who holds it: the front moving is a zone changing hands.
+                    now_holder = "contested" if b and r else "blue" if b else "red" if r else "empty"
+                    if f[0] not in homes:
+                        if holder.get(f[0]) not in (None, now_holder):
+                            changes += 1
+                        if holder.get(f[0]) != now_holder:
+                            timeline.setdefault(f[0], []).append(now_holder)
+                        holder[f[0]] = now_holder
                     if b and homes.get(f[0]) != "blue":
                         held_beyond_home["blue"].add(f[0])
                     if r and homes.get(f[0]) != "red":
@@ -252,9 +262,12 @@ def main():
             failures.append(f"player session {i} saw a faction hash mismatch")
     say(f"held beyond home: blue {sorted(held_beyond_home['blue'])}, red {sorted(held_beyond_home['red'])}; "
         f"{crossed} units crossed")
+    say(f"the front moved {changes} times: " + "; ".join(f"{z} {' > '.join(t)}" for z, t in sorted(timeline.items())))
     for side, held in held_beyond_home.items():
         if not held:
             failures.append(f"{side} never got beyond its home zone")
+    if changes < a.min_changes:
+        failures.append(f"the front moved {changes} times, fewer than {a.min_changes}")
     if crossed < 10 * a.minutes:
         failures.append(f"only {crossed} units crossed in {a.minutes} minutes")
     compactions = out.count("compacted")

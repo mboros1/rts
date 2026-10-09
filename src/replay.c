@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 8; // 8: scouts (unit types renumbered)
+static constexpr uint32_t REPLAY_VERSION = 9; // 9: siege and sappers (four combat types)
 
 // ---------------------------------------------------------------- writing
 

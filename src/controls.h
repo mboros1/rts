@@ -7,7 +7,8 @@
 //   ctrl+right-click    move                     X            stop
 //   engineers: E / G / F / R then click to place an extractor, generator,
 //   factory or transporter (shift keeps placing; right-click or esc cancels)
-//   factories: 1-5 queue raider, tank, artillery, engineer, scout (shift: repeat),
+//   factories: 1-7 queue raider, tank, artillery, engineer, scout, sapper, siege
+//   (shift: repeat),
 //   0 clears
 //   V: selected combat units entrench as turrets; selected entrenched turrets
 //   mobilize (both paid for as they go, and helpless while they do)

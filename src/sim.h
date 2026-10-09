@@ -37,7 +37,9 @@ typedef enum : uint8_t {
 	UNIT_RAIDER,        // combat units: what the spawner picks from
 	UNIT_TANK,
 	UNIT_ARTILLERY,
+	UNIT_SIEGE,         // very long range, slow, can't hit what's close: breaks lines
 	UNIT_ENGINEER,      // builds structures; unarmed
+	UNIT_SAPPER,        // builds too, armoured and armed: a beachhead in seconds
 	UNIT_SCOUT,         // fast, sees far; unarmed: intel
 	UNIT_EXTRACTOR,     // structures: never move
 	UNIT_GENERATOR,
@@ -51,6 +53,7 @@ enum { COMBAT_TYPE_COUNT = UNIT_ENGINEER };
 
 static inline bool unit_is_structure(UnitType t) { return t >= UNIT_EXTRACTOR; }
 static inline bool unit_is_combat(UnitType t) { return (int)t < (int)COMBAT_TYPE_COUNT; }
+static inline bool unit_is_builder(UnitType t) { return t == UNIT_ENGINEER || t == UNIT_SAPPER; }
 
 // What a unit type is. Content, not state: never changes during a run.
 typedef struct {
@@ -62,6 +65,7 @@ typedef struct {
 	float height;       // drawn height; the hit sphere sits radius above ground
 	float hp;
 	float range;        // max horizontal firing range
+	float min_range;    // can't fire at anything closer
 	int32_t reload;     // ticks between shots
 	float shell_speed;  // muzzle speed, units/s
 	float damage;       // to the unit hit
@@ -407,7 +411,10 @@ static constexpr float UNPAIRED_ENERGY = 4000.0f;
 static constexpr float UNPAIRED_ENERGY_PER = 400.0f;
 static constexpr int32_t UNPAIRED_BATCH = 8;
 static constexpr float SEND_REACH = 7.0f;   // beyond the transporter's radius
-static inline bool unpaired_can_send(UnitType t) { return t == UNIT_RAIDER || t == UNIT_ENGINEER || t == UNIT_SCOUT; }
+static inline bool unpaired_can_send(UnitType t)
+{
+	return t == UNIT_RAIDER || t == UNIT_ENGINEER || t == UNIT_SAPPER || t == UNIT_SCOUT;
+}
 
 // Each side lands unpaired sends in its own strip of a zone: blue the west
 // STRIP of the map's width, red the east. The rest is contested.

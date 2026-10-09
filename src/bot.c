@@ -1,5 +1,89 @@
 #include "bot.h"
 
+// ---------------------------------------------------------------- doctrines
+
+static const Doctrine presets[] = {
+	{.name = "balanced", .mix = {2, 1, 1, 0}, .army_cap = 300, .garrison = 10, .send_min = 12, .assault_army = 40,
+	 .crew_builder = UNIT_ENGINEER, .crew_builders = 4, .crew_escort = 4, .scouts = 2, .transporters = 1, .hunt = true},
+	{.name = "rush", .mix = {4, 1, 0, 0}, .army_cap = 180, .garrison = 5, .send_min = 8, .assault_army = 20,
+	 .crew_builder = UNIT_SAPPER, .crew_builders = 2, .crew_escort = 6, .scouts = 1, .transporters = 1, .hunt = true},
+	{.name = "turtle", .mix = {0, 2, 2, 1}, .army_cap = 400, .garrison = 40, .send_min = 30, .assault_army = 150,
+	 .crew_builder = UNIT_ENGINEER, .crew_builders = 4, .crew_escort = 4, .scouts = 2, .transporters = 1,
+	 .entrench = true},
+	{.name = "raider", .mix = {5, 0, 0, 0}, .army_cap = 250, .garrison = 10, .send_min = 10, .assault_army = 30,
+	 .crew_builder = UNIT_SAPPER, .crew_builders = 2, .crew_escort = 6, .scouts = 3, .transporters = 3, .raids = true,
+	 .hunt = true},
+	{.name = "siege", .mix = {0, 2, 1, 2}, .army_cap = 300, .garrison = 15, .send_min = 20, .assault_army = 80,
+	 .crew_builder = UNIT_SAPPER, .crew_builders = 4, .crew_escort = 4, .scouts = 2, .transporters = 1, .hunt = true},
+};
+
+static bool bad_doctrine(char *err, size_t len, const char *why, const char *what)
+{
+	snprintf(err, len, "doctrine: %s: %s", why, what);
+	return false;
+}
+
+bool doctrine_parse(Doctrine *d, const char *spec, char *err, size_t err_len)
+{
+	char buf[256], *save;
+	snprintf(buf, sizeof buf, "%s", spec);
+	char *name = strtok_r(buf, " \t", &save);
+	if (!name) return bad_doctrine(err, err_len, "no preset named", spec);
+	int k = 0;
+	while (k < (int)countof(presets) && strcmp(presets[k].name, name)) k++;
+	if (k == (int)countof(presets)) return bad_doctrine(err, err_len, "no such preset (balanced rush turtle raider siege)", name);
+	*d = presets[k];
+	for (char *t = strtok_r(nullptr, " \t", &save); t; t = strtok_r(nullptr, " \t", &save)) {
+		char *eq = strchr(t, '=');
+		if (!eq) return bad_doctrine(err, err_len, "expected FIELD=VALUE", t);
+		*eq = 0;
+		const char *key = t, *v = eq + 1;
+		char *end;
+		long n = strtol(v, &end, 10);
+		bool number = *v && !*end && n >= 0 && n <= 10000;
+		bool on = !strcmp(v, "on"), off = !strcmp(v, "off");
+		struct { const char *key; int32_t *field; } ints[] = {
+			{"army_cap", &d->army_cap}, {"garrison", &d->garrison}, {"send_min", &d->send_min},
+			{"assault_army", &d->assault_army}, {"crew_builders", &d->crew_builders}, {"crew_escort", &d->crew_escort},
+			{"scouts", &d->scouts}, {"transporters", &d->transporters},
+		};
+		struct { const char *key; bool *field; } flags[] = {
+			{"entrench", &d->entrench}, {"raids", &d->raids}, {"hunt", &d->hunt},
+		};
+		bool done = false;
+		for (int i = 0; i < (int)countof(ints) && !done; i++)
+			if (!strcmp(key, ints[i].key)) {
+				if (!number) return bad_doctrine(err, err_len, "expected a number 0..10000 for", key);
+				*ints[i].field = (int32_t)n;
+				done = true;
+			}
+		for (int i = 0; i < (int)countof(flags) && !done; i++)
+			if (!strcmp(key, flags[i].key)) {
+				if (!on && !off) return bad_doctrine(err, err_len, "expected on or off for", key);
+				*flags[i].field = on;
+				done = true;
+			}
+		for (int i = 0; i < COMBAT_TYPE_COUNT && !done; i++)
+			if (!strcmp(key, unit_defs[i].name)) {
+				if (!number || n > 20) return bad_doctrine(err, err_len, "expected 0..20 a round for", key);
+				d->mix[i] = (int32_t)n;
+				done = true;
+			}
+		if (!done && !strcmp(key, "crew_builder")) {
+			if (strcmp(v, "engineer") && strcmp(v, "sapper")) return bad_doctrine(err, err_len, "engineer or sapper, not", v);
+			d->crew_builder = strcmp(v, "engineer") ? UNIT_SAPPER : UNIT_ENGINEER;
+			done = true;
+		}
+		if (!done) return bad_doctrine(err, err_len, "no such field", key);
+	}
+	int32_t round = 0;
+	for (int i = 0; i < COMBAT_TYPE_COUNT; i++) round += d->mix[i];
+	if (round == 0 || round > 5) return bad_doctrine(err, err_len, "the factory cycle is 1 to 5 units a round", spec);
+	if (d->transporters < 1 || d->crew_builders < 1 || d->crew_builders + d->crew_escort > UNPAIRED_BATCH)
+		return bad_doctrine(err, err_len, "transporters and crew builders at least 1, a crew at most 8", spec);
+	return true;
+}
+
 Bot bot_create(FactionId faction, uint64_t seed)
 {
 	return (Bot){
@@ -8,6 +92,7 @@ Bot bot_create(FactionId faction, uint64_t seed)
 		.period = 30,
 		.group_size = 128,
 		.enabled = true,
+		.doctrine = presets[0],
 	};
 }
 
@@ -78,7 +163,6 @@ static bool own_transporter(const Units *u, bool finished_only)
 	return false;
 }
 
-enum { BOT_ARMY_CAP = 300, SCOUTS_WANTED = 2 };
 
 // An economy, kept simply: factories cycle a mix of units (with engineers
 // while there are too few); idle engineers take the most useful job.
@@ -88,9 +172,11 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	const Faction *me = &sim->factions[f.v];
 	const Units *u = &me->units;
 	const Economy *e = &me->economy;
-	int engineers = 0, factories = 0, army = 0, scouts = 0;
+	const Doctrine *d = &bot->doctrine;
+	int engineers = 0, factories = 0, army = 0, scouts = 0, sappers = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		engineers += u->type[i] == UNIT_ENGINEER;
+		sappers += u->type[i] == UNIT_SAPPER;
 		scouts += u->type[i] == UNIT_SCOUT;
 		factories += u->type[i] == UNIT_FACTORY;
 		army += unit_is_combat(u->type[i]);
@@ -99,34 +185,37 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	if (want_engineers > 8) want_engineers = 8;
 
 	// Opening: factories make engineers and nothing else until there's metal
-	// coming in; then a cycle of units, with engineers while there are few.
+	// coming in; then the doctrine's cycle of units, with engineers while
+	// there are few, scouts and sappers while it wants them.
 	bool opening = e->metal_income < 12.0f;
+	int32_t amount[UNIT_TYPE_COUNT] = {0};
+	amount[UNIT_ENGINEER] = engineers < want_engineers;
+	amount[UNIT_SCOUT] = bot->world && scouts < d->scouts;
+	amount[UNIT_SAPPER] = bot->world && d->crew_builder == UNIT_SAPPER && sappers < d->crew_builders;
+	// Enough here (spend it first), or enough everywhere: a zone that sends
+	// its army away would otherwise make one forever.
+	int32_t everywhere = 0;
+	for (int z = 0; bot->world && z < bot->world->count; z++) everywhere += bot->world->mine[z];
+	if (!opening && army < d->army_cap && everywhere < 4 * d->army_cap)
+		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) amount[k] = d->mix[k];
+	uint32_t want = 0;
+	for (int k = 0; k < UNIT_TYPE_COUNT; k++) want |= (uint32_t)(amount[k] > 0) << k;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (u->type[i] != UNIT_FACTORY || u->progress[i] < 1.0f) continue;
-		bool short_handed = engineers < want_engineers;
-		bool want_scout = bot->world && scouts < SCOUTS_WANTED;
-		bool want_army = !opening && army < BOT_ARMY_CAP; // enough here: spend it first
-		bool has_army = queue_has(u, i, UNIT_RAIDER);
-		if (u->queue_len[i] > 0 && queue_has(u, i, UNIT_ENGINEER) == short_handed && has_army == want_army
-		    && queue_has(u, i, UNIT_SCOUT) == want_scout)
-			continue;
-		if (u->queue_len[i] == 0 && !short_handed && !want_army && !want_scout) continue;
+		uint32_t has = 0;
+		for (int q = 0; q < u->queue_len[i]; q++) has |= 1u << (u->queue[i] >> (8 * q) & 0xff);
+		if (has == want) continue; // already making what we want
 		UnitHandle *h = PUSH(arena, UnitHandle, 1);
 		*h = units_handle(u, i);
 		Command c = {.faction = f, .kind = COMMAND_PRODUCE, .count = 1, .units = h, .flags = COMMAND_REPEAT};
-		const struct { UnitType type; int32_t amount; } mix[] = {
-			{UNIT_ENGINEER, short_handed ? 1 : 0},
-			{UNIT_SCOUT, want_scout ? 1 : 0},
-			{UNIT_RAIDER, want_army ? 2 : 0},
-			{UNIT_TANK, want_army ? 1 : 0},
-			{UNIT_ARTILLERY, want_army ? 1 : 0},
-		};
 		c.amount = 0; // clear, then queue the cycle
 		emit(out, count, cap, c);
-		for (int k = 0; k < (int)countof(mix); k++) {
-			if (!mix[k].amount) continue;
-			c.unit_type = mix[k].type;
-			c.amount = mix[k].amount;
+		// Builders and eyes first, then the army.
+		const UnitType order[] = {UNIT_ENGINEER, UNIT_SAPPER, UNIT_SCOUT, UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_SIEGE};
+		for (int k = 0; k < (int)countof(order); k++) {
+			if (!amount[order[k]]) continue;
+			c.unit_type = order[k];
+			c.amount = amount[order[k]];
 			emit(out, count, cap, c);
 		}
 	}
@@ -145,7 +234,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		int32_t k = spot_at(&sim->spots, at);
 		if (k >= 0) taken |= (uint64_t)1 << k;
 	}
-	// In a world, a zone with no transporter of ours yet: the engineers are
+	// In a world, a zone with no transporter of ours yet: the builders are
 	// for that (bot_strategy), before anything else.
 	if (bot->world && !own_transporter(u, false)) return;
 	int want_factories = 1 + (int)(e->metal_income / 10.0f);
@@ -195,9 +284,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	}
 }
 
-enum { STRATEGY_PERIOD = 300, GARRISON = 10, SEND_MIN = 12, CREW_ENGINEERS = 4, CREW_RAIDERS = 4, ASSAULT_ARMY = 40,
-       FRONT_MARGIN = 100, HUNT_RECENT = 120, RECON_STALE = 300 };
-
+enum { STRATEGY_PERIOD = 300, FRONT_MARGIN = 100, HUNT_RECENT = 120, RECON_STALE = 300, RAID = 8 };
 
 // How far forward a zone of ours is: where we see the enemy, then where
 // we've seen a transporter of theirs, then next to a zone we believe is
@@ -208,79 +295,125 @@ static int32_t front_score(const BotWorld *w, int z)
 	     + (w->neighbours_enemy[z] ? 50000 : 0) - w->mine[z];
 }
 
-// The map: a transporter here, crews to open empty neighbours, surplus to
-// where it's needed. Sends name the destination only; the server routes.
+// Up to n idle units of a type (any combat type: UNIT_TYPE_COUNT), appended to h.
+static int32_t pick_idle(const Units *u, UnitType type, int32_t n, UnitHandle *h, int32_t at)
+{
+	for (ptrdiff_t i = 0; i < u->count && n > 0; i++) {
+		if (u->order[i] != ORDER_IDLE || u->engaged[i]) continue;
+		bool match = type == UNIT_TYPE_COUNT ? unit_is_combat(u->type[i]) : u->type[i] == type;
+		if (!match) continue;
+		bool taken = false;
+		for (int32_t k = 0; k < at && !taken; k++) taken = unit_handle_eq(h[k], units_handle(u, i));
+		if (taken) continue;
+		h[at++] = units_handle(u, i);
+		n--;
+	}
+	return at;
+}
+
+static void bot_send(const Bot *bot, Arena *arena, Command *out, ptrdiff_t *count, ptrdiff_t cap, int zone, UnitHandle *h, int32_t n)
+{
+	(void)arena;
+	if (n > 0) emit(out, count, cap, (Command){.faction = bot->faction, .kind = COMMAND_SEND, .amount = zone, .count = n, .units = h});
+}
+
+// The map, as the doctrine plays it: transporters here, crews to open
+// neighbours, raids, a dug-in garrison at the front, and what can be spared
+// sent forward. Sends name the destination only; the server routes.
 static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *count, ptrdiff_t cap)
 {
 	const BotWorld *w = bot->world;
+	const Doctrine *d = &bot->doctrine;
 	FactionId f = bot->faction;
 	const Faction *me = &sim->factions[f.v];
 	const Units *u = &me->units;
 	const Economy *e = &me->economy;
 	int here = w->here;
 	bool sending = false;
-	int32_t idle_army = 0, idle_engineers = 0, scouts = 0;
-	ptrdiff_t idle_scout = -1;
+	int32_t idle_army = 0, idle_builders = 0, idle_crew = 0, idle_raiders = 0, scouts = 0, turrets = 0;
+	int32_t transporters = 0;
+	ptrdiff_t free_scout = -1;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		sending = sending || u->order[i] == ORDER_SEND;
 		bool idle = u->order[i] == ORDER_IDLE && !u->engaged[i];
 		idle_army += idle && unit_is_combat(u->type[i]);
-		idle_engineers += idle && u->type[i] == UNIT_ENGINEER;
+		idle_builders += idle && unit_is_builder(u->type[i]);
+		idle_crew += idle && u->type[i] == d->crew_builder;
+		idle_raiders += idle && u->type[i] == UNIT_RAIDER;
 		scouts += u->type[i] == UNIT_SCOUT;
-		if (u->type[i] == UNIT_SCOUT && u->order[i] != ORDER_SEND) idle_scout = i; // patrolling will do
+		turrets += u->type[i] == UNIT_TURRET && u->seeded[i];
+		transporters += u->type[i] == UNIT_TRANSPORTER;
+		if (u->type[i] == UNIT_SCOUT && u->order[i] != ORDER_SEND) free_scout = i; // patrolling will do
 	}
+	bool front = w->contact[here] || w->neighbours_enemy[here];
 
-	// No transporter here: build one, with an idle engineer, once it's affordable.
-	if (!own_transporter(u, false)) {
-		if (idle_engineers == 0 || e->metal < 0.5f * unit_defs[UNIT_TRANSPORTER].metal_cost) return;
+	// Transporters: the first with every idle builder (the sooner it's up, the
+	// sooner help comes); more, one at a time, up to the doctrine's number.
+	if (transporters == 0 || (own_transporter(u, true) && transporters < d->transporters)) {
+		if (idle_builders == 0 || e->metal < 0.5f * unit_defs[UNIT_TRANSPORTER].metal_cost) return;
 		Promised none = {0};
 		V2 site;
 		if (!site_near_base(sim, f, UNIT_TRANSPORTER, &none, &site)) return;
-		// Every idle engineer on it: the sooner it's up, the sooner help comes.
-		UnitHandle *h = PUSH(arena, UnitHandle, idle_engineers);
-		int32_t n = 0;
-		for (ptrdiff_t i = 0; i < u->count && n < idle_engineers; i++)
-			if (u->type[i] == UNIT_ENGINEER && u->order[i] == ORDER_IDLE && !u->engaged[i]) h[n++] = units_handle(u, i);
+		int32_t take = transporters == 0 ? idle_builders : 1;
+		UnitHandle *h = PUSH(arena, UnitHandle, idle_builders);
+		int32_t n = pick_idle(u, UNIT_SAPPER, take, h, 0);
+		n = pick_idle(u, UNIT_ENGINEER, take - n, h, n);
 		emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_BUILD, .target = site, .count = n,
 		                                .units = h, .unit_type = UNIT_TRANSPORTER});
-		return;
+		if (transporters == 0) return;
 	}
 	if (!own_transporter(u, true) || sending) return; // one send at a time
 
-	// Open a neighbour where we have no transporter: a crew of engineers to
-	// build one, with raiders to guard them. One the enemy isn't in first;
-	// one they are in only with an army here to follow the crew in (it lands
-	// in our strip, perhaps unseen, and has to get the transporter up).
-	float crew_energy = UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER * (CREW_ENGINEERS + CREW_RAIDERS);
-	if (idle_engineers > CREW_ENGINEERS && e->energy >= crew_energy) {
+	// Dig in at the front: the garrison, as turrets (it can't be sent then).
+	if (d->entrench && front && turrets < d->garrison && idle_army > 0) {
+		int32_t n = d->garrison - turrets;
+		UnitHandle *h = PUSH(arena, UnitHandle, n);
+		int32_t got = pick_idle(u, UNIT_TANK, n, h, 0);
+		got = pick_idle(u, UNIT_RAIDER, n - got, h, got);
+		if (got) emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_ENTRENCH, .count = got, .units = h});
+	}
+
+	// Open a neighbour where we have no transporter: a crew of builders to
+	// raise one, with raiders to guard them. One we don't believe the enemy
+	// holds first; one we do only with an army here to follow the crew in.
+	int32_t crew = d->crew_builders + d->crew_escort;
+	float crew_energy = UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER * (float)crew;
+	int32_t spare_builders = idle_crew - (d->crew_builder == UNIT_ENGINEER ? 1 : 0); // an engineer stays home
+	if (spare_builders >= d->crew_builders && e->energy >= crew_energy) {
 		int target = -1;
 		for (int z = 0; z < w->count; z++)
 			if (z != here && w->linked[z] && !w->ours[z] && !bot_believes_enemy(w, z) && (target < 0 || rng_below(&bot->rng, 2)))
 				target = z;
-		for (int z = 0; z < w->count && target < 0 && idle_army >= ASSAULT_ARMY; z++)
+		for (int z = 0; z < w->count && target < 0 && idle_army >= d->assault_army; z++)
 			if (z != here && w->linked[z] && !w->ours[z]) target = z;
 		if (target >= 0) {
-			UnitHandle *h = PUSH(arena, UnitHandle, CREW_ENGINEERS + CREW_RAIDERS);
-			int32_t n = 0, eng = 0, rai = 0;
-			for (ptrdiff_t i = 0; i < u->count; i++) {
-				if (u->order[i] != ORDER_IDLE || u->engaged[i]) continue;
-				if (u->type[i] == UNIT_ENGINEER && eng < CREW_ENGINEERS) eng++, h[n++] = units_handle(u, i);
-				else if (u->type[i] == UNIT_RAIDER && rai < CREW_RAIDERS) rai++, h[n++] = units_handle(u, i);
-			}
-			emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_SEND, .amount = target, .count = n, .units = h});
+			UnitHandle *h = PUSH(arena, UnitHandle, crew);
+			int32_t n = pick_idle(u, d->crew_builder, d->crew_builders, h, 0);
+			n = pick_idle(u, UNIT_RAIDER, d->crew_escort, h, n);
+			bot_send(bot, arena, out, count, cap, target, h, n);
+			return;
+		}
+	}
+
+	// Raids: a pack of raiders, unpaired, into a neighbour we believe is theirs.
+	if (d->raids && idle_raiders >= RAID && e->energy >= UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER * RAID) {
+		for (int z = 0; z < w->count; z++) {
+			if (z == here || !w->linked[z] || w->ours[z] || !bot_believes_enemy(w, z)) continue;
+			UnitHandle *h = PUSH(arena, UnitHandle, RAID);
+			bot_send(bot, arena, out, count, cap, z, h, pick_idle(u, UNIT_RAIDER, RAID, h, 0));
 			return;
 		}
 	}
 
 	// Recon: a scout, unpaired, to a neighbour we know nothing fresh about
 	// and hold no transporter in. One stays home.
-	if (idle_scout >= 0 && scouts > 1 && e->energy >= UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER) {
+	if (free_scout >= 0 && scouts > 1 && e->energy >= UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER) {
 		for (int z = 0; z < w->count; z++) {
 			if (z == here || !w->linked[z] || w->ours[z] || w->contact[z]) continue;
 			if (w->seen_age[z] != BOT_NEVER && w->seen_age[z] < RECON_STALE) continue;
 			UnitHandle *h = PUSH(arena, UnitHandle, 1);
-			*h = units_handle(u, idle_scout);
-			emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_SEND, .amount = z, .count = 1, .units = h});
+			*h = units_handle(u, free_scout);
+			bot_send(bot, arena, out, count, cap, z, h, 1);
 			return;
 		}
 	}
@@ -290,12 +423,12 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	// them; only ever to a zone further forward than this one, so a front
 	// holds and a beachhead draws the army behind it.
 	if (w->contact[here] && !w->neighbours_enemy[here]) return; // a fight here: everyone stays
-	int32_t spare = idle_army - GARRISON;
-	if (spare < SEND_MIN) return;
+	int32_t spare = idle_army - (d->entrench ? 0 : d->garrison); // a dug-in garrison isn't idle
+	if (spare < d->send_min) return;
 	int target = -1;
 	int32_t best = front_score(w, here) + FRONT_MARGIN; // clearly further forward, or stay
 	for (int z = 0; z < w->count; z++) {
-		if (z == here || !w->ours[z]) continue;
+		if (z == here || !w->ours[z] || w->mine[z] >= 2 * d->army_cap) continue; // full up there
 		int32_t score = front_score(w, z);
 		if (score > best) {
 			best = score;
@@ -305,10 +438,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	if (target < 0) return;
 	if (spare > PAIRED_BATCH) spare = PAIRED_BATCH;
 	UnitHandle *h = PUSH(arena, UnitHandle, spare);
-	int32_t n = 0;
-	for (ptrdiff_t i = 0; i < u->count && n < spare; i++)
-		if (u->order[i] == ORDER_IDLE && !u->engaged[i] && unit_is_combat(u->type[i])) h[n++] = units_handle(u, i);
-	emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_SEND, .amount = target, .count = n, .units = h});
+	bot_send(bot, arena, out, count, cap, target, h, pick_idle(u, UNIT_TYPE_COUNT, spare, h, 0));
 }
 
 // Idle scouts wander the zone, the enemy's side of it most: our eyes.
@@ -347,7 +477,7 @@ void bot_think(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *
 	const BotWorld *w = bot->world;
 	if (w) {
 		bot_patrol(bot, sim, arena, out, count, cap);
-		if (f->view.count == 0 && !(w->seen_age[w->here] < HUNT_RECENT)) return;
+		if (f->view.count == 0 && !(bot->doctrine.hunt && w->seen_age[w->here] < HUNT_RECENT)) return;
 	}
 
 	UnitHandle *group = nullptr;

@@ -272,7 +272,7 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		static const char *fields[] = {"units", "lost", "fired", "shells", "spawned", "alive",
 		                               "metal", "energy", "metal_income", "energy_income",
 		                               "", "departed", "arrived"};
-		static const char *counts[UNIT_TYPE_COUNT] = {"raiders", "tanks", "artillery", "engineers", "scouts",
+		static const char *counts[UNIT_TYPE_COUNT] = {"raiders", "tanks", "artillery", "sieges", "engineers", "sappers", "scouts",
 		                                              "extractors", "generators", "factories", "transporters",
 		                                              "turrets"};
 		static const char *ops[] = {"<", "<=", ">", ">=", "==", "!="};
@@ -356,9 +356,11 @@ static bool parse_line(Parser *p, char *line)
 		return true;
 	}
 	if (!strcmp(key, "weights")) {
-		if (n != 1 + COMBAT_TYPE_COUNT) return bad(p, "weights RAIDER TANK ARTILLERY", nullptr);
+		// Siege is optional (0): scripts from before it still read the same.
+		if (n != COMBAT_TYPE_COUNT && n != 1 + COMBAT_TYPE_COUNT) return bad(p, "weights RAIDER TANK ARTILLERY [SIEGE]", nullptr);
 		int64_t sum = 0;
-		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) {
+		s->config.type_weight[UNIT_SIEGE] = 0;
+		for (int k = 0; k < n - 1; k++) {
 			if (!parse_i64(tok[1 + k], &v) || v < 0 || v > 1000) return bad(p, "weight 0..1000", tok[1 + k]);
 			s->config.type_weight[k] = (int32_t)v;
 			sum += v;
@@ -377,6 +379,15 @@ static bool parse_line(Parser *p, char *line)
 		bool on;
 		if (n != 2 || !parse_on(tok[1], &on)) return bad(p, "economy on|off", nullptr);
 		s->config.economy = on;
+		return true;
+	}
+	if (!strcmp(key, "doctrine")) {
+		FactionId side;
+		if (n < 3 || !parse_side(tok[1], &side)) return bad(p, "doctrine SIDE PRESET [FIELD=VALUE...]", nullptr);
+		char spec[256] = "";
+		for (int k = 2; k < n; k++) snprintf(spec + strlen(spec), sizeof spec - strlen(spec), "%s%s", k > 2 ? " " : "", tok[k]);
+		char why[160];
+		if (!doctrine_parse(&s->doctrine[side.v], spec, why, sizeof why)) return bad(p, why, nullptr);
 		return true;
 	}
 	if (!strcmp(key, "bases")) {
@@ -467,6 +478,8 @@ bool script_parse(Script *s, Arena *arena, Str text, const char *path, char *err
 		.clip_from = def->clip_from,
 		.clip_to = def->clip_to,
 	};
+	char why[160];
+	for (int k = 0; k < FACTION_COUNT; k++) ASSERT(doctrine_parse(&s->doctrine[k], "balanced", why, sizeof why));
 	Parser p = {.s = s, .arena = arena, .path = path, .err = err, .err_len = err_len,
 	            .actions = PUSH(arena, ScriptAction, lines), .action_cap = lines};
 
@@ -515,7 +528,10 @@ void script_run_init(ScriptRun *r, const Script *s, Arena *arena, FILE *log)
 {
 	*r = (ScriptRun){.script = s, .log = log};
 	scenario_bots(s->scenario, r->bots);
-	for (int k = 0; k < FACTION_COUNT; k++) r->bots[k].enabled = s->bots_on[k];
+	for (int k = 0; k < FACTION_COUNT; k++) {
+		r->bots[k].enabled = s->bots_on[k];
+		r->bots[k].doctrine = s->doctrine[k];
+	}
 	r->group_units = PUSH(arena, UnitHandle *, s->group_count);
 	r->group_len = PUSH(arena, ptrdiff_t, s->group_count);
 	r->group_side = PUSH(arena, FactionId, s->group_count);

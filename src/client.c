@@ -8,7 +8,7 @@
 //   rts --coord HOST:PORT [--zone NAME]   a world, through its coordinator
 //       [--switch-to NAME --switch-at N] [--quit-after N]   (N: ticks received)
 //       [--journey STEP,STEP,...]          scripted: map:SECONDS or ZONE:SECONDS
-//       [--bot]                            the bot plays your side, as a player
+//       [--bot] [--doctrine SPEC]          the bot plays your side, as a player (bot.h)
 //
 // With a coordinator and no --zone, the window opens on the strategic map
 // (map.h): click a zone to launch into it; Tab, or Esc when not placing a
@@ -57,6 +57,7 @@ typedef struct {
 	const char *coord, *zone, *switch_to;
 	int64_t switch_at, quit_after;
 	bool bot;
+	const char *doctrine;          // --doctrine, for --bot
 	char journey[16][ZONE_NAME];   // "map" or a zone name, each for journey_s seconds
 	double journey_s[16];
 	int journey_len;
@@ -260,6 +261,8 @@ static void client_welcome(Client *c, ByteReader *r)
 	else mirror_init(&c->mirror, &c->world, config.max_units, config.max_projectiles);
 	controls_init(&c->controls, (FactionId){faction < FACTION_COUNT ? faction : 0}, &c->world, config.max_units);
 	c->bot = bot_create((FactionId){faction < FACTION_COUNT ? faction : 0}, config.seed ^ 0x5eedu);
+	char why[160];
+	if (c->opt.doctrine && !doctrine_parse(&c->bot.doctrine, c->opt.doctrine, why, sizeof why)) fatal("%s", why);
 	c->bot_tick = -1;
 	c->have_world = true;
 }
@@ -550,6 +553,7 @@ static int client_main(int argc, char **argv)
 		else if (!strcmp(a, "--switch-to")) c.opt.switch_to = v;
 		else if (!strcmp(a, "--switch-at")) c.opt.switch_at = atoll(v);
 		else if (!strcmp(a, "--quit-after")) c.opt.quit_after = atoll(v);
+		else if (!strcmp(a, "--doctrine")) c.opt.doctrine = v;
 		else if (!strcmp(a, "--journey")) {
 			static char steps[512];
 			snprintf(steps, sizeof steps, "%s", v);

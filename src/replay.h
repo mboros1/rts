@@ -3,7 +3,7 @@
 // tick that does not is the divergence.
 //
 // Format, all little-endian:
-//   header  "RTSR" u32 version (8), config (u64 seed, 5 x i32,
+//   header  "RTSR" u32 version (9), config (u64 seed, 5 x i32,
 //           COMBAT_TYPE_COUNT x i32 spawn weights, u32 economy, u32 bases),
 //           u32 snapshot length, snapshot (sim_save; empty: from the config)
 //

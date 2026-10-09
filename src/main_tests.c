@@ -776,6 +776,64 @@ static void test_fog(void)
 	arena_destroy(&a);
 }
 
+// Siege: fires at what's far (if something of ours sees it: it sees less
+// than its own minimum range), never at what's close.
+static void test_siege(void)
+{
+	SimConfig c = sim_config_default();
+	c.initial_units = c.population = 0;
+	Command cmds[3] = {
+		{.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_SIEGE, .amount = 2, .target = {100, 100}, .radius = 0},
+		{.faction = {1}, .kind = COMMAND_SPAWN, .unit_type = UNIT_TANK, .amount = 1, .target = {120, 100}, .radius = 0},
+		{.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_SCOUT, .amount = 1, .target = {150, 100}, .radius = 0},
+	};
+	for (int far = 0; far < 2; far++) {
+		Sim sim;
+		sim_init(&sim, c);
+		cmds[1].target = far ? v2(200, 100) : v2(120, 100);
+		sim_step(&sim, cmds, 3);
+		for (int t = 0; t < 400; t++) sim_step(&sim, nullptr, 0);
+		int64_t fired = sim.factions[0].stats.shots_fired;
+		CHECK(far ? fired > 0 : fired == 0);
+		sim_destroy(&sim);
+	}
+}
+
+// Doctrines: presets by name, any field over them, nonsense refused; scripts
+// and world files carry them to the bots.
+static void test_doctrine(void)
+{
+	char err[160];
+	Doctrine d;
+	CHECK(doctrine_parse(&d, "turtle", err, sizeof err) && d.entrench && d.mix[UNIT_SIEGE] == 1 && d.army_cap == 400);
+	CHECK(doctrine_parse(&d, "rush army_cap=120 raider=3 siege=1 crew_builder=engineer hunt=off", err, sizeof err));
+	CHECK(d.army_cap == 120 && d.mix[UNIT_SIEGE] == 1 && d.mix[UNIT_RAIDER] == 3 && d.crew_builder == UNIT_ENGINEER && !d.hunt);
+	const char *bad[] = {"", "blitz", "rush army_cap", "rush army_cap=-3", "rush speed=9", "rush raider=0 tank=0",
+	                     "rush hunt=maybe", "rush crew_builder=tank", "rush crew_builders=4 crew_escort=6",
+	                     "turtle raider=3 tank=3"};
+	for (int k = 0; k < (int)countof(bad); k++) CHECK(!doctrine_parse(&d, bad[k], err, sizeof err));
+
+	Arena a = arena_create("doctrine", 16 << 20);
+	const char *text = "scenario economy\ndoctrine red raider transporters=2\n";
+	Script sc;
+	CHECK(script_parse(&sc, &a, (Str){text, (ptrdiff_t)strlen(text)}, "t.script", err, sizeof err));
+	CHECK(!strcmp(sc.doctrine[0].name, "balanced") && !strcmp(sc.doctrine[1].name, "raider")
+	      && sc.doctrine[1].transporters == 2 && sc.doctrine[1].raids);
+	ScriptRun run;
+	script_run_init(&run, &sc, &a, nullptr);
+	CHECK(run.bots[1].doctrine.transporters == 2 && !strcmp(run.bots[0].doctrine.name, "balanced"));
+	const char *nonsense = "scenario economy\ndoctrine red blitz\n";
+	CHECK(!script_parse(&sc, &a, (Str){nonsense, (ptrdiff_t)strlen(nonsense)}, "t.script", err, sizeof err));
+
+	const char *wt = "zone west 0.2 0.5 home blue\nzone mid 0.5 0.5\nzone east 0.8 0.5 home red\n"
+	                 "doctrine red turtle\ndoctrine red in mid siege garrison=5\n";
+	World w;
+	CHECK(world_parse(&w, (Str){wt, (ptrdiff_t)strlen(wt)}, "t.world", err, sizeof err));
+	CHECK(!strcmp(world_doctrine(&w, 0, 1), "turtle") && !strcmp(world_doctrine(&w, 1, 1), "siege garrison=5")
+	      && world_doctrine(&w, 2, 0)[0] == 0);
+	arena_destroy(&a);
+}
+
 // Transporters under the faction split: sends, relays and arrivals are all
 // faction state, so a client fed only its stream still matches.
 //   - a paired send of tanks leaves after its 10 s charge, paying 30 a unit;
@@ -1075,6 +1133,8 @@ static const Test tests[] = {
 	{"ledger", test_ledger},
 	{"transporters", test_transporters},
 	{"fog", test_fog},
+	{"doctrine", test_doctrine},
+	{"siege", test_siege},
 	{"snapshot", test_snapshot},
 	{"entrench", test_entrench},
 };
