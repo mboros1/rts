@@ -19,7 +19,8 @@
 //   (Enter: yourself).
 //   H then a player's number: give the selection to that teammate. With only
 //   factories selected, it points their output there instead (shift+H gives
-//   the factories themselves).
+//   the factories themselves). With nothing selected, it gives them a quarter
+//   of your metal and energy (as much as they have room for).
 //
 // You select and order only your own units; teammates' are drawn in their
 // own shades of the side's colour.
@@ -68,7 +69,7 @@ typedef struct {
 	bool sending;           // T pressed: waiting for a zone's number
 	int landing_for;        // an unpaired send's zone, waiting for a click; -1
 	int send_for;           // a paired send's zone, waiting for who it's for; -1
-	int giving;             // H pressed: 1 give, 2 output, 3 give factories too; 0 not
+	int giving;             // H pressed: 1 give, 2 output, 3 give factories too, 4 resources; 0 not
 	SendTargets targets;    // set by the client each frame
 } Controls;
 

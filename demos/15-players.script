@@ -11,10 +11,10 @@ camera 170,256 260
 at 60 select blue factory as plant
 at 61 output plant to 1
 
-# Observed: each player keeps its own base (one factory each); at 7200
-# blue.0 has made no army of its own (its factory's 12 raiders and tanks
-# went to blue.1, who has 29 units), blue.2 has 22, red 35; blue made 93
-# units, red 77.
+# Observed (since spike 14, each player with their own economy): each player
+# keeps its own base; at 7200 blue.0 has made no army of its own (its
+# factory's raiders and tanks went to blue.1, who has 82 units), blue.2 has
+# 59; blue's three economies made 158 units, red's one 37.
 at 3600 expect blue.0 factories >= 1
 at 3600 expect blue.1 factories >= 1
 at 3600 expect blue.2 factories >= 1
@@ -24,4 +24,4 @@ at 7200 expect blue.1 raiders >= 4
 at 7200 expect blue.1 units >= 15
 at 7200 expect blue.2 units >= 10
 at 7200 expect blue spawned >= 60
-at 7200 expect red spawned >= 40
+at 7200 expect red spawned >= 25

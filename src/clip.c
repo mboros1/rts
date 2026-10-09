@@ -270,6 +270,24 @@ static const char *caption(const char *name, const Sample *s)
 	                  s->units[0], s->units[1], s->shells);
 }
 
+// A team's economies, one line a player in their colour, above the caption:
+// only for sides of more than one player (a lone player's clips stay as they were).
+static void draw_economies(const Sim *sim, int rh)
+{
+	if (!sim->config.economy) return;
+	int y = rh - 30 * SUPERSAMPLE;
+	for (int f = FACTION_COUNT - 1; f >= 0; f--) {
+		if (sim->config.players[f] < 2) continue;
+		for (int p = sim->config.players[f] - 1; p >= 0; p--) {
+			const Economy *e = &sim->factions[f].economy[p];
+			y -= 22 * SUPERSAMPLE;
+			DrawText(TextFormat("%s.%d   metal %4.0f (+%.0f)   energy %5.0f (+%.0f)%s", f ? "red" : "blue", p, e->metal,
+			                    e->metal_income, e->energy, e->energy_income, e->rate < 0.99f ? "   stalled" : ""),
+			         16 * SUPERSAMPLE, y, 18 * SUPERSAMPLE, render_player_color(f, (PlayerSlot){(uint8_t)p}));
+		}
+	}
+}
+
 // The largest size up to `size` at which text fits in 92% of the width.
 static int fit_text(const char *text, int size, int width)
 {
@@ -450,6 +468,7 @@ int clip_run(const ClipRequest *req)
 		EndMode3D();
 		DrawText(caption(name, &now), 16 * SUPERSAMPLE, rh - 30 * SUPERSAMPLE, 18 * SUPERSAMPLE,
 		         (Color){230, 230, 230, 200});
+		draw_economies(&sim, rh);
 		if (title[0]) draw_title_card(title, about, req->label, (sim.tick.v - from) / speed, rw, rh);
 		if (sample) samples[out.taken] = now;
 		out_end(&out, sample, TextFormat("t%lld  %td v %td  shells %td", (long long)now.tick,

@@ -580,13 +580,15 @@ static void test_economy(void)
 		uint64_t owned[FACTION_COUNT];
 		for (int k = 0; k < FACTION_COUNT; k++) {
 			const Faction *f = &server.factions[k];
-			const Economy *e = &f->economy;
-			bounded = bounded && e->metal >= 0.0f && e->metal <= e->metal_cap && e->energy >= 0.0f
-			       && e->energy <= e->energy_cap && e->rate >= 0.0f && e->rate <= 1.0f;
-			owned[k] = e->spots;
+			for (int p = 0; p < MAX_PLAYERS; p++) {
+				const Economy *e = &f->economy[p];
+				bounded = bounded && e->metal >= 0.0f && e->metal <= e->metal_cap && e->energy >= 0.0f
+				       && e->energy <= e->energy_cap && e->rate >= 0.0f && e->rate <= 1.0f;
+			}
+			owned[k] = f->spots;
 			// Every owned spot has this faction's finished extractor on it.
 			for (int32_t sp = 0; sp < server.spots.count; sp++) {
-				if (!(e->spots >> sp & 1)) continue;
+				if (!(f->spots >> sp & 1)) continue;
 				bool found = false;
 				for (ptrdiff_t i = 0; i < f->units.count && !found; i++)
 					found = f->units.type[i] == UNIT_EXTRACTOR && f->units.progress[i] >= 1.0f
@@ -1094,10 +1096,10 @@ static void test_entrench(void)
 	float metal_before = 0.0f, metal_after = 0.0f;
 	while (sim.tick.v < 840) {
 		arena_reset(&tick);
-		if (sim.tick.v == 2) metal_before = sim.factions[0].economy.metal; // before the order
+		if (sim.tick.v == 2) metal_before = sim.factions[0].economy[0].metal; // before the order
 		if (sim.tick.v == 3) fired_at_start = sim.factions[0].stats.shots_fired;
 		if (sim.tick.v == 170) fired_digging = sim.factions[0].stats.shots_fired;
-		if (sim.tick.v == 200) metal_after = sim.factions[0].economy.metal;
+		if (sim.tick.v == 200) metal_after = sim.factions[0].economy[0].metal;
 		ptrdiff_t n = script_tick(&run, &sim, &tick, cmds, countof(cmds));
 		sim_step(&sim, cmds, n);
 	}
@@ -1111,6 +1113,62 @@ static void test_entrench(void)
 	sim_destroy(&sim);
 	arena_destroy(&tick);
 	arena_destroy(&a);
+}
+
+// Each player's economy: income to the earner, past storage to teammates;
+// each pays for their own (builders, factories) and stalls alone; shares
+// move only what the giver has and the taker has room for.
+static void test_economies(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.bases = 1;              // blue: a factory and two engineers for each player
+	c.players[0] = 2;
+	Sim sim;
+	sim_init(&sim, c);
+	Faction *f = &sim.factions[0];
+	Economy *e0 = &f->economy[0], *e1 = &f->economy[1];
+	Units *u = &f->units;
+	// Player 0 is full of metal: its income spills to player 1.
+	e0->metal = e0->metal_cap;
+	float before = e1->metal;
+	sim_step(&sim, nullptr, 0);
+	CHECK(e0->metal == e0->metal_cap);
+	float base = 1.0f * SIM_DT;   // BASE_METAL_INCOME, a tick of it
+	CHECK(e1->metal > before + 2.0f * base - 1e-3f && e1->metal < before + 2.0f * base + 1e-3f);
+	// Shares: what's asked, up to what the giver has and the taker's room.
+	Command share = share_command((FactionId){0}, (PlayerSlot){1}, (PlayerSlot){0}, 100.0f, 0.0f);
+	before = e1->metal;
+	sim_step(&sim, &share, 1);    // 0 is full: nothing moves (but its income spills)
+	CHECK(e1->metal >= before);
+	e0->metal = 0.0f;
+	before = e1->metal;
+	share = share_command((FactionId){0}, (PlayerSlot){1}, (PlayerSlot){0}, 100.0f, 1e9f);
+	sim_step(&sim, &share, 1);
+	CHECK(e0->metal > 99.0f && e0->metal < 101.0f && e1->metal < before - 99.0f);
+	// All the energy 1 had, or as much as 0 had room for.
+	CHECK(e0->energy <= e0->energy_cap && (e0->energy == e0->energy_cap || e1->energy < 2.0f));
+	// Each player's factory makes raiders; player 0 is broke and stalls, 1 doesn't.
+	ptrdiff_t fac[2] = {-1, -1};
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->type[i] == UNIT_FACTORY) fac[u->owner[i].v] = i;
+	CHECK(fac[0] >= 0 && fac[1] >= 0);
+	UnitHandle h[2] = {units_handle(u, fac[0]), units_handle(u, fac[1])};
+	Command produce[2];
+	for (int p = 0; p < 2; p++)
+		produce[p] = (Command){.faction = {0}, .player = {(uint8_t)p}, .kind = COMMAND_PRODUCE, .count = 1,
+		                       .units = &h[p], .unit_type = UNIT_RAIDER, .amount = 1};
+	e0->metal = 0.0f;
+	e1->metal = 500.0f;
+	e0->energy = e1->energy = 3000.0f;   // power for both: only metal differs
+	sim_step(&sim, produce, 2);
+	for (int t = 0; t < 30; t++) sim_step(&sim, nullptr, 0);
+	float work0 = u->work[units_find(u, h[0])], work1 = u->work[units_find(u, h[1])];
+	CHECK(work1 > 0.04f);              // a second of a 4 s raider: about a quarter
+	CHECK(work0 < 0.25f * work1);      // only player 0's trickle of metal
+	CHECK(e0->rate < 0.5f && e1->rate == 1.0f);
+	CHECK(e1->metal_spent > 0.0f);     // the factory's owner pays
+	sim_destroy(&sim);
 }
 
 // Players: every unit has an owner and only the owner's orders move it;
@@ -1251,6 +1309,7 @@ static const Test tests[] = {
 	{"snapshot", test_snapshot},
 	{"entrench", test_entrench},
 	{"ownership", test_ownership},
+	{"economies", test_economies},
 };
 
 // tests            run all, in order

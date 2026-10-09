@@ -34,6 +34,8 @@
 //   at 40  produce plant raider 2 repeat    # factories: queue N (0 clears)
 //   at 55  give column to 1           # the units now belong to player 1 of their side
 //   at 55  output plant to 1          # factories: what they make goes to player 1
+//   at 56  give blue.0 metal 300 to 1 # resources (metal or energy), as much as
+//                                     #   blue.0 has and player 1 has room for
 //   at 60  send army to gamma for 2   # they arrive belonging to player 2
 //   at 70  entrench line              # combat units dig in as turrets (paid, takes time);
 //   at 90  mobilize line              #   mobilize turns entrenched turrets back
@@ -63,6 +65,7 @@ typedef enum : uint8_t {
 	ACTION_SPAWN,
 	ACTION_BOT,
 	ACTION_EXPECT,
+	ACTION_SHARE,           // resources from a player to a teammate
 } ActionKind;
 
 typedef enum : uint8_t {
@@ -92,6 +95,7 @@ typedef struct {
 	int32_t type;           // select (-1 any), spawn
 	bool area;              // select: within radius of at
 	float radius;           // select area, spawn radius
+	float metal, energy;    // share: how much
 	V2 at;                  // select area centre, spawn point, order target
 	int32_t limit;          // select max (0 for all), spawn amount
 	CommandKind command;    // order; build and produce use type and limit

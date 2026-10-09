@@ -324,11 +324,15 @@ typedef struct {
 	int64_t units_arrived;
 } FactionStats;
 
-// A faction's resources. Income and spending stream: each tick builders ask
-// for what their work costs. If the store can't cover a resource, everyone
-// using it slows by the same factor (a stall) rather than some stopping, and
-// a job slows only for resources it uses: a generator, needing no energy,
-// still gets built in an energy stall.
+// A player's resources in a zone. Income and spending stream: each tick a
+// player's builders ask for what their work costs. If the store can't cover
+// a resource, every job of that player's using it slows by the same factor
+// (a stall) rather than some stopping, and a job slows only for resources it
+// uses: a generator, needing no energy, still gets built in an energy stall.
+// Each player pays for their own: a structure by whoever's builder works on
+// it, a factory's units by the factory's owner (whoever they're for), a
+// transporter's charge by its owner, a transform by the unit's owner.
+// Income past a player's storage spills to teammates with room.
 typedef struct {
 	float metal, energy;
 	float metal_cap, energy_cap;
@@ -336,7 +340,6 @@ typedef struct {
 	float metal_spent, energy_spent;    // last tick, per second
 	float metal_wanted, energy_wanted;  // last tick, per second: before stalls
 	float rate;                         // last tick's worst stall factor, 0..1
-	uint64_t spots;                     // metal spots it extracts from (an effect)
 } Economy;
 
 // Metal spots: shared map data. An extractor only earns on a spot its
@@ -367,7 +370,8 @@ typedef struct {
 	Units units;
 	Projectiles incoming;
 	Perception seen;           // its enemies, as it perceives them
-	Economy economy;
+	Economy economy[MAX_PLAYERS]; // each player's; those past config.players stay as they started
+	uint64_t spots;            // metal spots it extracts from (an effect)
 	EnemyView view;            // built from `seen` each tick, in scratch
 	Departure *departures;     // left through transporters this tick (in scratch)
 	ptrdiff_t departure_count;
@@ -395,6 +399,7 @@ typedef enum : uint8_t {
 	COMMAND_MOBILIZE,   // these entrenched turrets become the units they were
 	COMMAND_GIVE,       // these units now belong to player `to`
 	COMMAND_OUTPUT,     // these factories' units go to player `to` from now on
+	COMMAND_SHARE,      // resources to player `to`: see share_command
 	COMMAND_KIND_COUNT,
 } CommandKind;
 
@@ -464,6 +469,15 @@ typedef struct {
 	uint8_t flags;
 	Route route;        // SEND, ARRIVE: hops after the next
 } Command;
+
+// A share: `metal` and `energy` from the player to `to`, at once, as much
+// as they have and `to` has room for. The amounts travel in the target.
+static inline Command share_command(FactionId f, PlayerSlot from, PlayerSlot to, float metal, float energy)
+{
+	return (Command){.faction = f, .player = from, .to = to, .kind = COMMAND_SHARE, .target = {metal, energy}};
+}
+static inline float share_metal(const Command *c) { return c->target.x; }
+static inline float share_energy(const Command *c) { return c->target.z; }
 
 typedef struct {
 	SimConfig config;

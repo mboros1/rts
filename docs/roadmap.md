@@ -546,6 +546,41 @@ Done. A side is a team of players, each with units of their own.
   ask for or answer anything: teammates' bots only share a map and stay out
   of each other's way.
 
+## Spike 14 results (2026-10-09)
+
+Done. Each player has their own economy in each zone.
+
+- **Per player**: metal, energy, storage, income and stalls. Extractors and
+  generators earn for their owner (metal spots stay the side's). Each player
+  pays for their own: a structure by whoever's builder works on it (helping
+  a teammate's build costs you), a factory's units by the factory's owner
+  (whoever they're for), a transporter's charge by its owner, a transform by
+  the unit's owner. A broke player stalls alone. For now every player gets
+  the start resources, the base trickle and the same storage in every zone
+  (a commander unit replaces that later).
+- **Overflow**: income past a player's storage spills in equal parts to
+  teammates in the zone with room; past everyone's room it's lost.
+- **Giving resources**: a share moves metal and energy to a teammate at once,
+  as much as the giver has and the taker has room for. Scripts:
+  `give blue.0 metal 400 to 1`; the client: H with nothing selected, then a
+  player's number, gives a quarter of your metal and energy (a stopgap).
+- **Bots** play their own economy; spike 13's even share of the side's is
+  gone. That was what kept team sides at home: with an economy each, the
+  team world's bots take the middle again within six game minutes.
+- **Clips** of a side with more than one player show each player's metal and
+  energy, in their colour (one-player clips are unchanged).
+- **Evidence**: `test_economies` (overflow to a teammate, shares capped by
+  what's had and the room, a broke player stalling alone while a teammate's
+  factory runs, the factory's owner paying). Demo 16: two against two, blue.0
+  feeding blue.1 400 metal every 20 s (406 -> 7 and 430 -> 830 at the
+  first); blue.1 ends with 46 units to blue.0's 30, and red, stalled on metal
+  and not sharing, is down to 9. Demo 15 is re-rendered: three economies
+  against one now make 158 units to 37. arm64 and x86-64 agree.
+- **Formats**: replay v11, wire v8, zone state v5.
+- **Not yet**: the share key gives a fixed quarter; nobody has played it by
+  hand. Bots never share. After the land grab the team world settles into
+  the old standoff (fronts of 300 against 460 that never attack).
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

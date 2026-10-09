@@ -174,27 +174,6 @@ static bool own_transporter(const Bot *bot, const Units *u, bool finished_only)
 }
 
 
-// The economy as this bot plans with it: the side's is shared by its players
-// (until each has their own), so each plans with an even share of it, as if
-// playing alone on that much.
-static Economy share_of(const Sim *sim, FactionId f)
-{
-	Economy e = sim->factions[f.v].economy;
-	float n = (float)sim->config.players[f.v];
-	if (n <= 1.0f) return e;
-	e.metal /= n;
-	e.energy /= n;
-	e.metal_cap /= n;
-	e.energy_cap /= n;
-	e.metal_income /= n;
-	e.energy_income /= n;
-	e.metal_spent /= n;
-	e.energy_spent /= n;
-	e.metal_wanted /= n;
-	e.energy_wanted /= n;
-	return e;
-}
-
 // An economy, kept simply: factories cycle a mix of units (with engineers
 // while there are too few); idle engineers take the most useful job.
 static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *count, ptrdiff_t cap)
@@ -202,7 +181,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	FactionId f = bot->faction;
 	const Faction *me = &sim->factions[f.v];
 	const Units *u = &me->units;
-	const Economy share = share_of(sim, f), *e = &share;
+	const Economy *e = &me->economy[bot->player.v];
 	const Doctrine *d = &bot->doctrine;
 	int engineers = 0, factories = 0, army = 0, scouts = 0, sappers = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
@@ -261,7 +240,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 
 	// Spots we hold or stand on or are walking to, and sites we're walking to:
 	// teammates' too, so two players never race for one.
-	uint64_t taken = e->spots;
+	uint64_t taken = me->spots;
 	Promised promised = {0};
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		V2 at = v2(u->px[i], u->pz[i]);
@@ -367,7 +346,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	FactionId f = bot->faction;
 	const Faction *me = &sim->factions[f.v];
 	const Units *u = &me->units;
-	const Economy share = share_of(sim, f), *e = &share;
+	const Economy *e = &me->economy[bot->player.v];
 	int here = w->here;
 	bool sending = false;
 	int32_t idle_army = 0, idle_builders = 0, idle_crew = 0, idle_raiders = 0, scouts = 0, turrets = 0;

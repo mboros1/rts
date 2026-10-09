@@ -683,6 +683,22 @@ static void apply_give(Faction *f, const Command *c)
 	}
 }
 
+// A share: as much of what was asked as the giver has and the taker has room for.
+static void apply_share(Faction *f, const Sim *sim, const Command *c)
+{
+	int players = sim->config.players[f->id.v];
+	if (!sim->config.economy || c->player.v >= players || c->to.v >= players || player_eq(c->player, c->to)) return;
+	float metal = share_metal(c), energy = share_energy(c);
+	if (!(metal >= 0.0f && energy >= 0.0f)) return; // and not NaN
+	Economy *from = &f->economy[c->player.v], *to = &f->economy[c->to.v];
+	metal = f_min(f_min(metal, from->metal), to->metal_cap - to->metal);
+	energy = f_min(f_min(energy, from->energy), to->energy_cap - to->energy);
+	from->metal -= metal;
+	to->metal += metal;
+	from->energy -= energy;
+	to->energy += energy;
+}
+
 // Orders keep the group's shape: each unit aims at the target plus its offset
 // from the group's centre, squeezed so the group doesn't stay spread out.
 static void apply_command(Faction *f, const Sim *sim, const Command *c)
@@ -712,6 +728,10 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 	}
 	if (c->kind == COMMAND_GIVE || c->kind == COMMAND_OUTPUT) {
 		apply_give(f, c);
+		return;
+	}
+	if (c->kind == COMMAND_SHARE) {
+		apply_share(f, sim, c);
 		return;
 	}
 	if (c->kind == COMMAND_BUILD && !unit_is_structure(c->unit_type)) return;
@@ -1153,29 +1173,71 @@ static ptrdiff_t waiting_batch(const Units *u, ptrdiff_t g, int32_t *out, bool *
 	return n;
 }
 
-// Income, then every builder's work at one shared rate the store can pay for.
+// What overflowed players' stores this tick goes, in equal parts, to
+// teammates with room; what's left past everyone's room is lost.
+static void spill(float *store[], const float cap[], int players, float excess)
+{
+	for (int pass = 0; pass < 2 && excess > 0.0f; pass++) {
+		int room = 0;
+		for (int p = 0; p < players; p++) room += *store[p] < cap[p];
+		if (room == 0) return;
+		float each = excess / (float)room;
+		for (int p = 0; p < players; p++) {
+			float take = f_min(each, cap[p] - *store[p]);
+			if (take <= 0.0f) continue;
+			*store[p] += take;
+			excess -= take;
+		}
+	}
+}
+
+// Each player's income, then each player's jobs at the rate that player's
+// store can pay for.
 static void run_economy(Faction *f, const Sim *sim)
 {
-	Economy *e = &f->economy;
 	Units *u = &f->units;
-	float income_m = BASE_METAL_INCOME, income_e = BASE_ENERGY_INCOME;
+	int players = sim->config.players[f->id.v];
+	float income_m[MAX_PLAYERS], income_e[MAX_PLAYERS];
+	for (int p = 0; p < players; p++) {
+		income_m[p] = BASE_METAL_INCOME;
+		income_e[p] = BASE_ENERGY_INCOME;
+	}
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (u->progress[i] < 1.0f) continue;
 		const UnitDef *def = &unit_defs[u->type[i]];
-		income_e += def->energy_income;
+		int o = u->owner[i].v;
+		income_e[o] += def->energy_income;
 		if (def->metal_income > 0.0f) {
 			int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
-			if (k >= 0 && (e->spots >> k & 1)) income_m += def->metal_income;
+			if (k >= 0 && (f->spots >> k & 1)) income_m[o] += def->metal_income;
 		}
 	}
-	e->metal = f_min(e->metal + income_m * SIM_DT, e->metal_cap);
-	e->energy = f_min(e->energy + income_e * SIM_DT, e->energy_cap);
-	e->metal_income = income_m;
-	e->energy_income = income_e;
+	float *metal[MAX_PLAYERS], *energy[MAX_PLAYERS], metal_cap[MAX_PLAYERS], energy_cap[MAX_PLAYERS];
+	float over_m = 0.0f, over_e = 0.0f;
+	for (int p = 0; p < players; p++) {
+		Economy *e = &f->economy[p];
+		e->metal += income_m[p] * SIM_DT;
+		e->energy += income_e[p] * SIM_DT;
+		over_m += f_max(0.0f, e->metal - e->metal_cap);
+		over_e += f_max(0.0f, e->energy - e->energy_cap);
+		e->metal = f_min(e->metal, e->metal_cap);
+		e->energy = f_min(e->energy, e->energy_cap);
+		e->metal_income = income_m[p];
+		e->energy_income = income_e[p];
+		metal[p] = &e->metal;
+		energy[p] = &e->energy;
+		metal_cap[p] = e->metal_cap;
+		energy_cap[p] = e->energy_cap;
+	}
+	spill(metal, metal_cap, players, over_m);
+	spill(energy, energy_cap, players, over_e);
 
+	// Jobs, each paid for by its payer.
 	Job *jobs = PUSH(&f->scratch, Job, u->count);
+	uint8_t *payer = PUSH(&f->scratch, uint8_t, u->count > 0 ? u->count : 1);
 	ptrdiff_t n = 0;
-	float want_m = 0.0f, want_e = 0.0f;
+	float want_m[MAX_PLAYERS] = {0}, want_e[MAX_PLAYERS] = {0};
+	bool busy[MAX_PLAYERS] = {0};
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		Job j = {(int32_t)i, -1, UNIT_RAIDER, 0.0f};
 		if (unit_is_builder(u->type[i]) && u->order[i] == ORDER_BUILD) {
@@ -1190,13 +1252,16 @@ static void run_economy(Faction *f, const Sim *sim)
 		} else {
 			continue;
 		}
+		int p = u->owner[i].v;
 		const UnitDef *def = &unit_defs[j.type];
-		want_m += def->metal_cost * j.work / def->build_time;
-		want_e += def->energy_cost * j.work / def->build_time;
+		want_m[p] += def->metal_cost * j.work / def->build_time;
+		want_e[p] += def->energy_cost * j.work / def->build_time;
+		busy[p] = true;
+		payer[n] = (uint8_t)p;
 		jobs[n++] = j;
 	}
-	// Transporters charge on energy for the batch waiting at them, like a
-	// job that only costs energy.
+	// Transporters charge on their owner's energy for the batch waiting at
+	// them, like a job that only costs energy.
 	float *charge_step = PUSH(&f->scratch, float, u->count > 0 ? u->count : 1);
 	float *charge_cost = PUSH(&f->scratch, float, u->count > 0 ? u->count : 1);
 	for (ptrdiff_t i = 0; i < u->count; i++) {
@@ -1206,29 +1271,34 @@ static void run_economy(Faction *f, const Sim *sim)
 		if (waiting == 0) continue;
 		charge_step[i] = SIM_DT / (unpaired ? UNPAIRED_CHARGE : PAIRED_CHARGE);
 		charge_cost[i] = unpaired ? UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER * (float)waiting : PAIRED_ENERGY * (float)waiting;
-		want_e += charge_cost[i] * charge_step[i];
+		want_e[u->owner[i].v] += charge_cost[i] * charge_step[i];
 	}
-	// Transforms, at their own time and price.
+	// Transforms, at their own time and price, on the unit's owner.
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (u->order[i] != ORDER_TRANSFORM) continue;
 		bool dig_in = unit_is_combat(u->type[i]);
 		float step = SIM_DT / (dig_in ? ENTRENCH_TIME : MOBILIZE_TIME);
-		want_m += (dig_in ? ENTRENCH_METAL : MOBILIZE_METAL) * step;
-		want_e += (dig_in ? ENTRENCH_ENERGY : MOBILIZE_ENERGY) * step;
+		want_m[u->owner[i].v] += (dig_in ? ENTRENCH_METAL : MOBILIZE_METAL) * step;
+		want_e[u->owner[i].v] += (dig_in ? ENTRENCH_ENERGY : MOBILIZE_ENERGY) * step;
 	}
-	float rate_m = want_m > e->metal ? e->metal / want_m : 1.0f;
-	float rate_e = want_e > e->energy ? e->energy / want_e : 1.0f;
-	e->rate = n ? f_min(rate_m, rate_e) : 1.0f;
-	e->metal_wanted = want_m / SIM_DT;
-	e->energy_wanted = want_e / SIM_DT;
+	float rate_m[MAX_PLAYERS], rate_e[MAX_PLAYERS];
+	for (int p = 0; p < players; p++) {
+		Economy *e = &f->economy[p];
+		rate_m[p] = want_m[p] > e->metal ? e->metal / want_m[p] : 1.0f;
+		rate_e[p] = want_e[p] > e->energy ? e->energy / want_e[p] : 1.0f;
+		e->rate = busy[p] ? f_min(rate_m[p], rate_e[p]) : 1.0f;
+		e->metal_wanted = want_m[p] / SIM_DT;
+		e->energy_wanted = want_e[p] / SIM_DT;
+	}
 
-	float spent_m = 0.0f, spent_e = 0.0f;
+	float spent_m[MAX_PLAYERS] = {0}, spent_e[MAX_PLAYERS] = {0};
 	for (ptrdiff_t k = 0; k < n; k++) {
 		const Job *j = &jobs[k];
+		int p = payer[k];
 		const UnitDef *def = &unit_defs[j->type];
 		float rate = 1.0f;
-		if (def->metal_cost > 0.0f) rate = f_min(rate, rate_m);
-		if (def->energy_cost > 0.0f) rate = f_min(rate, rate_e);
+		if (def->metal_cost > 0.0f) rate = f_min(rate, rate_m[p]);
+		if (def->energy_cost > 0.0f) rate = f_min(rate, rate_e[p]);
 		float step = j->work * rate / def->build_time;
 		if (j->target >= 0) {
 			// Never past done, and never paying for more than was built.
@@ -1250,29 +1320,34 @@ static void run_economy(Faction *f, const Sim *sim)
 				factory_release(f, sim, j->builder, j->type);
 			}
 		}
-		spent_m += def->metal_cost * step;
-		spent_e += def->energy_cost * step;
+		spent_m[p] += def->metal_cost * step;
+		spent_e[p] += def->energy_cost * step;
 	}
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (u->order[i] != ORDER_TRANSFORM) continue;
+		int p = u->owner[i].v;
 		bool dig_in = unit_is_combat(u->type[i]);
-		float rate = f_min(dig_in && ENTRENCH_METAL > 0.0f ? rate_m : 1.0f, rate_e);
+		float rate = f_min(dig_in && ENTRENCH_METAL > 0.0f ? rate_m[p] : 1.0f, rate_e[p]);
 		float step = f_min(SIM_DT / (dig_in ? ENTRENCH_TIME : MOBILIZE_TIME) * rate, 1.0f - u->work[i]);
 		u->work[i] += step;
-		spent_m += (dig_in ? ENTRENCH_METAL : MOBILIZE_METAL) * step;
-		spent_e += (dig_in ? ENTRENCH_ENERGY : MOBILIZE_ENERGY) * step;
+		spent_m[p] += (dig_in ? ENTRENCH_METAL : MOBILIZE_METAL) * step;
+		spent_e[p] += (dig_in ? ENTRENCH_ENERGY : MOBILIZE_ENERGY) * step;
 		if (u->work[i] >= 1.0f) finish_transform(u, i);
 	}
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (charge_step[i] <= 0.0f) continue;
-		float step = f_min(charge_step[i] * rate_e, 1.0f - u->work[i]);
+		int p = u->owner[i].v;
+		float step = f_min(charge_step[i] * rate_e[p], 1.0f - u->work[i]);
 		u->work[i] += step;
-		spent_e += charge_cost[i] * step;
+		spent_e[p] += charge_cost[i] * step;
 	}
-	e->metal = f_max(0.0f, e->metal - spent_m);
-	e->energy = f_max(0.0f, e->energy - spent_e);
-	e->metal_spent = spent_m / SIM_DT;
-	e->energy_spent = spent_e / SIM_DT;
+	for (int p = 0; p < players; p++) {
+		Economy *e = &f->economy[p];
+		e->metal = f_max(0.0f, e->metal - spent_m[p]);
+		e->energy = f_max(0.0f, e->energy - spent_e[p]);
+		e->metal_spent = spent_m[p] / SIM_DT;
+		e->energy_spent = spent_e[p] / SIM_DT;
+	}
 }
 
 enum { MAX_DEPARTURES = 64 };
@@ -1341,7 +1416,7 @@ static void remove_dead(Faction *f)
 static void apply_effects(Faction *f, const FactionEffects *fx, Tick tick)
 {
 	f->outbox_count = 0;
-	f->economy.spots = fx->spots;
+	f->spots = fx->spots;
 	Projectiles *p = &f->incoming;
 	for (ptrdiff_t k = 0; k < fx->arrived_count; k++) {
 		const Launch *l = &fx->arrived[k];
@@ -1497,7 +1572,8 @@ void sim_init(Sim *sim, SimConfig config)
 		f->outbox = PUSH(&sim->zone, Launch, f->outbox_cap);
 		f->scratch = arena_create(scratch_names[k], (ptrdiff_t)64 << 20);
 
-		f->economy = (Economy){START_METAL, START_ENERGY, METAL_CAP, ENERGY_CAP, .rate = 1.0f};
+		for (int pl = 0; pl < MAX_PLAYERS; pl++)
+			f->economy[pl] = (Economy){START_METAL, START_ENERGY, METAL_CAP, ENERGY_CAP, .rate = 1.0f};
 		if (config.economy) {
 			// Each player: a factory facing the middle, and two engineers
 			// beside it; the first at the base, the others above and below it
@@ -1637,11 +1713,13 @@ Hash faction_hash(const Faction *f)
 	h = hash_u64(h, (uint64_t)f->stats.launches_dropped);
 	h = hash_u64(h, (uint64_t)f->stats.units_departed);
 	h = hash_u64(h, (uint64_t)f->stats.units_arrived);
-	const Economy *e = &f->economy;
-	float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
-	              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
-	for (int k = 0; k < (int)countof(ef); k++) h = hash_f32(h, ef[k]);
-	h = hash_u64(h, e->spots);
+	for (int pl = 0; pl < MAX_PLAYERS; pl++) {
+		const Economy *e = &f->economy[pl];
+		float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
+		              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
+		for (int k = 0; k < (int)countof(ef); k++) h = hash_f32(h, ef[k]);
+	}
+	h = hash_u64(h, f->spots);
 	return hash_perception(h, &f->seen);
 }
 
@@ -1728,11 +1806,13 @@ void faction_write(const Faction *f, ByteBuf *b)
 	put64(b, (uint64_t)f->stats.launches_dropped);
 	put64(b, (uint64_t)f->stats.units_departed);
 	put64(b, (uint64_t)f->stats.units_arrived);
-	const Economy *e = &f->economy;
-	float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
-	              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
-	for (int k = 0; k < (int)countof(ef); k++) putf(b, ef[k]);
-	put64(b, e->spots);
+	for (int pl = 0; pl < MAX_PLAYERS; pl++) {
+		const Economy *e = &f->economy[pl];
+		float ef[] = {e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income,
+		              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
+		for (int k = 0; k < (int)countof(ef); k++) putf(b, ef[k]);
+	}
+	put64(b, f->spots);
 	const Perception *seen = &f->seen;
 	uint32_t live = 0;
 	for (ptrdiff_t s = 0; s < seen->cap; s++) live += seen->live[s];
@@ -1861,14 +1941,17 @@ bool faction_read(Faction *f, ByteReader *r)
 	f->stats.launches_dropped = (int64_t)get64(r);
 	f->stats.units_departed = (int64_t)get64(r);
 	f->stats.units_arrived = (int64_t)get64(r);
-	Economy *e = &f->economy;
-	float *ef[] = {&e->metal, &e->energy, &e->metal_cap, &e->energy_cap, &e->metal_income, &e->energy_income,
-	               &e->metal_spent, &e->energy_spent, &e->metal_wanted, &e->energy_wanted, &e->rate};
-	for (int k = 0; k < (int)countof(ef); k++) {
-		*ef[k] = getf(r);
-		if (!ok_float(*ef[k])) return false;
+	for (int pl = 0; pl < MAX_PLAYERS; pl++) {
+		Economy *e = &f->economy[pl];
+		float *ef[] = {&e->metal, &e->energy, &e->metal_cap, &e->energy_cap, &e->metal_income, &e->energy_income,
+		               &e->metal_spent, &e->energy_spent, &e->metal_wanted, &e->energy_wanted, &e->rate};
+		for (int k = 0; k < (int)countof(ef); k++) {
+			*ef[k] = getf(r);
+			if (!ok_float(*ef[k])) return false;
+		}
+		if (!(e->metal >= 0.0f && e->metal <= e->metal_cap && e->energy >= 0.0f && e->energy <= e->energy_cap)) return false;
 	}
-	e->spots = get64(r);
+	f->spots = get64(r);
 	Perception *seen = &f->seen;
 	memset(seen->live, 0, (size_t)seen->cap);
 	uint32_t live = get32(r);

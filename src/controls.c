@@ -175,15 +175,21 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 	}
 	if (send_input(c, sim, view, frame, out, cap, &n)) return n;
 
-	// H, then a teammate: give them the selection (or point factories at them).
-	if (IsKeyPressed(KEY_H) && c->selection_count && c->team_count > 1) {
-		c->giving = shift ? 3 : selection_only(c, sim, UNIT_FACTORY) ? 2 : 1;
+	// H, then a teammate: give them the selection (or point factories at
+	// them); with nothing selected, a quarter of your metal and energy.
+	if (IsKeyPressed(KEY_H) && c->team_count > 1) {
+		c->giving = !c->selection_count ? (sim->config.economy ? 4 : 0) : shift ? 3 : selection_only(c, sim, UNIT_FACTORY) ? 2 : 1;
 		return n;
 	}
 	if (c->giving) {
 		int p = player_key(c);
 		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->giving = 0;
-		else if (p >= 0) {
+		else if (p >= 0 && c->giving == 4) {
+			const Economy *e = &sim->factions[c->me.v].economy[c->player.v];
+			if (n < cap && p != c->player.v)
+				out[n++] = (Order){.kind = COMMAND_SHARE, .target = {0.25f * e->metal, 0.25f * e->energy}, .to = {(uint8_t)p}};
+			c->giving = 0;
+		} else if (p >= 0) {
 			CommandKind kind = c->giving == 2 ? COMMAND_OUTPUT : COMMAND_GIVE;
 			order(c, frame, out, cap, &n, (Order){.kind = kind, .to = {(uint8_t)p}});
 			c->giving = 0;
@@ -280,7 +286,7 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 	int h = GetScreenHeight(), y = h - 74;
 	DrawRectangle(0, y - 8, GetScreenWidth(), 82, (Color){0, 0, 0, 150});
 	if (sim->config.economy) {
-		const Economy *e = &sim->factions[c->me.v].economy;
+		const Economy *e = &sim->factions[c->me.v].economy[c->player.v];
 		DrawText(TextFormat("metal %.0f (+%.1f -%.1f/s)   energy %.0f (+%.0f -%.0f/s)%s", e->metal, e->metal_income,
 		                    e->metal_spent, e->energy, e->energy_income, e->energy_spent,
 		                    e->rate < 0.99f ? TextFormat("   STALL %.0f%%", e->rate * 100.0f) : ""),
@@ -333,6 +339,7 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 		used = snprintf(sel, sizeof sel, "%s",
 		                c->send_for >= 0 ? TextFormat("send to %s, for:   Enter you", z->name[c->send_for])
 		                : c->giving == 2 ? "factories make units for:"
+		                : c->giving == 4 ? "give a quarter of your metal and energy to:"
 		                                 : "give to:");
 		for (int k = 0; k < c->team_count && used < (int)sizeof sel; k++)
 			if (k != c->player.v || c->giving == 2)

@@ -240,7 +240,8 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	// Arriving comes from the coordinator, never players. Whether a send is
 	// paired is the server's to say (route_send).
 	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE || kind == COMMAND_SEND
-	            || kind == COMMAND_ENTRENCH || kind == COMMAND_MOBILIZE || kind == COMMAND_GIVE || kind == COMMAND_OUTPUT;
+	            || kind == COMMAND_ENTRENCH || kind == COMMAND_MOBILIZE || kind == COMMAND_GIVE || kind == COMMAND_OUTPUT
+	            || kind == COMMAND_SHARE;
 	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && to.v < s->sim.config.players[c->faction] && unit_type < UNIT_TYPE_COUNT
 	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : ZONE_MAX)
 	       && flags <= COMMAND_REPEAT && route_ok(route)
@@ -497,7 +498,7 @@ static void coord_service(Server *s, double now)
 //   "RTSZ" u32 version, config (wire_put_config), u64 last departure number,
 //   u32 n, n x outgoing departure, u32 m, m x u64 applied transfer, sim_save
 
-enum { ZONE_STATE_VERSION = 4 };
+enum { ZONE_STATE_VERSION = 5 };
 
 static void put_outgoing(ByteBuf *b, const Outgoing *o)
 {

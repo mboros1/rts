@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 10; // 10: players (a command's player and `to`, players per side)
+static constexpr uint32_t REPLAY_VERSION = 11; // 11: an economy per player
 
 // ---------------------------------------------------------------- writing
 

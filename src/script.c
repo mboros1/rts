@@ -296,6 +296,18 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		if (!parse_action_side(tok[1], a) || !parse_on(tok[2], &a->on)) return bad(p, "bot SIDE[.N] on|off", nullptr);
 		return true;
 	}
+	if (!strcmp(verb, "give") && n == 6) {
+		// give SIDE.N metal|energy AMOUNT to M
+		if (!(a = new_action(p, tick, ACTION_SHARE, text))) return bad(p, "too many actions", nullptr);
+		if (!parse_action_side(tok[1], a)) return bad(p, "give SIDE.N metal|energy AMOUNT to PLAYER", tok[1]);
+		bool metal = !strcmp(tok[2], "metal");
+		float amount;
+		if ((!metal && strcmp(tok[2], "energy")) || !parse_f(tok[3], &amount) || amount < 0.0f || strcmp(tok[4], "to")
+		    || !parse_slot(tok[5], &a->to))
+			return bad(p, "give SIDE.N metal|energy AMOUNT to PLAYER", nullptr);
+		*(metal ? &a->metal : &a->energy) = amount;
+		return true;
+	}
 	if (!strcmp(verb, "give") || !strcmp(verb, "output")) {
 		// give GROUP to N: the group's units now belong to player N of their
 		// side. output GROUP to N: its factories make units for player N.
@@ -333,8 +345,9 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 			if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
 		} else if (!parse_action_side(tok[1], a)) {
 			return bad(p, "side is blue or red, or blue.N (groups only have: alive)", tok[1]);
-		} else if (a->player_given && a->field != FIELD_UNITS && a->field != FIELD_COUNT) {
-			return bad(p, "a player's fields are units and finished counts; the rest are the side's", tok[2]);
+		} else if (a->player_given && a->field != FIELD_UNITS && a->field != FIELD_COUNT && a->field != FIELD_METAL
+		           && a->field != FIELD_ENERGY && a->field != FIELD_METAL_INCOME && a->field != FIELD_ENERGY_INCOME) {
+			return bad(p, "a player's fields are units, finished counts and resources; the rest are the side's", tok[2]);
 		}
 		char *end;
 		a->value = strtod(tok[4], &end);
@@ -692,10 +705,18 @@ static void run_expect(ScriptRun *r, const ScriptAction *a, const Sim *sim)
 		case FIELD_FIRED: actual = (double)f->stats.shots_fired; break;
 		case FIELD_SHELLS: actual = (double)f->incoming.count; break;
 		case FIELD_SPAWNED: actual = (double)f->stats.units_spawned; break;
-		case FIELD_METAL: actual = (double)f->economy.metal; break;
-		case FIELD_ENERGY: actual = (double)f->economy.energy; break;
-		case FIELD_METAL_INCOME: actual = (double)f->economy.metal_income; break;
-		case FIELD_ENERGY_INCOME: actual = (double)f->economy.energy_income; break;
+		// A player's, or the side's: all its players' together.
+		case FIELD_METAL:
+		case FIELD_ENERGY:
+		case FIELD_METAL_INCOME:
+		case FIELD_ENERGY_INCOME:
+			for (int p = 0; p < sim->config.players[a->side.v]; p++) {
+				if (a->player_given && p != a->player.v) continue;
+				const Economy *e = &f->economy[p];
+				actual += a->field == FIELD_METAL ? e->metal : a->field == FIELD_ENERGY ? e->energy
+				        : a->field == FIELD_METAL_INCOME ? e->metal_income : e->energy_income;
+			}
+			break;
 		case FIELD_COUNT:
 			for (ptrdiff_t i = 0; i < u->count; i++)
 				actual += u->type[i] == a->type && u->progress[i] >= 1.0f
@@ -774,6 +795,9 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			break;
 		case ACTION_EXPECT:
 			run_expect(r, a, sim);
+			break;
+		case ACTION_SHARE:
+			if (n < cap) out[n++] = share_command(a->side, a->player, a->to, a->metal, a->energy);
 			break;
 		}
 	}

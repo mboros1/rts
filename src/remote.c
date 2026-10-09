@@ -106,7 +106,7 @@ Scene remote_scene(const Remote *r, const V2 base[FACTION_COUNT], Arena *arena)
 	           .economy = sim->config.economy, .spots = &sim->spots};
 	for (int k = 0; k < FACTION_COUNT; k++) s.base[k] = base[k];
 	// A player knows which spots are its own, and nothing else about them.
-	for (int k = 0; k < MAX_SPOTS; k++) s.spot_owner[k] = (int8_t)(f->economy.spots >> k & 1 ? (int)me.v : -1);
+	for (int k = 0; k < MAX_SPOTS; k++) s.spot_owner[k] = (int8_t)(f->spots >> k & 1 ? (int)me.v : -1);
 
 	const Units *u = &f->units;
 	s.units[me.v] = (SceneUnits){u->count, u->px, u->py, u->pz, u->vx, u->vz, u->type, u->dense_slot, u->progress,

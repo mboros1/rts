@@ -60,7 +60,7 @@
 #include "quant.h"
 #include "sim.h"
 
-enum { WIRE_VERSION = 7, DIGEST_EVERY = 30 };
+enum { WIRE_VERSION = 8, DIGEST_EVERY = 30 };
 static constexpr uint8_t SPECTATOR = 255;
 
 typedef enum : uint8_t {

@@ -368,7 +368,7 @@ static void client_frames(Client *c)
 static void client_send_order(Client *c, CommandKind kind, V2 target, UnitType type, int32_t amount, uint8_t flags,
                               PlayerSlot to, const UnitHandle *units, ptrdiff_t n)
 {
-	if (!c->conn.open || n == 0) return;
+	if (!c->conn.open || (n == 0 && kind != COMMAND_SHARE)) return; // a share moves resources, not units
 	arena_reset(&c->out);
 	ByteBuf b = bytebuf_make(&c->out, 24 + n * 8);
 	put8(&b, to.v);
