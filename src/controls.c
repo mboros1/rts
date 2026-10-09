@@ -207,7 +207,7 @@ static void press_build(Controls *c, const SelectionSummary *s, const BuildMenu 
 {
 	if (slot >= BUILD_ITEMS) {
 		const MenuButton *b = &m->tab[slot - BUILD_ITEMS];
-		if (b->shown && b->enabled) c->tab = slot - BUILD_ITEMS;
+		if (b->shown && b->enabled) c->tab[!m->builders] = slot - BUILD_ITEMS;
 		return;
 	}
 	const MenuButton *b = &m->item[slot];
@@ -331,7 +331,7 @@ ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const Vie
 	Layout L = layout(in->width, in->height);
 	SelectionSummary s = menu_summarize(own_units(c, sim), c->selection, c->selection_count);
 	MenuContext ctx = menu_context(c, sim);
-	BuildMenu build = menu_build(&s, c->tab);
+	BuildMenu build = menu_build(&s, c->tab[!s.builders]);
 	OrdersMenu orders = menu_orders(&s, &ctx);
 
 	// A prompt in progress takes the keys and clicks it needs.
@@ -653,7 +653,7 @@ void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, const
 	float s = L.s;
 	SelectionSummary sum = menu_summarize(own_units(c, sim), c->selection, c->selection_count);
 	MenuContext ctx = menu_context(c, sim);
-	BuildMenu build = menu_build(&sum, c->tab);
+	BuildMenu build = menu_build(&sum, c->tab[!sum.builders]);
 	OrdersMenu orders = menu_orders(&sum, &ctx);
 	bool build_keys = menu_build_open(&sum);
 

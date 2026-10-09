@@ -14,6 +14,8 @@
 //       [--keys PATH]                      a keymap (keymap.h); else config/keys.json if there is one
 //       [--input PATH [--shots DIR]]       an input script plays the controls, in a hidden
 //                                          window, taking shots (input.h)
+//         [--video PATH] [--sheet PATH]    ... recorded, and its shots on a sheet
+//         [--size WxH] [--crf N] [--title T --about A --label L] [--clipboard]
 //
 // With a coordinator and no --zone, the window opens on the strategic map
 // (map.h): click a zone to launch into it; Tab, or Esc when not placing a
@@ -68,6 +70,10 @@ typedef struct {
 	const char *keys;              // --keys: a keymap file (else config/keys.json, if there is one)
 	const char *input;             // --input: an input script (input.h) plays the controls
 	const char *shots;             // --shots: where its shots go
+	const char *video, *sheet;     // --video, --sheet: what it plays, recorded (needs --input)
+	const char *title, *about, *label; // the recording's title card
+	int video_w, video_h, crf;
+	bool clipboard;                // --clipboard: the video, when it's written
 	char journey[16][ZONE_NAME];   // "map" or a zone name, each for journey_s seconds
 	double journey_s[16];
 	int journey_len;
@@ -123,6 +129,11 @@ typedef struct {
 	InputScript script;         // --input
 	double ready_at;            // the zone's first snapshot: the script's time 0 (0: not yet)
 	RenderTexture2D target;     // --input: frames are drawn here, for shots
+	RenderTexture2D small;      // --video: a frame at the video's size, to read back
+	FILE *video;
+	int64_t video_frames;
+	Image sheet;                // --sheet: the shots, labelled
+	int sheet_taken;
 	int64_t sent[COMMAND_KIND_COUNT];
 	bool overlay;
 } Client;
@@ -585,16 +596,76 @@ static bool client_launch(Client *c, const char *zone, double now)
 
 // ---------------------------------------------------------------- input scripts
 
+// --video: frames scaled down on the GPU, read back, piped to ffmpeg; the
+// window draws at its own pace, so the video's frames follow the clock (a
+// slow frame repeats rather than speeding the video up).
+enum { VIDEO_FPS = 30 };
+
+static void client_video_open(Client *c)
+{
+	int w = c->opt.video_w ? c->opt.video_w : 960, h = c->opt.video_h ? c->opt.video_h : 540;
+	c->opt.video_w = w;
+	c->opt.video_h = h;
+	c->small = LoadRenderTexture(w, h);
+	SetTextureFilter(c->target.texture, TEXTURE_FILTER_BILINEAR);
+	if (strchr(c->opt.video, '\'')) fatal("--video: no quotes in the path");
+	const char *cmd = TextFormat("ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d -r %d -i - "
+	                             "-vf vflip -c:v libx264 -preset veryfast -crf %d -pix_fmt yuv420p -movflags +faststart '%s'",
+	                             w, h, VIDEO_FPS, c->opt.crf ? c->opt.crf : 30, c->opt.video);
+	if (!(c->video = popen(cmd, "w"))) fatal("cannot start ffmpeg");
+}
+
+static void client_video_frames(Client *c, double t)
+{
+	int64_t want = (int64_t)(t * VIDEO_FPS) + 1;
+	if (c->video_frames >= want) return;
+	BeginTextureMode(c->small);
+	DrawTexturePro(c->target.texture, (Rectangle){0, 0, 1600.0f, -900.0f},
+	               (Rectangle){0, 0, (float)c->opt.video_w, (float)c->opt.video_h}, (Vector2){0, 0}, 0.0f, WHITE);
+	EndTextureMode();
+	Image img = LoadImageFromTexture(c->small.texture);
+	for (; c->video_frames < want; c->video_frames++) fwrite(img.data, 4, (size_t)c->opt.video_w * (size_t)c->opt.video_h, c->video);
+	UnloadImage(img);
+}
+
+// The recording's title card: what it shows, for its first seconds.
+static void client_title_card(const Client *c, double t)
+{
+	if (t > 3.0) return;
+	float k = t < 2.0 ? 1.0f : (float)(3.0 - t);
+	unsigned char a = (unsigned char)(255.0f * k);
+	DrawRectangle(0, 0, 1600, 900, (Color){12, 14, 18, (unsigned char)(210.0f * k)});
+	const char *title = c->opt.title, *about = c->opt.about ? c->opt.about : "", *label = c->opt.label ? c->opt.label : "";
+	int ts = 48, as = 20;
+	while (ts > 12 && MeasureText(title, ts) > 1500) ts--;
+	while (as > 8 && MeasureText(about, as) > 1500) as--;
+	DrawText(title, (1600 - MeasureText(title, ts)) / 2, 450 - ts, ts, (Color){245, 245, 245, a});
+	DrawText(about, (1600 - MeasureText(about, as)) / 2, 462, as, (Color){200, 200, 200, a});
+	DrawText(label, (1600 - MeasureText(label, 16)) / 2, 500, 16, (Color){140, 160, 190, a});
+}
+
 // A shot or an expectation the script has due, once the frame is drawn.
-static void client_script_due(Client *c, const InputStep *due)
+static void client_script_due(Client *c, const InputStep *due, double now)
 {
 	if (!due) return;
 	if (due->kind == STEP_SHOT) {
-		if (!c->opt.shots) return;
+		if (!c->opt.shots && !c->opt.sheet) return;
 		Image frame = LoadImageFromTexture(c->target.texture);
 		ImageFlipVertical(&frame); // render textures are upside down
-		const char *path = TextFormat("%s/%s.png", c->opt.shots, due->name);
-		if (!ExportImage(frame, path)) fprintf(stderr, "client: cannot write %s\n", path);
+		if (c->opt.shots) {
+			const char *path = TextFormat("%s/%s.png", c->opt.shots, due->name);
+			if (!ExportImage(frame, path)) fprintf(stderr, "client: cannot write %s\n", path);
+		}
+		if (c->opt.sheet && c->sheet_taken < 9) {
+			// Three by three, each labelled with its name and time, as clips' sheets are.
+			ImageResize(&frame, 640, 360);
+			int x = (c->sheet_taken % 3) * 640, y = (c->sheet_taken / 3) * 360;
+			ImageDraw(&c->sheet, frame, (Rectangle){0, 0, 640, 360}, (Rectangle){(float)x, (float)y, 640, 360}, WHITE);
+			const char *label = TextFormat("%.1fs  %s", now - c->ready_at, due->name);
+			ImageDrawRectangle(&c->sheet, x, y, MeasureText(label, 20) + 12, 26, (Color){0, 0, 0, 170});
+			ImageDrawText(&c->sheet, label, x + 6, y + 3, 20, RAYWHITE);
+			c->sheet_taken++;
+		}
 		UnloadImage(frame);
 		return;
 	}
@@ -630,6 +701,7 @@ static int client_main(int argc, char **argv)
 		if (!strcmp(a, "--headless")) c.opt.headless = true, used = 1;
 		else if (!strcmp(a, "--auto-orders")) c.opt.auto_orders = true, used = 1;
 		else if (!strcmp(a, "--bot")) c.opt.bot = true, used = 1;
+		else if (!strcmp(a, "--clipboard")) c.opt.clipboard = true, used = 1;
 		else if (!v) fatal("%s needs a value", a);
 		else if (!strcmp(a, "--connect")) {
 			static char host[256];
@@ -662,6 +734,16 @@ static int client_main(int argc, char **argv)
 		else if (!strcmp(a, "--keys")) c.opt.keys = v;
 		else if (!strcmp(a, "--input")) c.opt.input = v;
 		else if (!strcmp(a, "--shots")) c.opt.shots = v;
+		else if (!strcmp(a, "--video")) c.opt.video = v;
+		else if (!strcmp(a, "--sheet")) c.opt.sheet = v;
+		else if (!strcmp(a, "--title")) c.opt.title = v;
+		else if (!strcmp(a, "--about")) c.opt.about = v;
+		else if (!strcmp(a, "--label")) c.opt.label = v;
+		else if (!strcmp(a, "--crf")) c.opt.crf = atoi(v);
+		else if (!strcmp(a, "--size")) {
+			if (sscanf(v, "%dx%d", &c.opt.video_w, &c.opt.video_h) != 2 || c.opt.video_w < 64 || c.opt.video_h < 64)
+				fatal("--size WxH");
+		}
 		else if (!strcmp(a, "--journey")) {
 			static char steps[512];
 			snprintf(steps, sizeof steps, "%s", v);
@@ -744,6 +826,9 @@ static int client_main(int argc, char **argv)
 		SetExitKey(KEY_NULL); // Esc goes to the map; close the window to quit
 		SetTargetFPS(c.opt.input ? 60 : 120);
 		if (c.opt.input) c.target = LoadRenderTexture(1600, 900);
+		if ((c.opt.video || c.opt.sheet) && !c.opt.input) fatal("--video and --sheet record an --input script's run");
+		if (c.opt.video) client_video_open(&c);
+		if (c.opt.sheet) c.sheet = GenImageColor(3 * 640, 3 * 360, BLACK);
 	}
 	for (int tries = 0; !c.on_map && !client_connect(&c); tries++) {
 		if (tries == 50) fatal("cannot connect to %s:%d", c.opt.host, c.opt.port);
@@ -871,8 +956,10 @@ static int client_main(int argc, char **argv)
 		if (c.overlay) client_overlay(&c, c.conn.open);
 		else client_banner(&c, c.conn.open);
 		if (c.opt.input) {
+			if (c.opt.title && c.ready_at > 0.0) client_title_card(&c, now - c.ready_at);
 			EndTextureMode();
-			client_script_due(&c, due);
+			client_script_due(&c, due, now);
+			if (c.video && c.ready_at > 0.0) client_video_frames(&c, now - c.ready_at);
 		}
 		EndDrawing();
 		// To the map: map, or cancel when there's nothing in progress to cancel.
@@ -906,6 +993,20 @@ static int client_main(int argc, char **argv)
 	if (c.opt.input) {
 		printf("  %d of %d expectations held\n", c.script.expects - c.script.failures, c.script.expects);
 		if (c.script.failures) status = 1;
+		if (c.video) {
+			UnloadRenderTexture(c.small);
+			if (pclose(c.video) != 0) fprintf(stderr, "client: ffmpeg failed on %s\n", c.opt.video), status = 1;
+			else printf("client: wrote %s (%lld frames)\n", c.opt.video, (long long)c.video_frames);
+			char abs[1024];
+			if (c.opt.clipboard && (!platform_absolute_path(c.opt.video, abs, sizeof abs) || !platform_clipboard_copy_file(abs)))
+				fprintf(stderr, "client: could not copy %s to the clipboard\n", c.opt.video);
+			else if (c.opt.clipboard) printf("client: %s is on the clipboard\n", abs);
+		}
+		if (c.opt.sheet) {
+			if (!ExportImage(c.sheet, c.opt.sheet)) fprintf(stderr, "client: cannot write %s\n", c.opt.sheet), status = 1;
+			else printf("client: wrote %s (%d shots)\n", c.opt.sheet, c.sheet_taken);
+			UnloadImage(c.sheet);
+		}
 		UnloadRenderTexture(c.target);
 	}
 	if (c.renderer_ready) renderer_unload(&c.renderer);

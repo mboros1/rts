@@ -99,6 +99,11 @@ same commit.
 - **Network demos** (`demos/*.sh`) are real runs over sockets, reproducible in
   outcome (their checks) rather than byte for byte; their clips re-render from
   the run's netlog.
+- **Played demos** (`demos/*.sh` with a `demos/*.input` beside them) are the
+  client played from an input script (`src/input.h`) and recorded from its
+  own window: what a player sees, panels and all. The script's expectations
+  are the demo's checks. They always play (there's nothing to re-render
+  from), so they take as long as they last: keep them short (20 s or so).
 
 ## Modules and APIs
 

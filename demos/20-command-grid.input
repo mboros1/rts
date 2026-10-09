@@ -1,0 +1,37 @@
+# Spike 17 demo, played: blue's controls, as a person uses them. After the
+# title card (3 s): select the base, look at the builders' tabs, place a
+# factory, narrow to the old factory with its tile, queue units, switch
+# repeat on, look at its logistics page, then send the engineers off.
+at 3.5 drag 450,200 1150,700            # the base: a factory and two engineers
+at 3.7 expect selected >= 3
+at 4.2 shot base                        # builders: the economy tab
+at 5.0 key Q                            # an extractor, to place
+at 5.1 move 760,330
+at 5.6 shot placing
+at 6.0 key Escape
+at 6.5 key V                            # the build tab
+at 6.8 key Q                            # a factory
+at 7.0 move 640,300
+at 7.4 shot factory-ghost
+at 7.8 click 640,300                    # placed: the engineers go to build it
+at 8.0 expect sent build == 1
+at 8.6 click 170,750                    # the factory's tile: only the factory
+at 8.8 expect selected == 1
+at 9.2 shot factory
+at 9.6 key Q                            # a raider
+at 10.0 key W shift                     # five tanks
+at 10.4 key Y                           # repeat on
+at 10.8 expect sent produce == 2
+at 11.0 expect sent repeat == 1
+at 11.4 shot queued
+at 12.0 key X                           # the logistics page: trucks
+at 12.6 shot logistics
+at 13.2 drag 450,200 1150,700
+at 13.5 click 60,750                    # the engineers' tile
+at 13.8 expect selected == 2
+at 14.2 shot engineers
+at 14.6 key M                           # move, then where
+at 15.2 click 980,360
+at 15.4 expect sent move == 1
+at 16.0 shot moving
+at 17.0 quit

@@ -79,7 +79,7 @@ typedef struct {
 	bool dragging;
 	Vector2 drag_start;
 	int placing;            // a structure type being placed, or -1
-	int tab;                // the build grid's open category (builders) or page (factories)
+	int tab[2];             // the build grid's open category (builders: 0) and page (factories: 1)
 	int aiming;             // move or fight, waiting for a click: its CommandKind, or -1
 	bool sending;           // send: waiting for a zone's number
 	int landing_for;        // an unpaired send's zone, waiting for a click; -1

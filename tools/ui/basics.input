@@ -40,5 +40,9 @@ at 4.9 expect sent repeat == 1
 at 5.0 key X                            # the logistics page
 at 5.1 shot logistics
 at 5.3 expect selected == 1
+at 5.4 drag 450,200 1150,700             # builders again: their own tab, not the factory's page
+at 5.45 key Q                            # economy's first item, still
+at 5.47 expect busy == 1
+at 5.48 key Escape
 at 5.5 key Escape                       # nothing in progress: leaves (here, quits)
 at 6.5 expect sent any == 6             # never reached if Escape left

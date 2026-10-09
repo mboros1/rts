@@ -800,6 +800,19 @@ can see and use the controls as a player does.
   And from its shots: the bottom-right placeholders' text overlapped, the
   order keys overlapped their labels, and the zone banner covered the
   minimap's place. All fixed: the banner is top right now.
+- **Played demos**: the client records what it plays (`--video`, `--sheet`
+  of the script's shots, `--title`/`--about`/`--label` for the title card,
+  `--clipboard`); a demo is a `.sh` running a zone and the client with an
+  input script beside it. Demo 20 is now one (it was a clip with `show`):
+  select the base, the builders' tabs, a factory's ghost and placing it,
+  narrowing to the old factory, queueing five tanks, repeat, the logistics
+  page, the engineers moving. It plays in 17 s and generates in 23 s (the
+  clip took 5 s); `make check` doesn't run demos, and `make demos` only
+  re-makes a stale one.
+- **Found by demo 20's sheet**: builders' categories and factories' pages
+  shared one open tab, so after a factory's logistics page the engineers'
+  grid opened on combat, empty. Each keeps its own now; the UI smoke test
+  checks it.
 - **Not yet**: a script's positions are pixels, so it depends on where the
   camera starts and units stand; good enough for the base at the start.
 
