@@ -1,6 +1,8 @@
 // Headless runner: no window, no raylib.
 //
 //   rts-headless bench  [ticks] [units]  time the sim with bots on both sides
+//   rts-headless bench-teams [ticks] [players]  an economy game, PLAYERS a side,
+//                                         all bots: time the sim and the bots apart
 //   rts-headless record PATH [ticks] [units]  run bots and record a replay
 //   rts-headless verify PATH [--partial] [--hash-at T]
 //                                         replay and compare every tick's hash;
@@ -102,6 +104,58 @@ static int cmd_bench(long ticks, long units)
 	printf("%ld ticks, %ld units per side: mean %.2f ms/tick, worst %.2f ms (budget %.1f ms)\n",
 	       ticks, units, 1e3 * total / (double)ticks, 1e3 * worst, 1e3 / SIM_HZ);
 	printf("peak %td units, %td shells in flight; final hash %016llx\n", peak_units, peak_shells,
+	       (unsigned long long)sim_hash_now(&sim).v);
+	print_summary(&sim);
+	sim_destroy(&sim);
+	return 0;
+}
+
+// A team game from the start, everyone a bot: what a full zone costs. The
+// sim's step and the bots' thinking are timed apart (bots run in the zone's
+// tick too).
+static int cmd_bench_teams(long ticks, long players)
+{
+	if (players > MAX_PLAYERS) players = MAX_PLAYERS;
+	char text[128];
+	snprintf(text, sizeof text, "scenario economy\nplayers blue %ld\nplayers red %ld\n", players, players);
+	Arena a = arena_create("bench-teams", (ptrdiff_t)64 << 20);
+	Arena tick = arena_create("bench-teams tick", (ptrdiff_t)64 << 20);
+	Script sc;
+	char err[256];
+	if (!script_parse(&sc, &a, (Str){text, (ptrdiff_t)strlen(text)}, "bench-teams", err, sizeof err)) fatal("%s", err);
+	Sim sim;
+	sim_init(&sim, sc.config);
+	ScriptRun run;
+	script_run_init(&run, &sc, &a, nullptr);
+	enum { CAP = 8192 };
+	static Command cmds[CAP];
+	double step_total = 0.0, step_worst = 0.0, bot_total = 0.0, bot_worst = 0.0;
+	ptrdiff_t peak_units = 0, most_commands = 0;
+	for (long t = 0; t < ticks; t++) {
+		arena_reset(&tick);
+		double t0 = platform_seconds();
+		ptrdiff_t n = script_tick(&run, &sim, &tick, cmds, CAP);
+		double t1 = platform_seconds();
+		sim_step(&sim, cmds, n);
+		double t2 = platform_seconds();
+		bot_total += t1 - t0;
+		step_total += t2 - t1;
+		bot_worst = t1 - t0 > bot_worst ? t1 - t0 : bot_worst;
+		step_worst = t2 - t1 > step_worst ? t2 - t1 : step_worst;
+		most_commands = n > most_commands ? n : most_commands;
+		ptrdiff_t alive = sim.factions[0].units.count + sim.factions[1].units.count;
+		if (alive > peak_units) peak_units = alive;
+		if ((t + 1) % 1800 == 0)
+			printf("minute %3ld: %5td v %5td units   step mean %.2f worst %.2f ms   bots mean %.2f worst %.2f ms\n",
+			       (t + 1) / 1800, sim.factions[0].units.count, sim.factions[1].units.count,
+			       1e3 * step_total / (double)(t + 1), 1e3 * step_worst, 1e3 * bot_total / (double)(t + 1),
+			       1e3 * bot_worst);
+	}
+	printf("%ld ticks, %ld v %ld players: step mean %.2f ms, worst %.2f ms; bots mean %.2f ms, worst %.2f ms "
+	       "(budget %.1f ms)\n",
+	       ticks, players, players, 1e3 * step_total / (double)ticks, 1e3 * step_worst, 1e3 * bot_total / (double)ticks,
+	       1e3 * bot_worst, 1e3 / SIM_HZ);
+	printf("peak %td units; most commands in a tick %td; final hash %016llx\n", peak_units, most_commands,
 	       (unsigned long long)sim_hash_now(&sim).v);
 	print_summary(&sim);
 	sim_destroy(&sim);
@@ -342,6 +396,8 @@ static int cmd_script(int count, char **paths)
 int main(int argc, char **argv)
 {
 	const char *cmd = argc > 1 ? argv[1] : "";
+	if (!strcmp(cmd, "bench-teams")) return cmd_bench_teams(parse_long(argc > 2 ? argv[2] : nullptr, 18000),
+	                                                        parse_long(argc > 3 ? argv[3] : nullptr, 8));
 	if (!strcmp(cmd, "bench")) return cmd_bench(parse_long(argc > 2 ? argv[2] : nullptr, 1800),
 	                                           parse_long(argc > 3 ? argv[3] : nullptr, 5000));
 	if (!strcmp(cmd, "record") && argc > 2)
@@ -362,6 +418,6 @@ int main(int argc, char **argv)
 	                                           parse_long(argc > 3 ? argv[3] : nullptr, 5000));
 	if (!strcmp(cmd, "wire")) return cmd_wire(parse_long(argc > 2 ? argv[2] : nullptr, 1800),
 	                                         parse_long(argc > 3 ? argv[3] : nullptr, 5000));
-	fprintf(stderr, "usage: %s bench [ticks] [units] | record PATH [ticks] [units] | verify PATH | script PATH... | wire|split [ticks] [units]\n", argv[0]);
+	fprintf(stderr, "usage: %s bench [ticks] [units] | bench-teams [ticks] [players] | record PATH [ticks] [units] | verify PATH | script PATH... | wire|split [ticks] [units]\n", argv[0]);
 	return 2;
 }

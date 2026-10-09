@@ -41,8 +41,13 @@ typedef struct {
 	ZoneStatus status;
 } Zone;
 
+// A player is online while their client keeps asking for the directory
+// (every few seconds, from anywhere: a zone or the map).
+static constexpr double ONLINE_FOR = 10.0;
+
 typedef struct {
 	Ledger ledger;
+	double seen[FACTION_COUNT][MAX_PLAYERS];  // when each player's client last asked; not logged
 	World world;                // link_count 0 without --world
 	Zone zones[COORD_MAX_ZONES];
 	int zone_count;
@@ -85,7 +90,7 @@ static void deliver(Coord *c, double now)
 	}
 }
 
-static void directory(const Coord *c, Directory *d)
+static void directory(const Coord *c, Directory *d, double now)
 {
 	*d = (Directory){.zone_count = c->zone_count, .link_count = c->world.link_count};
 	for (int k = 0; k < c->zone_count; k++) {
@@ -102,6 +107,10 @@ static void directory(const Coord *c, Directory *d)
 	memcpy(d->links, c->world.links, sizeof d->links);
 	for (int f = 0; f < FACTION_COUNT; f++) d->players[f] = c->world.zone_count ? c->world.players[f] : 1;
 	memcpy(d->player, c->ledger.player, sizeof d->player);
+	for (int f = 0; f < FACTION_COUNT; f++)
+		for (int k = 0; k < MAX_PLAYERS; k++)
+			if (c->ledger.player[f][k][0] && c->seen[f][k] > 0.0 && now - c->seen[f][k] < ONLINE_FOR)
+				d->online[f] |= (uint8_t)(1u << k);
 	// Pending transfers between zones, summed by route and side.
 	for (int32_t k = 0; k < c->ledger.transfer_count; k++) {
 		const Transfer *t = &c->ledger.transfers[k];
@@ -219,9 +228,17 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 	case COORD_DIRECTORY_ASK: {
 		// A side asking sees the map through its fog; anyone else (zones,
 		// spectators, tools) sees all of it. Nothing checks who's asking yet.
+		// [u8 faction [name]]: a player asking is a player online.
+		if (f->len > 1 && f->data[0] < FACTION_COUNT) {
+			ByteReader nr = byte_reader(f->data + 1, f->len - 1);
+			bool named = get_name(&nr, name);
+			bool leaving = named && nr.pos < nr.len && get8(&nr) == 1; // logging out
+			for (int k = 0; named && k < MAX_PLAYERS; k++)
+				if (!strcmp(c->ledger.player[f->data[0]][k], name)) c->seen[f->data[0]][k] = leaving ? 0.0 : now;
+		}
 		Directory d;
-		directory(c, &d);
-		if (f->len == 1) directory_fog(&d, f->data[0]);
+		directory(c, &d, now);
+		if (f->len >= 1) directory_fog(&d, f->data[0]);
 		arena_reset(&c->out);
 		ByteBuf b = bytebuf_make(&c->out, 8192);
 		put_directory(&b, &d);

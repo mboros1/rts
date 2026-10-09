@@ -20,8 +20,9 @@
 //
 // Each zone runs the economy scenario on its own terrain, seeded from its
 // name (DIR/live/ZONE.script); only a side's home zone starts with its base.
-// Bots play both sides; when you launch into a zone, its bot for your side
-// stands down, and takes over again when you leave.
+// Bots play every player nobody is playing. While you're logged in (on the
+// map or in any zone) your units everywhere are yours and hold where they
+// are; 30 game seconds after you log out, your bot plays them.
 //
 // In DIR/live: world.txt (the world file it was made from), coord.log and
 // ZONE.state (the persistent state), ZONE-NNN.replay (one segment per run of
@@ -183,7 +184,7 @@ static void print_status(WorldCmd *w, uint8_t viewer)
 {
 	Directory d;
 	const char *coord = fmt("127.0.0.1:%d", w->world.port);
-	if (!directory_fetch(coord, viewer, &w->arena, &d, nullptr)) {
+	if (!directory_fetch(coord, viewer, nullptr, false, &w->arena, &d, nullptr)) {
 		printf("world: the coordinator isn't answering (rts world to start it)\n");
 		return;
 	}

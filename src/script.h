@@ -36,6 +36,8 @@
 //   at 55  output plant to 1          # factories: what they make goes to player 1
 //   at 56  give blue.0 metal 300 to 1 # resources (metal or energy), as much as
 //                                     #   blue.0 has and player 1 has room for
+//   at 57  take blue.1                # blue.1 takes every unit of away teammates
+//                                     #   (a script's player is away while its bot is on)
 //   at 60  send army to gamma for 2   # they arrive belonging to player 2
 //   at 70  entrench line              # combat units dig in as turrets (paid, takes time);
 //   at 90  mobilize line              #   mobilize turns entrenched turrets back
@@ -66,6 +68,7 @@ typedef enum : uint8_t {
 	ACTION_BOT,
 	ACTION_EXPECT,
 	ACTION_SHARE,           // resources from a player to a teammate
+	ACTION_TAKE,            // a player takes away teammates' units
 } ActionKind;
 
 typedef enum : uint8_t {
@@ -142,6 +145,12 @@ typedef struct {
 	const Script *script;
 	ptrdiff_t next;
 	Bot bots[FACTION_COUNT][MAX_PLAYERS]; // each player's; those past config.players never run
+	// Who's away (bit per player), recorded as COMMAND_AI_SLOTS when it
+	// changes. A script's players are away while their bots are on; a zone
+	// server sets `away` itself, from who is logged in (presence_set).
+	bool presence_set;
+	uint8_t away[FACTION_COUNT];
+	uint8_t away_sent[FACTION_COUNT]; // what the sim was last told (it starts with everyone away)
 	UnitHandle **group_units;
 	ptrdiff_t *group_len;
 	FactionId *group_side;

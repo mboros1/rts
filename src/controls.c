@@ -175,6 +175,12 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 	}
 	if (send_input(c, sim, view, frame, out, cap, &n)) return n;
 
+	// K: take the units of teammates who are away.
+	if (IsKeyPressed(KEY_K) && c->team_count > 1 && sim->factions[c->me.v].away && n < cap) {
+		out[n++] = (Order){.kind = COMMAND_TAKE, .to = c->player};
+		return n;
+	}
+
 	// H, then a teammate: give them the selection (or point factories at
 	// them); with nothing selected, a quarter of your metal and energy.
 	if (IsKeyPressed(KEY_H) && c->team_count > 1) {
@@ -296,8 +302,10 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 	if (c->team_count > 1) {
 		int x = 14;
 		for (int k = 0; k < c->team_count; k++) {
-			const char *who = TextFormat("%d %s%s", k + 1, c->team[k] && c->team[k][0] ? c->team[k] : "(bot)",
-			                             k == c->player.v ? " (you)" : "");
+			bool away = sim->factions[c->me.v].away >> k & 1;
+			const char *who = TextFormat("%d %s%s%s", k + 1, c->team[k] && c->team[k][0] ? c->team[k] : "(bot)",
+			                             k == c->player.v ? " (you)" : "",
+			                             away && c->team[k] && c->team[k][0] ? " (away: K takes)" : "");
 			DrawText(who, x, y - 32, 18, render_player_color((int)c->me.v, (PlayerSlot){(uint8_t)k}));
 			x += MeasureText(who, 18) + 24;
 		}
@@ -348,7 +356,7 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 	}
 	DrawText(sel, 14, y + 26, 18, RAYWHITE);
 	DrawText(sim->config.economy
-	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear | T send | H give"
+	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear | T send | H give | K take"
 	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear")
 	             : "drag select | right attack-move | ctrl+right move | X stop | V entrench",
 	         14, y + 50, 14, GRAY);

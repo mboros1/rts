@@ -734,6 +734,24 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		apply_share(f, sim, c);
 		return;
 	}
+	if (c->kind == COMMAND_AI_SLOTS) {
+		int players = sim->config.players[f->id.v];
+		if (c->amount >= 0 && c->amount < 1 << players) f->away = (uint8_t)c->amount;
+		return;
+	}
+	if (c->kind == COMMAND_TAKE) {
+		// Only from teammates who are away, and only by one who isn't.
+		Units *u = &f->units;
+		if (!player_ok(c->player) || (f->away >> c->player.v & 1)) return;
+		for (ptrdiff_t i = 0; i < u->count; i++) {
+			if (!(f->away >> u->owner[i].v & 1)) continue;
+			// A factory keeps making for whoever it was pointed at, unless
+			// that was its old owner.
+			if (u->type[i] != UNIT_FACTORY || player_eq(u->output[i], u->owner[i])) u->output[i] = c->player;
+			u->owner[i] = c->player;
+		}
+		return;
+	}
 	if (c->kind == COMMAND_BUILD && !unit_is_structure(c->unit_type)) return;
 	Units *u = &f->units;
 	V2 target = clamp_to_map(t, c->target, 1.0f);
@@ -1572,6 +1590,7 @@ void sim_init(Sim *sim, SimConfig config)
 		f->outbox = PUSH(&sim->zone, Launch, f->outbox_cap);
 		f->scratch = arena_create(scratch_names[k], (ptrdiff_t)64 << 20);
 
+		f->away = (uint8_t)((1u << config.players[k]) - 1); // until someone plays them
 		for (int pl = 0; pl < MAX_PLAYERS; pl++)
 			f->economy[pl] = (Economy){START_METAL, START_ENERGY, METAL_CAP, ENERGY_CAP, .rate = 1.0f};
 		if (config.economy) {
@@ -1720,6 +1739,7 @@ Hash faction_hash(const Faction *f)
 		for (int k = 0; k < (int)countof(ef); k++) h = hash_f32(h, ef[k]);
 	}
 	h = hash_u64(h, f->spots);
+	h = hash_u32(h, f->away);
 	return hash_perception(h, &f->seen);
 }
 
@@ -1813,6 +1833,7 @@ void faction_write(const Faction *f, ByteBuf *b)
 		for (int k = 0; k < (int)countof(ef); k++) putf(b, ef[k]);
 	}
 	put64(b, f->spots);
+	put8(b, f->away);
 	const Perception *seen = &f->seen;
 	uint32_t live = 0;
 	for (ptrdiff_t s = 0; s < seen->cap; s++) live += seen->live[s];
@@ -1952,6 +1973,7 @@ bool faction_read(Faction *f, ByteReader *r)
 		if (!(e->metal >= 0.0f && e->metal <= e->metal_cap && e->energy >= 0.0f && e->energy <= e->energy_cap)) return false;
 	}
 	f->spots = get64(r);
+	f->away = get8(r);
 	Perception *seen = &f->seen;
 	memset(seen->live, 0, (size_t)seen->cap);
 	uint32_t live = get32(r);

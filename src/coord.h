@@ -38,7 +38,7 @@ typedef enum : uint8_t {
 	COORD_DELIVERED,        // zone: u64 id
 	COORD_HOLD,             // zone: u64 id: can't take them yet
 	COORD_DELIVER,          // coord: u64 id, u8 faction, Leg, counts
-	COORD_DIRECTORY_ASK,    // player: [u8 faction: its fogged view]
+	COORD_DIRECTORY_ASK,    // player: [u8 faction: its fogged view [, name: and I'm online [, u8 1: logging out]]]
 	COORD_DIRECTORY,        // coord: Directory (world.h)
 	COORD_DEPART_ACK,       // coord: u64 seq: logged (or already had it)
 	COORD_ZONE_STATUS,      // zone, every second: ZoneStatus (world.h)

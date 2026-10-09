@@ -9,6 +9,9 @@
 #   - players join a side by name: blue has two places; alice and bob each
 #     get one (and keep it), a third name is turned away, and blue's map
 #     lists them;
+#   - a zone counts alice as here while she's logged in anywhere (east,
+#     which she never visits, too), and her bot takes her units over once
+#     she logs out;
 #   - stopping saves every zone and the world continues where it was;
 #   - a save can be loaded back;
 #   - a clip of the journey renders, map and zones.
@@ -57,8 +60,11 @@ grep -q '^digest_mismatches 0$' "$out/bob.txt" || fail "faction hash mismatch fo
 "$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --name carol --zone west --quit-after 1 > "$out/carol.out" 2>&1 \
 	&& fail "a third player got onto blue's two places"
 grep -q 'every place on blue is taken' "$out/carol.out" || fail "carol wasn't told why: $(tail -1 "$out/carol.out")"
-$world --status --as blue | grep -q '^players: blue 0 alice, 1 bob | red$' \
-	|| fail "blue's map doesn't list its players: $($world --status --as blue | grep players)"
+$world --status --as blue | grep -q '^players: blue 0 alice (away), 1 bob (away) | red$' \
+	|| fail "blue's map doesn't list its players, logged out: $($world --status --as blue | grep players)"
+grep -q 'blue.0 is back' "$out/w/live/east.out" || fail "east didn't count alice as here while she played elsewhere"
+for i in $(seq 100); do grep -q 'blue.0 is away: its bot plays' "$out/w/live/east.out" && break; sleep 0.1; done
+grep -q 'blue.0 is away: its bot plays' "$out/w/live/east.out" || fail "alice logged out, but her bot didn't take over"
 
 before=$(seconds west)
 $world --stop > /dev/null || fail "cannot stop"

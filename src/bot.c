@@ -196,9 +196,13 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	if (want_engineers > 8) want_engineers = 8;
 
 	// Opening: factories make engineers and nothing else until there's metal
-	// coming in; then the doctrine's cycle of units, with engineers while
-	// there are few, scouts and sappers while it wants them.
-	bool opening = e->metal_income < 12.0f;
+	// coming in, or none left to take (teammates have it); then the
+	// doctrine's cycle of units, with engineers while there are few, scouts
+	// and sappers while it wants them.
+	bool free_metal = false;
+	for (int32_t k = 0; k < sim->spots.count && !free_metal; k++)
+		free_metal = placement_ok(sim, f, UNIT_EXTRACTOR, sim->spots.at[k]);
+	bool opening = e->metal_income < 12.0f && free_metal;
 	int32_t amount[UNIT_TYPE_COUNT] = {0};
 	amount[UNIT_ENGINEER] = engineers < want_engineers;
 	amount[UNIT_SCOUT] = bot->world && scouts < d->scouts;

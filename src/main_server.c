@@ -33,9 +33,9 @@
 // Arrivals wait while their landing area is full (LANDING_ROOM).
 //
 // Each client plays one player (a slot) of its side, and its commands are
-// that player's. When a side's last player leaves, its players' bots take
-// over, unless the zone's setup turned them off; a player joining sends
-// them back.
+// that player's. A player away (logged out of the world, or never in it) has
+// their bot play their units, unless the zone's setup turned it off; see
+// update_presence.
 //
 // In a world, setup scripts only set up: spawning after tick 0 is refused.
 //
@@ -136,8 +136,8 @@ typedef struct {
 	int outgoing_count;
 	uint64_t applied[1024];      // transfers recently brought in
 	int applied_count;
-	int players[FACTION_COUNT];
-	bool bot_allowed[FACTION_COUNT][MAX_PLAYERS]; // a player's bot plays while nobody of the side is here
+	bool bot_allowed[FACTION_COUNT][MAX_PLAYERS]; // a player's bot may play them while they're away
+	int64_t last_here[FACTION_COUNT][MAX_PLAYERS];  // the last tick each player was logged in; -1: never
 	// Persistence (spike 6).
 	const char *state_path;
 	double save_every, next_save;
@@ -170,19 +170,42 @@ static void send_or_drop(Server *s, Client *c, uint8_t kind, const ByteBuf *b, d
 	(void)s;
 }
 
-// Away from the keyboard: the side's players' bots play it, where the zone
-// allows them. (One player's bot standing in for that player alone, beside
-// people, is spike 15.)
-static void last_player_leaves(Server *s, uint8_t faction)
-{
-	for (int p = 0; p < MAX_PLAYERS; p++) s->run.bots[faction][p].enabled = s->bot_allowed[faction][p];
-	if (s->bot_allowed[faction][0])
-		printf("server %s: %s's last player left: the bots take over\n", s->zone_name, faction ? "red" : "blue");
-}
+// Who's playing. In a world, a player is here while logged in anywhere in
+// it (the coordinator's directory says), in this zone or not: their units
+// here stay theirs, holding, while they play elsewhere. A zone of its own
+// counts the clients connected to it. A player gone for AWAY_GRACE (a
+// dropped connection, a restart) is away: their bot plays their units, where
+// the zone allows bots, and a teammate may take them; a player never seen is
+// away from the start. Recorded as COMMAND_AI_SLOTS by the script runner.
+static constexpr int64_t AWAY_GRACE = 30 * 30;   // ticks: 30 game seconds
 
-static void player_returns(Server *s, uint8_t faction)
+static void update_presence(Server *s)
 {
-	for (int p = 0; p < MAX_PLAYERS; p++) s->run.bots[faction][p].enabled = false;
+	int64_t now = s->sim.tick.v;
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		uint8_t here = 0;
+		if (s->world.zone_count) {
+			if (!s->have_dir) continue; // not knowing isn't leaving
+			here = s->dir.online[f];
+		} else {
+			for (int k = 0; k < MAX_CLIENTS; k++)
+				if (s->clients[k].state == CLIENT_READY && s->clients[k].faction == f)
+					here |= (uint8_t)(1u << s->clients[k].player.v);
+		}
+		uint8_t away = 0;
+		for (int p = 0; p < s->sim.config.players[f]; p++) {
+			if (here >> p & 1) s->last_here[f][p] = now;
+			bool gone = s->last_here[f][p] < 0 || now - s->last_here[f][p] >= AWAY_GRACE;
+			away |= (uint8_t)(gone << p);
+			bool was = s->run.away[f] >> p & 1;
+			if (gone != was)
+				printf("server %s: %s.%d %s\n", s->zone_name, f ? "red" : "blue", p,
+				       gone ? (s->bot_allowed[f][p] ? "is away: its bot plays" : "is away") : "is back");
+			s->run.bots[f][p].enabled = gone && s->bot_allowed[f][p];
+		}
+		s->run.away[f] = away;
+	}
+	s->run.presence_set = true;
 }
 
 static void handle_hello(Server *s, Client *c, ByteReader *r, double now)
@@ -198,7 +221,6 @@ static void handle_hello(Server *s, Client *c, ByteReader *r, double now)
 	c->faction = faction;
 	c->player = player;
 	c->state = CLIENT_READY;
-	if (faction < FACTION_COUNT && s->players[faction]++ == 0) player_returns(s, faction);
 	c->joined_tick = s->sim.tick.v;
 	s->joins++;
 
@@ -241,7 +263,7 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	// paired is the server's to say (route_send).
 	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE || kind == COMMAND_SEND
 	            || kind == COMMAND_ENTRENCH || kind == COMMAND_MOBILIZE || kind == COMMAND_GIVE || kind == COMMAND_OUTPUT
-	            || kind == COMMAND_SHARE;
+	            || kind == COMMAND_SHARE || kind == COMMAND_TAKE;
 	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && to.v < s->sim.config.players[c->faction] && unit_type < UNIT_TYPE_COUNT
 	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : ZONE_MAX)
 	       && flags <= COMMAND_REPEAT && route_ok(route)
@@ -294,8 +316,6 @@ static void service_clients(Server *s, double now)
 			       c->conn.why_closed ? c->conn.why_closed : "closed");
 			s->bytes_out += c->conn.bytes_sent;
 			c->conn.bytes_sent = 0;
-			if (c->state == CLIENT_READY && c->faction < FACTION_COUNT && --s->players[c->faction] == 0)
-				last_player_leaves(s, c->faction);
 			c->state = CLIENT_FREE;
 		}
 	}
@@ -498,7 +518,7 @@ static void coord_service(Server *s, double now)
 //   "RTSZ" u32 version, config (wire_put_config), u64 last departure number,
 //   u32 n, n x outgoing departure, u32 m, m x u64 applied transfer, sim_save
 
-enum { ZONE_STATE_VERSION = 5 };
+enum { ZONE_STATE_VERSION = 6 };
 
 static void put_outgoing(ByteBuf *b, const Outgoing *o)
 {
@@ -760,6 +780,7 @@ static void update_bot_worlds(Server *s)
 
 static void step(Server *s, double now)
 {
+	update_presence(s);
 	update_bot_worlds(s);
 	ptrdiff_t n = s->queued_count;
 	n += script_tick(&s->run, &s->sim, &s->tick, s->queued + n, MAX_COMMANDS - n);
@@ -943,7 +964,12 @@ int main(int argc, char **argv)
 		for (int p = 0; p < MAX_PLAYERS; p++) {
 			if (bot_override[f] >= 0) s.run.bots[f][p].enabled = bot_override[f];
 			s.bot_allowed[f][p] = s.run.bots[f][p].enabled;
+			// As the state was saved: who was away then is away now; who
+			// wasn't gets the grace from here.
+			bool away = s.sim.factions[f].away >> p & 1;
+			s.last_here[f][p] = away ? -1 : s.sim.tick.v;
 		}
+		s.run.away[f] = s.run.away_sent[f] = s.sim.factions[f].away;
 	}
 	mirror_init(&s.mirror, &s.program, s.sim.config.max_units, s.sim.config.max_projectiles);
 	{

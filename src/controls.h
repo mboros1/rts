@@ -21,6 +21,7 @@
 //   factories selected, it points their output there instead (shift+H gives
 //   the factories themselves). With nothing selected, it gives them a quarter
 //   of your metal and energy (as much as they have room for).
+//   K: take every unit here of teammates who are away (BAR's /take).
 //
 // You select and order only your own units; teammates' are drawn in their
 // own shades of the side's colour.

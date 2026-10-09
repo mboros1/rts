@@ -1171,6 +1171,59 @@ static void test_economies(void)
 	sim_destroy(&sim);
 }
 
+// Away players: their bots play them, a teammate who's here takes their
+// units (BAR's /take), and a player coming back keeps what wasn't taken.
+static void test_take(void)
+{
+	const char *text =
+		"scenario economy\n"
+		"players blue 3\n"
+		"bot red off\n"
+		"bot blue.0 off\n"                   // blue.0 and blue.2 are people; blue.1 is away, its bot playing
+		"bot blue.2 off\n"
+		"at 1 expect blue.1 units == 3\n"
+		"at 2 take blue.1\n"                 // the away player can't take
+		"at 3 expect blue.1 units == 3\n"
+		"at 3 take blue.0\n"
+		"at 4 expect blue.0 units == 6\n"    // its own three and blue.1's
+		"at 4 expect blue.1 units == 0\n"
+		"at 4 expect blue.2 units == 3\n"    // blue.2 is here: nothing of theirs is taken
+		"at 5 spawn blue.2 tank 2 at 100,300\n"
+		"at 6 bot blue.2 on\n"               // blue.2 leaves
+		"at 8 bot blue.1 off\n"              // blue.1 comes back to nothing here
+		"at 9 take blue.1\n"
+		"at 10 expect blue.1 units == 5\n"
+		"at 10 expect blue.2 units == 0\n";
+	Arena a = arena_create("take", 32 << 20);
+	Script sc;
+	char err[512];
+	bool parsed = script_parse(&sc, &a, (Str){text, (ptrdiff_t)strlen(text)}, "t.script", err, sizeof err);
+	if (!parsed) fprintf(stderr, "%s\n", err);
+	CHECK(parsed);
+	Sim sim;
+	sim_init(&sim, sc.config);
+	ScriptRun run;
+	script_run_init(&run, &sc, &a, nullptr);
+	Arena tick = arena_create("tick", 8 << 20);
+	uint8_t away_at_1 = 0, away_at_8 = 0, away_at_10 = 0;  // after the step before that tick
+	while (sim.tick.v < 11) {
+		arena_reset(&tick);
+		Command cmds[64];
+		ptrdiff_t n = script_tick(&run, &sim, &tick, cmds, countof(cmds));
+		sim_step(&sim, cmds, n);
+		if (sim.tick.v == 1) away_at_1 = sim.factions[0].away;
+		if (sim.tick.v == 8) away_at_8 = sim.factions[0].away; // a change at 6 is recorded at 7
+		if (sim.tick.v == 10) away_at_10 = sim.factions[0].away;
+	}
+	if (run.failures) fprintf(stderr, "take: %d of %d expectations failed\n", run.failures, run.expects);
+	CHECK(run.expects == 7 && run.failures == 0);
+	CHECK(away_at_1 == 2 && away_at_8 == 6 && away_at_10 == 4);
+	CHECK(sim.factions[1].away == 0);
+	sim_destroy(&sim);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+}
+
 // Players: every unit has an owner and only the owner's orders move it;
 // giving, factory output and sends name who units go to; each player
 // starts a base of their own; ownership survives a snapshot.
@@ -1310,6 +1363,7 @@ static const Test tests[] = {
 	{"entrench", test_entrench},
 	{"ownership", test_ownership},
 	{"economies", test_economies},
+	{"take", test_take},
 };
 
 // tests            run all, in order

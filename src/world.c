@@ -172,6 +172,7 @@ void put_directory(ByteBuf *b, const Directory *d)
 	}
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		put8(b, d->players[f]);
+		put8(b, d->online[f]);
 		for (int k = 0; k < d->players[f]; k++) {
 			put8(b, d->player[f][k][0] != 0);
 			if (d->player[f][k][0]) put_name(b, d->player[f][k]);
@@ -221,6 +222,7 @@ bool get_directory(ByteReader *r, Directory *d)
 	d->transit_count = transit;
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		d->players[f] = get8(r);
+		d->online[f] = get8(r);
 		if (d->players[f] > MAX_PLAYERS) return false;
 		for (int k = 0; k < d->players[f]; k++) {
 			uint8_t named = get8(r);
@@ -266,7 +268,8 @@ void directory_print(const Directory *d, FILE *out)
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		fprintf(out, "%s %s", f ? " |" : "", f ? "red" : "blue");
 		for (int k = 0; k < d->players[f]; k++)
-			fprintf(out, "%s %d %s", k ? "," : "", k, d->player[f][k][0] ? d->player[f][k] : "(bot)");
+			fprintf(out, "%s %d %s%s", k ? "," : "", k, d->player[f][k][0] ? d->player[f][k] : "(bot)",
+			        d->player[f][k][0] && !(d->online[f] >> k & 1) ? " (away)" : "");
 	}
 	fprintf(out, "\n");
 }
@@ -312,6 +315,7 @@ void directory_fog(Directory *d, uint8_t viewer)
 		s->intel[enemy] = (Intel){.seen_age = INTEL_NEVER, .transporter_age = INTEL_NEVER};
 	}
 	d->players[enemy] = 0;
+	d->online[enemy] = 0;
 	memset(d->player[enemy], 0, sizeof d->player[enemy]);
 	int kept = 0;
 	for (int k = 0; k < d->transit_count; k++)

@@ -296,6 +296,13 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		if (!parse_action_side(tok[1], a) || !parse_on(tok[2], &a->on)) return bad(p, "bot SIDE[.N] on|off", nullptr);
 		return true;
 	}
+	if (!strcmp(verb, "take")) {
+		// take SIDE.N
+		if (n != 2) return bad(p, "take SIDE.N", nullptr);
+		if (!(a = new_action(p, tick, ACTION_TAKE, text))) return bad(p, "too many actions", nullptr);
+		if (!parse_action_side(tok[1], a)) return bad(p, "take SIDE.N", tok[1]);
+		return true;
+	}
 	if (!strcmp(verb, "give") && n == 6) {
 		// give SIDE.N metal|energy AMOUNT to M
 		if (!(a = new_action(p, tick, ACTION_SHARE, text))) return bad(p, "too many actions", nullptr);
@@ -606,6 +613,7 @@ void script_run_init(ScriptRun *r, const Script *s, Arena *arena, FILE *log)
 			b->enabled = s->bots_on[k][p];
 			b->doctrine = s->doctrine[k];
 		}
+	for (int k = 0; k < FACTION_COUNT; k++) r->away_sent[k] = r->away[k] = (uint8_t)((1u << s->config.players[k]) - 1);
 	r->group_units = PUSH(arena, UnitHandle *, s->group_count);
 	r->group_len = PUSH(arena, ptrdiff_t, s->group_count);
 	r->group_side = PUSH(arena, FactionId, s->group_count);
@@ -747,6 +755,17 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 {
 	const Script *s = r->script;
 	ptrdiff_t n = 0;
+	// Who's away, first: what follows this tick sees it.
+	for (int k = 0; k < FACTION_COUNT; k++) {
+		uint8_t away = r->away[k];
+		if (!r->presence_set) {
+			away = 0;
+			for (int p = 0; p < sim->config.players[k]; p++) away |= (uint8_t)(r->bots[k][p].enabled << p);
+		}
+		if (away == r->away_sent[k] || n == cap) continue;
+		out[n++] = (Command){.faction = {(uint32_t)k}, .kind = COMMAND_AI_SLOTS, .amount = away};
+		r->away_sent[k] = away;
+	}
 	// Actions behind the current tick (a run that started late) are skipped.
 	while (r->next < s->action_count && s->actions[r->next].tick < sim->tick.v) r->next++;
 	for (; r->next < s->action_count && s->actions[r->next].tick == sim->tick.v; r->next++) {
@@ -798,6 +817,9 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			break;
 		case ACTION_SHARE:
 			if (n < cap) out[n++] = share_command(a->side, a->player, a->to, a->metal, a->energy);
+			break;
+		case ACTION_TAKE:
+			if (n < cap) out[n++] = (Command){.faction = a->side, .player = a->player, .to = a->player, .kind = COMMAND_TAKE};
 			break;
 		}
 	}

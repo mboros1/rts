@@ -102,6 +102,7 @@ typedef struct {
 	// yet, so its bots do).
 	uint8_t players[FACTION_COUNT];
 	char player[FACTION_COUNT][MAX_PLAYERS][ZONE_NAME];
+	uint8_t online[FACTION_COUNT];  // bit per slot: logged in now (anywhere in the world)
 } Directory;
 
 // A side's view of a directory (fog of war on the map): its own presence,

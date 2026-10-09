@@ -1,0 +1,27 @@
+title Spike 15: away players, and take
+about Two against two, all bots: every player is away, their bot playing. At 2 minutes blue.0's player logs in, takes blue.1's units (BAR's /take: blue.1's shade turns blue.0's), and sends the whole army at red. 4 minutes at 8x.
+
+scenario economy
+players blue 2
+players red 2
+clip 0..7200
+speed 8
+camera 256,256 400
+
+at 3600 bot blue.0 off             # blue.0's player logs in: their bot stands down
+at 3602 take blue.0
+at 3604 select blue.0 tank as tanks
+at 3604 select blue.0 raider as raiders
+at 3604 select blue.0 artillery as guns
+at 3606 attack-move tanks 440,256
+at 3606 attack-move raiders 440,256
+at 3606 attack-move guns 420,256
+
+# Observed: just before, blue.1's bot has 23 units and blue.0's 27; after
+# the take, blue.0 has all 50 and blue.1 none (its bot has nothing left to
+# play). The army goes at red, which loses 60 by the end.
+at 3599 expect blue.1 units >= 15
+at 3604 expect blue.1 units == 0
+at 3604 expect blue.0 units >= 40
+at 7200 expect blue.1 units == 0
+at 7200 expect red lost >= 30

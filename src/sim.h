@@ -372,6 +372,8 @@ typedef struct {
 	Perception seen;           // its enemies, as it perceives them
 	Economy economy[MAX_PLAYERS]; // each player's; those past config.players stay as they started
 	uint64_t spots;            // metal spots it extracts from (an effect)
+	uint8_t away;              // players (bit per slot) nobody is playing: their bots are; set by COMMAND_AI_SLOTS
+	static_assert(MAX_PLAYERS <= 8, "away is a byte: widen it with the slots");
 	EnemyView view;            // built from `seen` each tick, in scratch
 	Departure *departures;     // left through transporters this tick (in scratch)
 	ptrdiff_t departure_count;
@@ -400,6 +402,8 @@ typedef enum : uint8_t {
 	COMMAND_GIVE,       // these units now belong to player `to`
 	COMMAND_OUTPUT,     // these factories' units go to player `to` from now on
 	COMMAND_SHARE,      // resources to player `to`: see share_command
+	COMMAND_AI_SLOTS,   // the zone's say: these players (bit per slot, in amount) are away, their bots playing
+	COMMAND_TAKE,       // the player takes every unit of every away teammate here (BAR's /take)
 	COMMAND_KIND_COUNT,
 } CommandKind;
 

@@ -576,10 +576,54 @@ Done. Each player has their own economy in each zone.
   first); blue.1 ends with 46 units to blue.0's 30, and red, stalled on metal
   and not sharing, is down to 9. Demo 15 is re-rendered: three economies
   against one now make 158 units to 37. arm64 and x86-64 agree.
+- **Soaks**: 3 minutes of `make soak` pass; 10 minutes of `worlds/teams.world`
+  pass: 14 zone kills, 5 coordinator kills, 1283 units across with none lost,
+  every replay segment chained; blue held north and south, red centre.
 - **Formats**: replay v11, wire v8, zone state v5.
 - **Not yet**: the share key gives a fixed quarter; nobody has played it by
   hand. Bots never share. After the land grab the team world settles into
   the old standoff (fronts of 300 against 460 that never attack).
+
+## Spike 15 results (2026-10-09)
+
+Done. A player nobody is playing has their bot play them.
+
+- **Presence is per world.** A logged-in client asks the coordinator for the
+  directory every few seconds, with its name: that's a heartbeat, and the
+  directory says which players are online (10 s without one, or a client
+  logging out, and they aren't). While you're logged in anywhere, on the map
+  or in any zone, your units in every zone are yours and hold where they
+  are. 30 game seconds after you log out (a dropped connection or a restart
+  doesn't hand anything over) you're away, and your bot plays your units in
+  every zone, unless the zone's setup turned bots off. A slot nobody has
+  taken is away from the start. A zone records who's away as a command, so
+  replays and the faction split hold. A zone of its own (no world) counts
+  the clients connected to it.
+- **Take** (BAR's /take): a player who's here takes every unit, in this
+  zone, of teammates who are away. Resources stay with the slot. K in the
+  client; `take blue.1` in scripts (a script's player is away while its bot
+  is on). A player coming back gets their slot and whatever wasn't taken.
+- **The 8v8 benchmark** (`make bench-teams`, `rts-headless bench-teams`): one
+  zone, eight bots a side from their own bases, ten game minutes. It first
+  showed the bots never leaving their opening: with 32 metal spots split
+  sixteen ways nobody reaches 12 metal a second, the bot's sign the opening
+  is over; now the opening also ends when there's no free metal left. Then:
+  peak 495 units, step mean 0.14 ms, worst 1.52 ms; bots 0.14 ms at worst
+  (budget 33 ms). Blue wipes red out by minute 4 and builds on. The map,
+  not the engine, is the limit at 8v8: a zone's metal is shared by sixteen
+  players, so armies stay small.
+- **Evidence**: `test_take` (only an away player's units are taken, only by
+  one who's here; coming back to nothing taken back); the world smoke test
+  (east, which alice never visits, counts her as here while she plays
+  elsewhere, and her bot takes over once she logs out); demo 17 (two against
+  two, all bots; blue.0's player logs in at 2 minutes, takes blue.1's 23
+  units onto its own 27 and sends them at red). The script demos re-render
+  byte for byte. arm64 and x86-64 agree.
+- **Formats**: replay v12, wire v9, zone state v6; the directory carries who's
+  online.
+- **Not yet**: K and the away marks have only been tried headlessly. Taking
+  is all or nothing. The grace is game time, so at 8x it's under 4 seconds
+  of wall time. An 8v8 needs a bigger zone (more metal) to be a big battle.
 
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client

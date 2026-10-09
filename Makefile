@@ -6,6 +6,7 @@
 #   make check      local CI: clean ASan/UBSan tests, replay determinism,
 #                   then a gcc-15 -Werror -fanalyzer build
 #   make bench      time the sim at 5000 units per side
+#   make bench-teams   8 bots a side in one zone, ten game minutes
 #   make determinism-x86   arm64 record, x86-64 (Rosetta) verify, and back
 #   make cross      x86-64 Linux (run in Docker) and Windows builds
 #   make clips      every scenario as build/clips/NAME.mp4 + .png sheet + .txt
@@ -36,7 +37,7 @@ SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
 # The zone smoke test drives these through processes; rebuild them together.
 
-.PHONY: play world-soak work-log demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 soak cross clips demos demos-restore share clean
+.PHONY: play world-soak work-log demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench bench-teams determinism-x86 soak cross clips demos demos-restore share clean
 
 all: $(B)/rts $(B)/rts-headless $(B)/rts-server $(B)/rts-coord
 
@@ -74,6 +75,10 @@ play: all
 
 bench: $(B)/rts-headless
 	$(B)/rts-headless bench 1800 5000
+
+# Eight players a side, all bots, ten game minutes: what a full team zone costs.
+bench-teams: $(B)/rts-headless
+	$(B)/rts-headless bench-teams 18000 8
 
 # Local CI. Builds from scratch in its own directory: nothing stale is reused.
 # Stages are independent and run in parallel, each timed by tools/stage

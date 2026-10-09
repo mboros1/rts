@@ -139,7 +139,8 @@ static void client_event(Client *c, uint8_t kind, const char *text)
 
 // Ask the coordinator at HOST:PORT for the directory. Blocks up to half a
 // second. The raw frame (for netlogs) lives in a.
-static bool directory_fetch(const char *coord, uint8_t viewer, Arena *a, Directory *d, Str *raw)
+static bool directory_fetch(const char *coord, uint8_t viewer, const char *name, bool leaving, Arena *a, Directory *d,
+                            Str *raw)
 {
 	const char *colon = strrchr(coord, ':');
 	if (!colon) fatal("--coord HOST:PORT");
@@ -149,8 +150,13 @@ static bool directory_fetch(const char *coord, uint8_t viewer, Arena *a, Directo
 	if (fd < 0) return false;
 	Conn q;
 	conn_init(&q, a, fd, 1 << 16, 1 << 16);
-	// As our side, through its fog; spectators (and tools) see it all.
-	conn_send(&q, COORD_DIRECTORY_ASK, &viewer, viewer < FACTION_COUNT ? 1 : 0, platform_seconds());
+	// As our side, through its fog; spectators (and tools) see it all. With
+	// our name: asking is how the coordinator knows we're still here.
+	ByteBuf ask = bytebuf_make(a, 64);
+	if (viewer < FACTION_COUNT) put8(&ask, viewer);
+	if (viewer < FACTION_COUNT && name) put_name(&ask, name);
+	if (viewer < FACTION_COUNT && name && leaving) put8(&ask, 1); // logging out
+	conn_send(&q, COORD_DIRECTORY_ASK, ask.data, ask.len, platform_seconds());
 	bool got = false;
 	for (int i = 0; i < 100 && q.open && !got; i++) {
 		conn_pump(&q, platform_seconds());
@@ -202,7 +208,7 @@ static bool client_directory(Client *c)
 	arena_reset(&c->out);
 	Directory d;
 	Str raw;
-	if (!directory_fetch(c->opt.coord, c->opt.faction, &c->out, &d, &raw)) return false;
+	if (!directory_fetch(c->opt.coord, c->opt.faction, c->opt.name, false, &c->out, &d, &raw)) return false;
 	c->dir = d;
 	// Logged: a clip of this client draws the map as it was then.
 	client_log(c, COORD_DIRECTORY, raw.ptr, raw.len);
@@ -368,7 +374,7 @@ static void client_frames(Client *c)
 static void client_send_order(Client *c, CommandKind kind, V2 target, UnitType type, int32_t amount, uint8_t flags,
                               PlayerSlot to, const UnitHandle *units, ptrdiff_t n)
 {
-	if (!c->conn.open || (n == 0 && kind != COMMAND_SHARE)) return; // a share moves resources, not units
+	if (!c->conn.open || (n == 0 && kind != COMMAND_SHARE && kind != COMMAND_TAKE)) return; // these name no units
 	arena_reset(&c->out);
 	ByteBuf b = bytebuf_make(&c->out, 24 + n * 8);
 	put8(&b, to.v);
@@ -796,6 +802,11 @@ static int client_main(int argc, char **argv)
 	}
 
 	conn_close(&c.conn, "client quit");
+	if (c.opt.coord && c.opt.faction < FACTION_COUNT) {
+		// Logging out: the coordinator needn't wait to notice.
+		Directory d;
+		directory_fetch(c.opt.coord, c.opt.faction, c.opt.name, true, &c.out, &d, nullptr);
+	}
 	if (c.netlog) fclose(c.netlog);
 	printf("client: %lld deltas, %lld digests (%lld mismatched), %lld reconnects, %lld gaps, "
 	       "%lld malformed, %lld commands sent, final tick %lld\n",
