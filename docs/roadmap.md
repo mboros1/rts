@@ -751,6 +751,13 @@ restart).
 
 ## Later
 
+- A balance spike: energy is plentiful everywhere and metal scarce (spike
+  16b: fronts float full energy, metal seldom overflows), so shipping energy
+  means little. With it, weapons costing energy per shot, from the firing
+  unit's owner, scaled by damage and range: cheap units nearly free,
+  artillery more, and heavy drainers when there are any; a unit that can't
+  pay holds its fire. Bots keep a reserve at the front and count being short
+  of energy as a reason for trucks.
 - Gate expansion metagame: seed energy cost, distance scaling on the zone
   graph, which units can travel without a gate (drop pods, commandos).
 - Logout exploits: logging out to escape a fight (needs a logout timer), and
