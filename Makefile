@@ -185,8 +185,8 @@ world-soak: all
 work-log:
 	@mkdir -p work_log
 	@for f in $(HOME)/.claude/projects/-Users-martinboros-git-rts/*.jsonl; do \
-		id=$$(basename $$f .jsonl); d=$$(date -r $$f +%Y-%m-%d); \
-		cp $$f work_log/$$(ls work_log | grep -m1 "$$id" || echo "$$d-session-$$(echo $$id | cut -c1-8).jsonl"); \
+		id=$$(basename $$f .jsonl | cut -c1-8); d=$$(date -r $$f +%Y-%m-%d); \
+		cp $$f work_log/$$(ls work_log | grep -m1 "session-$$id.jsonl" || echo "$$d-session-$$id.jsonl"); \
 	done; ls -la work_log
 
 CROSS := $(B)/cross
