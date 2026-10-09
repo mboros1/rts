@@ -36,7 +36,7 @@ SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
 # The zone smoke test drives these through processes; rebuild them together.
 
-.PHONY: play world-soak demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 soak cross clips demos demos-restore share clean
+.PHONY: play world-soak work-log demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game bench determinism-x86 soak cross clips demos demos-restore share clean
 
 all: $(B)/rts $(B)/rts-headless $(B)/rts-server $(B)/rts-coord
 
@@ -179,6 +179,15 @@ soak: all
 # replays, memory, and that both sides expanded.
 world-soak: all
 	@$(S) "world soak: $(MINUTES) min" python3 tools/world-soak.py $(B) $(B)/world-soak --minutes $(MINUTES)
+
+# Copy every Claude Code session transcript for this repo into work_log/
+# (gitignored but for its README), named by date and session id.
+work-log:
+	@mkdir -p work_log
+	@for f in $(HOME)/.claude/projects/-Users-martinboros-git-rts/*.jsonl; do \
+		id=$$(basename $$f .jsonl); d=$$(date -r $$f +%Y-%m-%d); \
+		cp $$f work_log/$$(ls work_log | grep -m1 "$$id" || echo "$$d-session-$$(echo $$id | cut -c1-8).jsonl"); \
+	done; ls -la work_log
 
 CROSS := $(B)/cross
 cross: $(B)/rts-headless

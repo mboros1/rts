@@ -7,3 +7,5 @@
 
 .DS_Store
 /world/
+/work_log/*
+!/work_log/README.md
