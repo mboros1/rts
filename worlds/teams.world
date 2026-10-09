@@ -15,3 +15,8 @@ link centre east
 link north south
 players blue 3
 players red 2
+# Home keeps a small army (a quarter of the preset's 300 a player): it fills
+# in minutes, then the surplus goes forward and metal overflows into storage
+# and trucks for crews.
+doctrine blue in west balanced army_cap=75
+doctrine red in east balanced army_cap=75

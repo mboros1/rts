@@ -854,10 +854,37 @@ Done, with bots' expansion left for 18b. A player is where their commander is.
   start, his bot's first orders come later). A 3-minute zone soak passes.
 - **Formats**: replay v15, wire v12, zone state v9; the coordinator's log
   has `warp` and `respawn` transfers.
-- **Not yet** (18b): bots' crews land where they have no commander and so
-  no economy, and stand there (28 idle engineers in north after two and a
-  half minutes); home armies pile up. They need to bring trucks or their
-  commander. The world soak would fail its expansion check until then.
+- **Left for 18b**: bots' crews landed where they had no commander and so
+  no economy, and stood there; home armies piled up.
+
+## Spike 18b results (2026-10-09)
+
+Done. Bots open and expand as players now must.
+
+- **Anything that moves can pioneer.** Unpaired sends take any mobile unit
+  (only the first tier can, and that's every unit so far), 10 a batch.
+- **Home is rich.** A player whose commander is in the zone of their side's
+  headquarters gets 8 metal a second there, not 1. Worlds cap home armies
+  low with doctrines (`worlds/teams.world`: `doctrine blue in west balanced
+  army_cap=75`), so a home fills in minutes, its surplus army goes forward
+  and its metal overflows.
+- **Overflow becomes storage.** A bot at home with metal past 90% of its
+  room digs a spare metal truck in as a vault (up to 8), and makes more
+  trucks while full. One truck of each kind is kept for a crew, and only
+  one factory per bot makes them.
+- **Crews bring trucks.** A crew is its builders, its escort and a truck of
+  each kind, and goes only when its player has the metal for a transporter
+  (the metal truck carries it). It lands with no power and so builds
+  generators first, one builder short of the transporter, then the
+  transporter, then the rest. Generators stop at twice the extractors plus
+  6 (with little storage, energy always looks short).
+- **Commanders stay home**, building; nothing in the bot sends them out, so
+  warp home is the players' and the logout's, not the bots'.
+- **Evidence**: demo 22 (a team world: crews crossing with 1000 metal each,
+  north and south opened by blue, centre by red, 8 and 9 vaults at the
+  homes). Before the home cap, blue's home held 776 units at 16 minutes
+  (three players under 300 each) with metal at 0, and sent no crews.
+- **Later**: the economy's constants become a context per zone (Later).
 
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
@@ -893,6 +920,12 @@ restart).
 
 ## Later
 
+- An economy context, before the balance spike: the economy's constants
+  (incomes, home income, base storage, truck and vault room, costs) as a
+  context a zone is given, as doctrines are, so zones can differ (a rich
+  home, lean fronts) and a world file or script can stage a scenario. It is
+  part of the sim's settings, so it goes in replays and zone state. Until
+  then they're constants in sim.c and sim.h.
 - A balance spike: energy is plentiful everywhere and metal scarce (spike
   16b: fronts float full energy, metal seldom overflows), so shipping energy
   means little. With it, weapons costing energy per shot, from the firing

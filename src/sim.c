@@ -117,6 +117,10 @@ static constexpr float START_METAL = 600.0f;
 static constexpr float START_ENERGY = 3000.0f;
 static constexpr float BASE_METAL_INCOME = 1.0f;
 static constexpr float BASE_ENERGY_INCOME = 30.0f;
+// At home (where the side's headquarters is) a player whose commander is
+// there gets more: home is where the surplus army comes from, and its metal
+// overflows into storage and trucks for the fronts.
+static constexpr float HOME_METAL_INCOME = 8.0f;
 static constexpr float BUILD_RANGE = 6.0f;          // beyond the structure's radius
 static constexpr float GRID_CELL = 8.0f;
 static constexpr int32_t RETARGET_PERIOD = 8;
@@ -665,6 +669,8 @@ static float storage_energy(UnitType t) { return t == UNIT_ENERGY_TRUCK || t == 
 
 // Which players have their commander here (bit per slot): with commanders,
 // only they have the base storage and the free income.
+static ptrdiff_t headquarters(const Faction *f);
+
 static uint8_t commanders_here(const Faction *f)
 {
 	const Units *u = &f->units;
@@ -1373,9 +1379,10 @@ static void run_economy(Faction *f, const Sim *sim)
 	int players = sim->config.players[f->id.v];
 	count_storage(f, sim);
 	uint8_t based = sim->config.commanders ? commanders_here(f) : 0xff;
+	float base_metal = sim->config.commanders && headquarters(f) >= 0 ? HOME_METAL_INCOME : BASE_METAL_INCOME;
 	float income_m[MAX_PLAYERS], income_e[MAX_PLAYERS];
 	for (int p = 0; p < players; p++) {
-		income_m[p] = based >> p & 1 ? BASE_METAL_INCOME : 0.0f;
+		income_m[p] = based >> p & 1 ? base_metal : 0.0f;
 		income_e[p] = based >> p & 1 ? BASE_ENERGY_INCOME : 0.0f;
 	}
 	for (ptrdiff_t i = 0; i < u->count; i++) {

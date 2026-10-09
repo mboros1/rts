@@ -79,8 +79,8 @@ bool doctrine_parse(Doctrine *d, const char *spec, char *err, size_t err_len)
 	int32_t round = 0;
 	for (int i = 0; i < COMBAT_TYPE_COUNT; i++) round += d->mix[i];
 	if (round == 0 || round > 5) return bad_doctrine(err, err_len, "the factory cycle is 1 to 5 units a round", spec);
-	if (d->transporters < 1 || d->crew_builders < 1 || d->crew_builders + d->crew_escort > UNPAIRED_BATCH)
-		return bad_doctrine(err, err_len, "transporters and crew builders at least 1, a crew at most 8", spec);
+	if (d->transporters < 1 || d->crew_builders < 1 || d->crew_builders + d->crew_escort > UNPAIRED_BATCH - 2)
+		return bad_doctrine(err, err_len, "transporters and crew builders at least 1, builders and escort at most 8", spec);
 	return true;
 }
 
@@ -175,6 +175,7 @@ static bool own_transporter(const Bot *bot, const Units *u, bool finished_only)
 
 
 enum { BOT_TRUCKS = 2 };   // of each kind kept waiting in a zone, at most
+enum { BOT_VAULTS = 8 };   // metal vaults dug in at home, at most
 
 // An economy, kept simply: factories cycle a mix of units (with engineers
 // while there are too few); idle engineers take the most useful job.
@@ -190,8 +191,11 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	const Economy *e = &plan;
 	const Doctrine *d = &bot->doctrine;
 	int engineers = 0, factories = 0, army = 0, scouts = 0, sappers = 0, metal_trucks = 0, energy_trucks = 0;
+	int generators = 0, extractors = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (!mine(bot, u, i)) continue;
+		generators += u->type[i] == UNIT_GENERATOR;
+		extractors += u->type[i] == UNIT_EXTRACTOR;
 		metal_trucks += u->type[i] == UNIT_METAL_TRUCK && u->order[i] != ORDER_SEND;
 		energy_trucks += u->type[i] == UNIT_ENERGY_TRUCK && u->order[i] != ORDER_SEND;
 		engineers += u->type[i] == UNIT_ENGINEER;
@@ -217,8 +221,9 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	amount[UNIT_SAPPER] = bot->world && d->crew_builder == UNIT_SAPPER && sappers < d->crew_builders;
 	// A resource's base storage nearly full: trucks of it, to ship loads to
 	// the front (bot_strategy).
-	amount[UNIT_METAL_TRUCK] = bot->world && !opening && e->metal >= 0.9f * e->metal_cap && metal_trucks < BOT_TRUCKS;
-	amount[UNIT_ENERGY_TRUCK] = bot->world && !opening && e->energy >= 0.9f * e->energy_cap && energy_trucks < BOT_TRUCKS;
+	// ... and one of each kept for a crew going out (bot_strategy).
+	amount[UNIT_METAL_TRUCK] = bot->world && !opening && (metal_trucks == 0 || (e->metal >= 0.9f * e->metal_cap && metal_trucks < BOT_TRUCKS));
+	amount[UNIT_ENERGY_TRUCK] = bot->world && !opening && (energy_trucks == 0 || (e->energy >= 0.9f * e->energy_cap && energy_trucks < BOT_TRUCKS));
 	// Enough here (spend it first), or enough everywhere: a zone that sends
 	// its army away would otherwise make one forever.
 	int32_t everywhere = 0;
@@ -227,6 +232,8 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) amount[k] = d->mix[k];
 	uint32_t want = 0;
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) want |= (uint32_t)(amount[k] > 0) << k;
+	bool trucks_asked = false; // trucks from one factory only: each would make one
+	uint32_t truck_types = 1u << UNIT_METAL_TRUCK | 1u << UNIT_ENERGY_TRUCK;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (!mine(bot, u, i) || u->type[i] != UNIT_FACTORY || u->progress[i] < 1.0f) continue;
 		// A factory making units for a teammate makes them an army: what we
@@ -234,7 +241,9 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		bool for_us = player_eq(u->output[i], bot->player);
 		uint32_t army_types = 0;
 		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) army_types |= (uint32_t)(d->mix[k] > 0) << k;
-		uint32_t wanted = for_us ? want : army_types;
+		bool trucks_here = for_us && !trucks_asked && (want & truck_types);
+		trucks_asked = trucks_asked || trucks_here;
+		uint32_t wanted = for_us ? (trucks_here ? want : want & ~truck_types) : army_types;
 		uint32_t has = 0;
 		for (int q = 0; q < u->queue_len[i]; q++) has |= 1u << (u->queue[i] >> (8 * q) & 0xff);
 		if (has == wanted) continue; // already making what we want
@@ -248,6 +257,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		                          UNIT_TANK, UNIT_ARTILLERY, UNIT_SIEGE};
 		for (int k = 0; k < (int)countof(order); k++) {
 			int32_t n = for_us ? amount[order[k]] : unit_is_combat(order[k]) ? d->mix[order[k]] : 0;
+			if (!(wanted >> order[k] & 1)) n = 0;
 			if (!n) continue;
 			c.unit_type = order[k];
 			c.amount = n;
@@ -274,7 +284,10 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	// for that (bot_strategy), before anything else; except at home before
 	// there's a factory (a commander-only start): the factory first.
 	bool factory_first = bot->world && bot->world->home[bot->world->here] && factories == 0;
-	if (bot->world && !own_transporter(bot, u, false) && !factory_first) return;
+	// A landing with no power yet: generators, before the transporter can finish.
+	bool power_first = bot->world && !bot->world->home[bot->world->here] && !own_transporter(bot, u, true)
+	                && e->energy_income < 3.0f * unit_defs[UNIT_GENERATOR].energy_income;
+	if (bot->world && !own_transporter(bot, u, false) && !factory_first && !power_first) return;
 	int want_factories = 1 + (int)(e->metal_income / 10.0f);
 	if (want_factories > 4) want_factories = 4;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
@@ -294,19 +307,23 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 			}
 		}
 		bool near = spot >= 0 && v2_len(v2_sub(sim->spots.at[spot], sim_player_base(sim, f, bot->player))) < 220.0f;
-		bool power_short = e->energy < 2000.0f && e->energy_income < 1.1f * e->energy_wanted;
+		// Short of power, but not past a few generators an extractor: where
+		// there's little storage (no commander) energy always looks short.
+		bool power_short = e->energy < 2000.0f && e->energy_income < 1.1f * e->energy_wanted && generators < 2 * extractors + 6;
 		bool rich = e->metal > 400.0f && factories < want_factories;
 
 		// Power first, then spend a surplus on a factory, then nearby metal,
 		// then more factories or power, and far metal last.
 		UnitType type;
-		if (power_short) type = UNIT_GENERATOR;
+		if (power_short || power_first) type = UNIT_GENERATOR;
 		else if (rich) type = UNIT_FACTORY;
 		else if (near) type = UNIT_EXTRACTOR;
 		else if (factories < want_factories && e->metal > 250.0f) type = UNIT_FACTORY;
 		else if (spot < 0 && e->energy > 0.5f * e->energy_cap) continue; // nothing worth building
-		else if (e->energy_income < 1.5f * e->energy_wanted || spot < 0) type = UNIT_GENERATOR;
-		else type = UNIT_EXTRACTOR;
+		else if ((e->energy_income < 1.5f * e->energy_wanted || spot < 0) && generators < 2 * extractors + 6) type = UNIT_GENERATOR;
+		else if (spot >= 0) type = UNIT_EXTRACTOR;
+		else continue;
+		generators += type == UNIT_GENERATOR;
 
 		V2 site;
 		if (type == UNIT_EXTRACTOR) {
@@ -371,7 +388,8 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	int here = w->here;
 	bool sending = false;
 	int32_t idle_army = 0, idle_builders = 0, idle_crew = 0, idle_raiders = 0, scouts = 0, turrets = 0;
-	int32_t transporters = 0, factories = 0;
+	int32_t transporters = 0, factories = 0, idle_metal_trucks = 0, idle_energy_trucks = 0;
+	int32_t vaults = 0;
 	ptrdiff_t free_scout = -1;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (!mine(bot, u, i)) continue;
@@ -385,6 +403,9 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		turrets += u->type[i] == UNIT_TURRET && u->seeded[i];
 		transporters += u->type[i] == UNIT_TRANSPORTER;
 		factories += u->type[i] == UNIT_FACTORY;
+		idle_metal_trucks += idle && u->type[i] == UNIT_METAL_TRUCK;
+		vaults += u->type[i] == UNIT_METAL_VAULT;
+		idle_energy_trucks += idle && u->type[i] == UNIT_ENERGY_TRUCK;
 		if (u->type[i] == UNIT_SCOUT && u->order[i] != ORDER_SEND) free_scout = i; // patrolling will do
 	}
 	bool front = w->contact[here] || w->neighbours_enemy[here];
@@ -399,6 +420,9 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		V2 site;
 		if (!site_near_base(sim, bot, UNIT_TRANSPORTER, &none, &site)) return;
 		int32_t take = transporters == 0 ? idle_builders : 1;
+		// A landing with no power: one builder is for generators (bot_economy).
+		bool powerless = !w->home[here] && e->energy_income < 3.0f * unit_defs[UNIT_GENERATOR].energy_income;
+		if (transporters == 0 && powerless && take > 1) take--;
 		UnitHandle *h = PUSH(arena, UnitHandle, idle_builders);
 		int32_t n = pick_idle(bot, u, UNIT_SAPPER, take, h, 0);
 		n = pick_idle(bot, u, UNIT_ENGINEER, take - n, h, n);
@@ -418,13 +442,26 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		if (got) emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_ENTRENCH, .count = got, .units = h});
 	}
 
+	// Home overflowing with metal: dig trucks in as vaults for room (one is
+	// kept for a crew; bot_economy makes more while the store is full).
+	if (w->home[here] && e->metal >= 0.9f * e->metal_cap && idle_metal_trucks > 1 && vaults < BOT_VAULTS) {
+		UnitHandle *h = PUSH(arena, UnitHandle, 1);
+		if (pick_idle(bot, u, UNIT_METAL_TRUCK, 1, h, 0))
+			emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_ENTRENCH, .count = 1, .units = h});
+	}
+
 	// Open a neighbour where we have no transporter: a crew of builders to
 	// raise one, with raiders to guard them. One we don't believe the enemy
 	// holds first; one we do only with an army here to follow the crew in.
-	int32_t crew = d->crew_builders + d->crew_escort;
+	// A crew brings a truck of each: where it lands it has no commander, so
+	// no storage or income but what it carries (the metal for a transporter
+	// at least).
+	int32_t crew = d->crew_builders + d->crew_escort + 2;
 	float crew_energy = UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER * (float)crew;
 	int32_t spare_builders = idle_crew - (d->crew_builder == UNIT_ENGINEER ? 1 : 0); // an engineer stays home
-	if (spare_builders >= d->crew_builders && e->energy >= crew_energy) {
+	bool trucks = idle_metal_trucks > 0 && idle_energy_trucks > 0;
+	if (spare_builders >= d->crew_builders && trucks && e->energy >= crew_energy
+	    && e->metal >= unit_defs[UNIT_TRANSPORTER].metal_cost) {
 		int target = -1;
 		for (int z = 0; z < w->count; z++)
 			if (z != here && w->linked[z] && !w->ours[z] && !bot_believes_enemy(w, z) && (target < 0 || rng_below(&bot->rng, 2)))
@@ -435,6 +472,8 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 			UnitHandle *h = PUSH(arena, UnitHandle, crew);
 			int32_t n = pick_idle(bot, u, d->crew_builder, d->crew_builders, h, 0);
 			n = pick_idle(bot, u, UNIT_RAIDER, d->crew_escort, h, n);
+			n = pick_idle(bot, u, UNIT_METAL_TRUCK, 1, h, n);
+			n = pick_idle(bot, u, UNIT_ENERGY_TRUCK, 1, h, n);
 			bot_send(bot, arena, out, count, cap, target, h, n);
 			return;
 		}

@@ -481,8 +481,8 @@ static constexpr float WARP_RECHARGE = 300.0f;
 // transporter at the destination): any units, a batch of up to
 // PAIRED_BATCH, charging PAIRED_CHARGE seconds on PAIRED_ENERGY per unit.
 // Each hop of a relay is its own send, paid by the zone it leaves from.
-// Unpaired (we don't): to an adjacent zone only, raiders and engineers only,
-// up to UNPAIRED_BATCH, charging UNPAIRED_CHARGE seconds on UNPAIRED_ENERGY
+// Unpaired (we don't): to an adjacent zone only, first-tier units only (so
+// far, all of them), up to UNPAIRED_BATCH, charging UNPAIRED_CHARGE seconds on UNPAIRED_ENERGY
 // plus UNPAIRED_ENERGY_PER per unit; they land in our strip of that zone.
 // A transporter charges only while units wait, for the batch then waiting.
 static constexpr float PAIRED_CHARGE = 10.0f;
@@ -491,12 +491,11 @@ static constexpr int32_t PAIRED_BATCH = 60;
 static constexpr float UNPAIRED_CHARGE = 40.0f;
 static constexpr float UNPAIRED_ENERGY = 4000.0f;
 static constexpr float UNPAIRED_ENERGY_PER = 400.0f;
-static constexpr int32_t UNPAIRED_BATCH = 8;
+static constexpr int32_t UNPAIRED_BATCH = 10;   // a crew: builders, an escort, and a truck of each
 static constexpr float SEND_REACH = 7.0f;   // beyond the transporter's radius
-static inline bool unpaired_can_send(UnitType t)
-{
-	return t == UNIT_RAIDER || t == UNIT_ENGINEER || t == UNIT_SAPPER || t == UNIT_SCOUT || t == UNIT_COMMANDER;
-}
+// Who can pioneer, unpaired: only the first tier, which is every unit there
+// is so far, so anything that moves.
+static inline bool unpaired_can_send(UnitType t) { return !unit_is_structure(t); }
 
 // Each side lands unpaired sends in its own strip of a zone: blue the west
 // STRIP of the map's width, red the east. The rest is contested.
