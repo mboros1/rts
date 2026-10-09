@@ -203,22 +203,20 @@ def main():
     if slept > 20:
         failures.append(f"the machine slept for {slept:.0f} s; the run doesn't count")
     stats = {z: dict(l.split(maxsplit=1) for l in open(out(f"{z}.txt")) if " " in l) for z in ports}
-    # Conservation, from the coordinator's log.
+    # Conservation, from the coordinator's output across all its lives (its
+    # log is compacted: delivered transfers leave it).
     sent, delivered = {z: 0 for z in ports}, {z: 0 for z in ports}
     transfers, logged_seqs = {}, {z: set() for z in ports}
-    # transfer ID SRC DST FACTION paired|unpaired SEQ ROUTE X,Z TYPE:N ...
-    for line in open(out("coord.log")):
-        f = line.split()
-        if f[0] == "transfer" and f[2] in ports:
-            logged_seqs[f[2]].add(int(f[6]))
-        if f[0] == "transfer":
-            n = sum(int(c.split(":")[1]) for c in f[9:])
-            transfers[f[1]] = (f[3], n)
-            sent[f[2]] += n
-        elif f[0] == "delivered" and f[1] in transfers:
-            dst, n = transfers[f[1]]
-            if dst in delivered:
-                delivered[dst] += n
+    coord_out = open(out("coord.out")).read()
+    for m in re.finditer(r"coord: transfer (\d+) (\S+) -> (\S+) \(faction \d, \w+, seq (\d+), (\d+) units\)", coord_out):
+        tid, src, dst, seq, n = m[1], m[2], m[3], int(m[4]), int(m[5])
+        transfers[tid] = (dst, n)
+        if src in ports:
+            sent[src] += n
+            logged_seqs[src].add(seq)
+    for tid in set(re.findall(r"coord: transfer (\d+) delivered", coord_out)):
+        if tid in transfers and transfers[tid][0] in delivered:
+            delivered[transfers[tid][0]] += transfers[tid][1]
     # Units must actually have crossed, or the run proved little (a side
     # that lost its transporters early sends nothing).
     crossed = sum(delivered.values())

@@ -85,8 +85,8 @@ a=$!; pids="$pids $a"
 g=$!; pids="$pids $g"
 
 # Wait for the crew to leave alpha: an unpaired transfer to beta, which is down.
-for i in $(seq 150); do grep -q ' alpha beta 0 unpaired ' "$out/coord.log" 2>/dev/null && break; sleep 0.1; done
-grep -q ' alpha beta 0 unpaired ' "$out/coord.log" || fail "no unpaired transfer logged from alpha to beta"
+for i in $(seq 150); do grep -q ' alpha beta 0 0 unpaired ' "$out/coord.log" 2>/dev/null && break; sleep 0.1; done
+grep -q ' alpha beta 0 0 unpaired ' "$out/coord.log" || fail "no unpaired transfer logged from alpha to beta"
 # Kill the coordinator with that transfer pending, and start it again.
 kill "$c"; sleep 0.3
 c=$(start_coord); pids="$pids $c"; sleep 0.3

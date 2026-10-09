@@ -38,6 +38,9 @@ typedef struct {
 // Shared by the game, the clip director and recorded camera tracks.
 Camera3D render_camera(const Terrain *t, V2 focus, float distance);
 
+// A player's colour: a shade of their side's (player 0's is the side's own).
+Color render_player_color(int faction, PlayerSlot p);
+
 void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Arena *program);
 void renderer_unload(Renderer *r);
 

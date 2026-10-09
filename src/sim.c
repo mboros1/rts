@@ -75,6 +75,7 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 	},
 };
 
+static constexpr float KIT_SPACING = 30.0f;        // between players' starting bases
 static constexpr float MAX_SIGHT = 70.0f;          // the furthest any unit sees (scouts): checked in sim_init
 static constexpr float MAX_RADIUS = 5.0f;           // transporters; separation reach
 
@@ -105,6 +106,7 @@ SimConfig sim_config_default(void)
 		.spawn_interval = 1,
 		.max_units = 8192,
 		.max_projectiles = 65536,
+		.players = {1, 1},
 		.type_weight = {
 			unit_defs[UNIT_RAIDER].weight,
 			unit_defs[UNIT_TANK].weight,
@@ -176,6 +178,8 @@ static void units_init(Units *u, Arena *a, ptrdiff_t cap)
 	u->dest = PUSH(a, uint8_t, cap);
 	u->route = PUSH(a, uint32_t, cap);
 	u->seeded = PUSH(a, uint8_t, cap);
+	u->owner = PUSH(a, PlayerSlot, cap);
+	u->output = PUSH(a, PlayerSlot, cap);
 	// Free list pops from the end, so the first spawn gets slot 0.
 	for (ptrdiff_t s = 0; s < cap; s++) {
 		u->slot_dense[s] = -1;
@@ -199,8 +203,15 @@ UnitHandle units_handle(const Units *u, ptrdiff_t dense)
 	return (UnitHandle){s, u->slot_gen[s]};
 }
 
+// A unit `player` may order: live, and theirs. -1 otherwise.
+static ptrdiff_t units_find_own(const Units *u, UnitHandle h, PlayerSlot player)
+{
+	ptrdiff_t d = units_find(u, h);
+	return d >= 0 && player_eq(u->owner[d], player) ? d : -1;
+}
+
 // Callers check the population rule first; a full pool here is a bug.
-static ptrdiff_t units_spawn(Units *u, UnitType type, float x, float z, float y)
+static ptrdiff_t units_spawn(Units *u, UnitType type, PlayerSlot owner, float x, float z, float y)
 {
 	ASSERT(u->count < u->cap && u->free_count > 0);
 	int32_t s = u->free_slots[--u->free_count];
@@ -230,6 +241,8 @@ static ptrdiff_t units_spawn(Units *u, UnitType type, float x, float z, float y)
 	u->dest[d] = 0;
 	u->route[d] = 0;
 	u->seeded[d] = 0;
+	u->owner[d] = owner;
+	u->output[d] = owner;
 	return d;
 }
 
@@ -246,6 +259,7 @@ static void units_kill(Units *u, ptrdiff_t d)
 		MOVE(cooldown); MOVE(target); MOVE(engaged);
 		MOVE(progress); MOVE(build_type); MOVE(building); MOVE(work);
 		MOVE(queue); MOVE(queue_len); MOVE(repeat); MOVE(dest); MOVE(route); MOVE(seeded);
+		MOVE(owner); MOVE(output);
 #undef MOVE
 		u->slot_dense[u->dense_slot[d]] = (int32_t)d;
 	}
@@ -428,11 +442,11 @@ static V2 clamp_to_map(const Terrain *t, V2 p, float margin)
 
 static bool finite_f(float x) { return x == x && x - x == 0.0f; }
 
-static void spawn_at(Faction *f, const Terrain *t, UnitType type, V2 at, float radius)
+static void spawn_at(Faction *f, const Terrain *t, UnitType type, PlayerSlot owner, V2 at, float radius)
 {
 	V2 p = v2(at.x + rng_range(&f->rng, -radius, radius), at.z + rng_range(&f->rng, -radius, radius));
 	p = clamp_to_map(t, p, 2.0f);
-	units_spawn(&f->units, type, p.x, p.z, terrain_height(t, p.x, p.z));
+	units_spawn(&f->units, type, owner, p.x, p.z, terrain_height(t, p.x, p.z));
 	f->stats.units_spawned++;
 }
 
@@ -443,7 +457,7 @@ static void apply_spawn(Faction *f, const Terrain *t, const Command *c)
 	V2 at = clamp_to_map(t, c->target, 2.0f);
 	// The pool's capacity is the limit, checked before asking it.
 	for (int32_t k = 0; k < c->amount && f->units.count < f->units.cap; k++)
-		spawn_at(f, t, c->unit_type, at, c->radius);
+		spawn_at(f, t, c->unit_type, c->player, at, c->radius);
 }
 
 static const OrderKind order_for_command[] = {
@@ -475,7 +489,7 @@ static void apply_produce(Faction *f, const Command *c)
 	if (c->unit_type >= UNIT_EXTRACTOR || c->amount < 0 || c->amount > FACTORY_QUEUE) return;
 	Units *u = &f->units;
 	for (ptrdiff_t k = 0; k < c->count; k++) {
-		ptrdiff_t d = units_find(u, c->units[k]);
+		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0 || u->type[d] != UNIT_FACTORY || u->progress[d] < 1.0f) continue;
 		if (c->amount == 0) {
 			u->queue[d] = 0;
@@ -531,7 +545,7 @@ static void apply_transform(Faction *f, const Command *c)
 	Units *u = &f->units;
 	bool dig_in = c->kind == COMMAND_ENTRENCH;
 	for (ptrdiff_t k = 0; k < c->count; k++) {
-		ptrdiff_t d = units_find(u, c->units[k]);
+		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0 || u->order[d] == ORDER_TRANSFORM) continue;
 		bool can = dig_in ? unit_is_combat(u->type[d]) : u->type[d] == UNIT_TURRET && u->seeded[d];
 		if (!can) continue;
@@ -560,23 +574,25 @@ static void apply_send(Faction *f, const Sim *sim, const Command *c)
 {
 	Units *u = &f->units;
 	bool unpaired = c->flags & COMMAND_UNPAIRED;
-	if (c->amount < 0 || c->amount >= ZONE_MAX || !route_ok(c->route) || (unpaired && c->route)) return;
+	if (c->amount < 0 || c->amount >= ZONE_MAX || !route_ok(c->route) || (unpaired && c->route) || !player_ok(c->to))
+		return;
 	V2 sum = v2(0.0f, 0.0f);
 	ptrdiff_t live = 0;
 	for (ptrdiff_t k = 0; k < c->count; k++) {
-		ptrdiff_t d = units_find(u, c->units[k]);
+		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0 || unit_is_structure(u->type[d])) continue;
 		sum = v2_add(sum, v2(u->px[d], u->pz[d]));
 		live++;
 	}
 	if (live == 0) return;
-	// Our nearest transporter with nobody waiting at it, or failing that the
-	// nearest: with several, sends go out side by side.
+	// The player's nearest transporter with nobody waiting at it, or failing
+	// that the nearest: with several, sends go out side by side. Only a
+	// transporter's owner sends through it.
 	V2 centre = v2_scale(sum, 1.0f / (float)live);
 	ptrdiff_t g = -1;
 	float best = 1e30f;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
-		if (u->type[i] != UNIT_TRANSPORTER || u->progress[i] < 1.0f) continue;
+		if (u->type[i] != UNIT_TRANSPORTER || u->progress[i] < 1.0f || !player_eq(u->owner[i], c->player)) continue;
 		UnitHandle h = units_handle(u, i);
 		bool busy = false;
 		for (ptrdiff_t j = 0; j < u->count && !busy; j++) busy = u->order[j] == ORDER_SEND && unit_handle_eq(u->building[j], h);
@@ -594,9 +610,10 @@ static void apply_send(Faction *f, const Sim *sim, const Command *c)
 	}
 	UnitHandle gh = units_handle(u, g);
 	for (ptrdiff_t k = 0; k < c->count; k++) {
-		ptrdiff_t d = units_find(u, c->units[k]);
+		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0 || unit_is_structure(u->type[d]) || (unpaired && !unpaired_can_send(u->type[d]))) continue;
 		u->order[d] = ORDER_SEND;
+		u->output[d] = c->to;
 		u->tx[d] = u->px[g];
 		u->tz[d] = u->pz[g];
 		u->building[d] = gh;
@@ -614,7 +631,7 @@ static void apply_arrive(Faction *f, const Sim *sim, const Command *c)
 	const Terrain *t = &sim->terrain;
 	Units *u = &f->units;
 	if (c->unit_type >= UNIT_TYPE_COUNT || unit_is_structure(c->unit_type) || c->amount < 0 || c->amount > SPAWN_MAX
-	    || !route_ok(c->route))
+	    || !route_ok(c->route) || !player_ok(c->player))
 		return;
 	bool unpaired = c->flags & COMMAND_UNPAIRED;
 	ptrdiff_t g = unpaired ? -1 : nearest_transporter(f, c->target, 1e4f);
@@ -627,7 +644,7 @@ static void apply_arrive(Faction *f, const Sim *sim, const Command *c)
 	V2 clear = len > 1.0f ? v2_add(at, v2_scale(inward, (LANDING_RADIUS + 8.0f) / len)) : at;
 	for (int32_t k = 0; k < c->amount && u->count < u->cap; k++) {
 		V2 p = clamp_to_map(t, v2(at.x + rng_range(&f->rng, -ring, ring), at.z + rng_range(&f->rng, -ring, ring)), 2.0f);
-		ptrdiff_t d = units_spawn(u, c->unit_type, p.x, p.z, terrain_height(t, p.x, p.z));
+		ptrdiff_t d = units_spawn(u, c->unit_type, c->player, p.x, p.z, terrain_height(t, p.x, p.z));
 		f->stats.units_spawned++;
 		f->stats.units_arrived++;
 		if (onward) {
@@ -642,6 +659,26 @@ static void apply_arrive(Faction *f, const Sim *sim, const Command *c)
 			u->order[d] = ORDER_MOVE;
 			u->tx[d] = to.x;
 			u->tz[d] = to.z;
+		}
+	}
+}
+
+// Give: the units change hands as they are, mid-order and all; the new owner
+// carries on or re-orders them. Output: these factories' units go to `to`.
+static void apply_give(Faction *f, const Command *c)
+{
+	if (!player_ok(c->to)) return;
+	Units *u = &f->units;
+	for (ptrdiff_t k = 0; k < c->count; k++) {
+		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
+		if (d < 0) continue;
+		if (c->kind == COMMAND_GIVE) {
+			u->owner[d] = c->to;
+			// A factory's output stays where it was pointed; anything else
+			// (a unit on its way out included) is now wholly theirs.
+			if (u->type[d] != UNIT_FACTORY) u->output[d] = c->to;
+		} else if (u->type[d] == UNIT_FACTORY) {
+			u->output[d] = c->to;
 		}
 	}
 }
@@ -673,6 +710,10 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		apply_transform(f, c);
 		return;
 	}
+	if (c->kind == COMMAND_GIVE || c->kind == COMMAND_OUTPUT) {
+		apply_give(f, c);
+		return;
+	}
 	if (c->kind == COMMAND_BUILD && !unit_is_structure(c->unit_type)) return;
 	Units *u = &f->units;
 	V2 target = clamp_to_map(t, c->target, 1.0f);
@@ -680,7 +721,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 	V2 sum = v2(0.0f, 0.0f);
 	ptrdiff_t live = 0;
 	for (ptrdiff_t k = 0; k < c->count; k++) {
-		ptrdiff_t d = units_find(u, c->units[k]);
+		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0) continue;
 		sum = v2_add(sum, v2(u->px[d], u->pz[d]));
 		live++;
@@ -689,7 +730,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 	V2 centre = v2_scale(sum, 1.0f / (float)live);
 	float spread = 0.0f;
 	for (ptrdiff_t k = 0; k < c->count; k++) {
-		ptrdiff_t d = units_find(u, c->units[k]);
+		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0) continue;
 		spread = f_max(spread, v2_len(v2_sub(v2(u->px[d], u->pz[d]), centre)));
 	}
@@ -697,7 +738,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 	float squeeze = spread > want ? want / spread : 1.0f;
 
 	for (ptrdiff_t k = 0; k < c->count; k++) {
-		ptrdiff_t d = units_find(u, c->units[k]);
+		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0 || unit_is_structure(u->type[d])) continue;
 		// Builders all go to the one site; others keep the group's shape.
 		bool build = c->kind == COMMAND_BUILD;
@@ -726,7 +767,7 @@ static UnitType pick_type(Rng *rng, const int32_t weight[COMBAT_TYPE_COUNT])
 
 static void spawn_near_base(Faction *f, const SimConfig *c, const Terrain *t, float radius)
 {
-	spawn_at(f, t, pick_type(&f->rng, c->type_weight), f->base, radius);
+	spawn_at(f, t, pick_type(&f->rng, c->type_weight), (PlayerSlot){0}, f->base, radius);
 }
 
 static void spawn(Faction *f, const Sim *sim)
@@ -1066,7 +1107,7 @@ static ptrdiff_t engineer_site(Faction *f, const Sim *sim, ptrdiff_t e)
 		u->order[e] = ORDER_IDLE; // nothing to do here: report back idle
 		return -1;
 	}
-	s = units_spawn(u, type, site.x, site.z, terrain_height(&sim->terrain, site.x, site.z));
+	s = units_spawn(u, type, u->owner[e], site.x, site.z, terrain_height(&sim->terrain, site.x, site.z));
 	u->progress[s] = 0.0f;
 	u->hp[s] = 0.1f * unit_defs[type].hp;
 	f->stats.units_spawned++;
@@ -1082,7 +1123,7 @@ static void factory_release(Faction *f, const Sim *sim, ptrdiff_t fac, UnitType 
 	float face = u->px[fac] < sim->terrain.size_x * 0.5f ? 1.0f : -1.0f;
 	float off = unit_defs[UNIT_FACTORY].radius + unit_defs[type].radius + 1.5f;
 	V2 at = clamp_to_map(&sim->terrain, v2(u->px[fac] + off * face, u->pz[fac]), 2.0f);
-	units_spawn(u, type, at.x, at.z, terrain_height(&sim->terrain, at.x, at.z));
+	units_spawn(u, type, u->output[fac], at.x, at.z, terrain_height(&sim->terrain, at.x, at.z));
 	f->stats.units_spawned++;
 }
 
@@ -1103,7 +1144,9 @@ static ptrdiff_t waiting_batch(const Units *u, ptrdiff_t g, int32_t *out, bool *
 			*unpaired = u->route[i] & ROUTE_UNPAIRED;
 			limit = *unpaired ? UNPAIRED_BATCH : PAIRED_BATCH;
 		}
-		if (u->dest[i] != u->dest[first] || u->route[i] != u->route[first]) continue;
+		if (u->dest[i] != u->dest[first] || u->route[i] != u->route[first]
+		    || !player_eq(u->output[i], u->output[first]))
+			continue;
 		if (out) out[n] = (int32_t)i;
 		n++;
 	}
@@ -1239,7 +1282,7 @@ static void add_departure(Faction *f, const Departure *dep)
 	for (ptrdiff_t k = 0; k < f->departure_count; k++) {
 		Departure *d = &f->departures[k];
 		if (d->dest == dep->dest && d->type == dep->type && d->route == dep->route && d->unpaired == dep->unpaired
-		    && d->landing.x == dep->landing.x && d->landing.z == dep->landing.z) {
+		    && d->landing.x == dep->landing.x && d->landing.z == dep->landing.z && player_eq(d->owner, dep->owner)) {
 			d->count++;
 			return;
 		}
@@ -1263,7 +1306,8 @@ static void fire_transporters(Faction *f)
 		ptrdiff_t n = waiting_batch(u, g, leaving, &unpaired);
 		if (n == 0) continue;
 		Departure dep = {.dest = u->dest[leaving[0]], .route = u->route[leaving[0]] & ~ROUTE_UNPAIRED, .unpaired = unpaired,
-		                 .landing = unpaired ? v2(u->tx[g], u->tz[g]) : v2(0.0f, 0.0f), .count = 1};
+		                 .landing = unpaired ? v2(u->tx[g], u->tz[g]) : v2(0.0f, 0.0f), .count = 1,
+		                 .owner = u->output[leaving[0]]};
 		for (ptrdiff_t k = 0; k < n; k++) {
 			dep.type = u->type[leaving[k]];
 			add_departure(f, &dep);
@@ -1403,11 +1447,19 @@ static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const 
 
 // ---------------------------------------------------------------- lifecycle
 
+V2 sim_player_base(const Sim *sim, FactionId f, PlayerSlot p)
+{
+	V2 base = sim->factions[f.v].base;
+	float dz = (float)((p.v + 1) / 2) * KIT_SPACING * (p.v % 2 ? -1.0f : 1.0f);
+	return v2(base.x, base.z + dz);
+}
+
 void sim_init(Sim *sim, SimConfig config)
 {
 	ASSERT(config.max_units > 0 && config.max_projectiles > 0);
 	ASSERT(config.population <= config.max_units && config.initial_units <= config.population);
 	ASSERT(config.spawn_interval > 0);
+	for (int k = 0; k < FACTION_COUNT; k++) ASSERT(config.players[k] >= 1 && config.players[k] <= MAX_PLAYERS);
 	int32_t weights = 0;
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) {
 		ASSERT(config.type_weight[k] >= 0 && config.type_weight[k] <= 1000);
@@ -1447,17 +1499,21 @@ void sim_init(Sim *sim, SimConfig config)
 
 		f->economy = (Economy){START_METAL, START_ENERGY, METAL_CAP, ENERGY_CAP, .rate = 1.0f};
 		if (config.economy) {
-			// A factory facing the middle, and two engineers beside it: in a
-			// world, only in the faction's home zone.
+			// Each player: a factory facing the middle, and two engineers
+			// beside it; the first at the base, the others above and below it
+			// in turn. In a world, only in the faction's home zone.
 			if (!(config.bases >> k & 1)) continue;
 			float face = k == 0 ? 1.0f : -1.0f;
-			V2 at = v2(f->base.x + 10.0f * face, f->base.z);
-			units_spawn(&f->units, UNIT_FACTORY, at.x, at.z, terrain_height(t, at.x, at.z));
-			for (int e = 0; e < 2; e++) {
-				V2 q = v2(at.x + 9.0f * face, at.z + (e ? 6.0f : -6.0f));
-				units_spawn(&f->units, UNIT_ENGINEER, q.x, q.z, terrain_height(t, q.x, q.z));
+			for (int pl = 0; pl < config.players[k]; pl++) {
+				PlayerSlot owner = {(uint8_t)pl};
+				V2 at = v2_add(sim_player_base(sim, f->id, owner), v2(10.0f * face, 0.0f));
+				units_spawn(&f->units, UNIT_FACTORY, owner, at.x, at.z, terrain_height(t, at.x, at.z));
+				for (int e = 0; e < 2; e++) {
+					V2 q = v2(at.x + 9.0f * face, at.z + (e ? 6.0f : -6.0f));
+					units_spawn(&f->units, UNIT_ENGINEER, owner, q.x, q.z, terrain_height(t, q.x, q.z));
+				}
+				f->stats.units_spawned += 3;
 			}
-			f->stats.units_spawned += 3;
 			continue;
 		}
 		float spread = 1.6f * f_sqrt((float)config.initial_units);
@@ -1520,6 +1576,7 @@ static Hash hash_units(Hash h, const Units *u)
 		h = hash_u64(h, u->queue[i]);
 		h = hash_u32(h, (uint32_t)u->queue_len[i] << 24 | (uint32_t)u->repeat[i] << 16 | (uint32_t)u->dest[i] << 8 | u->seeded[i]);
 		h = hash_u32(h, u->route[i]);
+		h = hash_u32(h, (uint32_t)u->owner[i].v << 8 | u->output[i].v);
 	}
 	return h;
 }
@@ -1637,6 +1694,8 @@ void faction_write(const Faction *f, ByteBuf *b)
 		put8(b, u->dest[i]);
 		put32(b, u->route[i]);
 		put8(b, u->seeded[i]);
+		put8(b, u->owner[i].v);
+		put8(b, u->output[i].v);
 	}
 	const Projectiles *p = &f->incoming;
 	put32(b, (uint32_t)p->count);
@@ -1741,6 +1800,9 @@ bool faction_read(Faction *f, ByteReader *r)
 		u->dest[i] = get8(r);
 		u->route[i] = get32(r);
 		u->seeded[i] = get8(r);
+		u->owner[i] = (PlayerSlot){get8(r)};
+		u->output[i] = (PlayerSlot){get8(r)};
+		if (!player_ok(u->owner[i]) || !player_ok(u->output[i])) return false;
 		if (type >= UNIT_TYPE_COUNT || order >= ORDER_KIND_COUNT || u->engaged[i] > 1 || u->cooldown[i] < 0
 		    || build_type >= UNIT_TYPE_COUNT || u->queue_len[i] > FACTORY_QUEUE || u->repeat[i] > 1 || u->seeded[i] > 1
 		    || u->dest[i] >= ZONE_MAX || !route_ok(u->route[i] & ~ROUTE_UNPAIRED)

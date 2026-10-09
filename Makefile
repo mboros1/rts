@@ -14,7 +14,7 @@
 #   make demos-restore   re-render demo videos that are only LFS pointers
 #   make share DEMO=NAME   full-quality copy of a demo, on the clipboard
 #   make soak MINUTES=N   zones, a coordinator and a player under random kills
-#   make world-soak MINUTES=N   a self-playing world under random kills
+#   make world-soak MINUTES=N [WORLD=FILE]   a self-playing world under random kills
 
 CC      := clang
 GCC     := gcc-15
@@ -178,7 +178,8 @@ soak: all
 # coordinator SIGKILLed at random, players dropping in. Checks conservation,
 # replays, memory, and that both sides expanded.
 world-soak: all
-	@$(S) "world soak: $(MINUTES) min" python3 tools/world-soak.py $(B) $(B)/world-soak --minutes $(MINUTES)
+	@$(S) "world soak: $(MINUTES) min" python3 tools/world-soak.py $(B) $(B)/world-soak --minutes $(MINUTES) \
+		--world $(or $(WORLD),worlds/five.world)
 
 # Copy every Claude Code session transcript for this repo into work_log/
 # (gitignored but for its README), named by date and session id.

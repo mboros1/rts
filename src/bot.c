@@ -86,9 +86,15 @@ bool doctrine_parse(Doctrine *d, const char *spec, char *err, size_t err_len)
 
 Bot bot_create(FactionId faction, uint64_t seed)
 {
+	return bot_create_player(faction, (PlayerSlot){0}, seed);
+}
+
+Bot bot_create_player(FactionId faction, PlayerSlot player, uint64_t seed)
+{
 	return (Bot){
 		.faction = faction,
-		.rng = rng_seed(seed ^ (0xb07u + faction.v)),
+		.player = player,
+		.rng = rng_seed(seed ^ (0xb07u + faction.v + 0x100u * player.v)),
 		.period = 30,
 		.group_size = 128,
 		.enabled = true,
@@ -109,6 +115,9 @@ static bool emit(Command *out, ptrdiff_t *count, ptrdiff_t cap, Command c)
 	out[(*count)++] = c;
 	return true;
 }
+
+// The units this bot plays: its player's. Teammates' are friendly, not its own.
+static bool mine(const Bot *bot, const Units *u, ptrdiff_t i) { return player_eq(u->owner[i], bot->player); }
 
 // Sites engineers are already walking to: not built yet, so placement_ok
 // can't see them, but promised all the same.
@@ -134,10 +143,11 @@ static void promise(Promised *p, UnitType type, V2 at)
 	p->type[p->n++] = type;
 }
 
-// A site near the base where `type` fits, spiralling outward.
-static bool site_near_base(const Sim *sim, FactionId f, UnitType type, const Promised *promised, V2 *out)
+// A site near the player's base where `type` fits, spiralling outward.
+static bool site_near_base(const Sim *sim, const Bot *bot, UnitType type, const Promised *promised, V2 *out)
 {
-	V2 base = sim->factions[f.v].base;
+	FactionId f = bot->faction;
+	V2 base = sim_player_base(sim, f, bot->player);
 	for (int i = 0; i < 64; i++) {
 		float r = 16.0f + 7.0f * (float)(i / 8);
 		V2 at = v2_add(base, v2_scale(ring[(i + 3 * (i / 8)) % 8], r));
@@ -156,13 +166,34 @@ static bool queue_has(const Units *u, ptrdiff_t d, UnitType t)
 	return false;
 }
 
-static bool own_transporter(const Units *u, bool finished_only)
+static bool own_transporter(const Bot *bot, const Units *u, bool finished_only)
 {
 	for (ptrdiff_t i = 0; i < u->count; i++)
-		if (u->type[i] == UNIT_TRANSPORTER && (u->progress[i] >= 1.0f || !finished_only)) return true;
+		if (mine(bot, u, i) && u->type[i] == UNIT_TRANSPORTER && (u->progress[i] >= 1.0f || !finished_only)) return true;
 	return false;
 }
 
+
+// The economy as this bot plans with it: the side's is shared by its players
+// (until each has their own), so each plans with an even share of it, as if
+// playing alone on that much.
+static Economy share_of(const Sim *sim, FactionId f)
+{
+	Economy e = sim->factions[f.v].economy;
+	float n = (float)sim->config.players[f.v];
+	if (n <= 1.0f) return e;
+	e.metal /= n;
+	e.energy /= n;
+	e.metal_cap /= n;
+	e.energy_cap /= n;
+	e.metal_income /= n;
+	e.energy_income /= n;
+	e.metal_spent /= n;
+	e.energy_spent /= n;
+	e.metal_wanted /= n;
+	e.energy_wanted /= n;
+	return e;
+}
 
 // An economy, kept simply: factories cycle a mix of units (with engineers
 // while there are too few); idle engineers take the most useful job.
@@ -171,10 +202,11 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	FactionId f = bot->faction;
 	const Faction *me = &sim->factions[f.v];
 	const Units *u = &me->units;
-	const Economy *e = &me->economy;
+	const Economy share = share_of(sim, f), *e = &share;
 	const Doctrine *d = &bot->doctrine;
 	int engineers = 0, factories = 0, army = 0, scouts = 0, sappers = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (!mine(bot, u, i)) continue;
 		engineers += u->type[i] == UNIT_ENGINEER;
 		sappers += u->type[i] == UNIT_SAPPER;
 		scouts += u->type[i] == UNIT_SCOUT;
@@ -201,10 +233,16 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	uint32_t want = 0;
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) want |= (uint32_t)(amount[k] > 0) << k;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
-		if (u->type[i] != UNIT_FACTORY || u->progress[i] < 1.0f) continue;
+		if (!mine(bot, u, i) || u->type[i] != UNIT_FACTORY || u->progress[i] < 1.0f) continue;
+		// A factory making units for a teammate makes them an army: what we
+		// need ourselves comes from our other factories.
+		bool for_us = player_eq(u->output[i], bot->player);
+		uint32_t army_types = 0;
+		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) army_types |= (uint32_t)(d->mix[k] > 0) << k;
+		uint32_t wanted = for_us ? want : army_types;
 		uint32_t has = 0;
 		for (int q = 0; q < u->queue_len[i]; q++) has |= 1u << (u->queue[i] >> (8 * q) & 0xff);
-		if (has == want) continue; // already making what we want
+		if (has == wanted) continue; // already making what we want
 		UnitHandle *h = PUSH(arena, UnitHandle, 1);
 		*h = units_handle(u, i);
 		Command c = {.faction = f, .kind = COMMAND_PRODUCE, .count = 1, .units = h, .flags = COMMAND_REPEAT};
@@ -213,14 +251,16 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		// Builders and eyes first, then the army.
 		const UnitType order[] = {UNIT_ENGINEER, UNIT_SAPPER, UNIT_SCOUT, UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_SIEGE};
 		for (int k = 0; k < (int)countof(order); k++) {
-			if (!amount[order[k]]) continue;
+			int32_t n = for_us ? amount[order[k]] : unit_is_combat(order[k]) ? d->mix[order[k]] : 0;
+			if (!n) continue;
 			c.unit_type = order[k];
-			c.amount = amount[order[k]];
+			c.amount = n;
 			emit(out, count, cap, c);
 		}
 	}
 
-	// Spots we hold or stand on or are walking to, and sites we're walking to.
+	// Spots we hold or stand on or are walking to, and sites we're walking to:
+	// teammates' too, so two players never race for one.
 	uint64_t taken = e->spots;
 	Promised promised = {0};
 	for (ptrdiff_t i = 0; i < u->count; i++) {
@@ -236,11 +276,11 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	}
 	// In a world, a zone with no transporter of ours yet: the builders are
 	// for that (bot_strategy), before anything else.
-	if (bot->world && !own_transporter(u, false)) return;
+	if (bot->world && !own_transporter(bot, u, false)) return;
 	int want_factories = 1 + (int)(e->metal_income / 10.0f);
 	if (want_factories > 4) want_factories = 4;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
-		if (u->type[i] != UNIT_ENGINEER || u->order[i] != ORDER_IDLE) continue;
+		if (!mine(bot, u, i) || u->type[i] != UNIT_ENGINEER || u->order[i] != ORDER_IDLE) continue;
 		V2 p = v2(u->px[i], u->pz[i]);
 		// The nearest free metal spot, and whether it's within reach of home.
 		int32_t spot = -1;
@@ -253,7 +293,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 				spot = k;
 			}
 		}
-		bool near = spot >= 0 && v2_len(v2_sub(sim->spots.at[spot], me->base)) < 220.0f;
+		bool near = spot >= 0 && v2_len(v2_sub(sim->spots.at[spot], sim_player_base(sim, f, bot->player))) < 220.0f;
 		bool power_short = e->energy < 2000.0f && e->energy_income < 1.1f * e->energy_wanted;
 		bool rich = e->metal > 400.0f && factories < want_factories;
 
@@ -272,7 +312,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		if (type == UNIT_EXTRACTOR) {
 			site = sim->spots.at[spot];
 			taken |= (uint64_t)1 << spot;
-		} else if (!site_near_base(sim, f, type, &promised, &site)) {
+		} else if (!site_near_base(sim, bot, type, &promised, &site)) {
 			continue;
 		}
 		promise(&promised, type, site);
@@ -295,11 +335,11 @@ static int32_t front_score(const BotWorld *w, int z)
 	     + (w->neighbours_enemy[z] ? 50000 : 0) - w->mine[z];
 }
 
-// Up to n idle units of a type (any combat type: UNIT_TYPE_COUNT), appended to h.
-static int32_t pick_idle(const Units *u, UnitType type, int32_t n, UnitHandle *h, int32_t at)
+// Up to n of the bot's idle units of a type (any combat type: UNIT_TYPE_COUNT), appended to h.
+static int32_t pick_idle(const Bot *bot, const Units *u, UnitType type, int32_t n, UnitHandle *h, int32_t at)
 {
 	for (ptrdiff_t i = 0; i < u->count && n > 0; i++) {
-		if (u->order[i] != ORDER_IDLE || u->engaged[i]) continue;
+		if (!mine(bot, u, i) || u->order[i] != ORDER_IDLE || u->engaged[i]) continue;
 		bool match = type == UNIT_TYPE_COUNT ? unit_is_combat(u->type[i]) : u->type[i] == type;
 		if (!match) continue;
 		bool taken = false;
@@ -327,13 +367,14 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	FactionId f = bot->faction;
 	const Faction *me = &sim->factions[f.v];
 	const Units *u = &me->units;
-	const Economy *e = &me->economy;
+	const Economy share = share_of(sim, f), *e = &share;
 	int here = w->here;
 	bool sending = false;
 	int32_t idle_army = 0, idle_builders = 0, idle_crew = 0, idle_raiders = 0, scouts = 0, turrets = 0;
 	int32_t transporters = 0;
 	ptrdiff_t free_scout = -1;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (!mine(bot, u, i)) continue;
 		sending = sending || u->order[i] == ORDER_SEND;
 		bool idle = u->order[i] == ORDER_IDLE && !u->engaged[i];
 		idle_army += idle && unit_is_combat(u->type[i]);
@@ -349,27 +390,27 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 
 	// Transporters: the first with every idle builder (the sooner it's up, the
 	// sooner help comes); more, one at a time, up to the doctrine's number.
-	if (transporters == 0 || (own_transporter(u, true) && transporters < d->transporters)) {
+	if (transporters == 0 || (own_transporter(bot, u, true) && transporters < d->transporters)) {
 		if (idle_builders == 0 || e->metal < 0.5f * unit_defs[UNIT_TRANSPORTER].metal_cost) return;
 		Promised none = {0};
 		V2 site;
-		if (!site_near_base(sim, f, UNIT_TRANSPORTER, &none, &site)) return;
+		if (!site_near_base(sim, bot, UNIT_TRANSPORTER, &none, &site)) return;
 		int32_t take = transporters == 0 ? idle_builders : 1;
 		UnitHandle *h = PUSH(arena, UnitHandle, idle_builders);
-		int32_t n = pick_idle(u, UNIT_SAPPER, take, h, 0);
-		n = pick_idle(u, UNIT_ENGINEER, take - n, h, n);
+		int32_t n = pick_idle(bot, u, UNIT_SAPPER, take, h, 0);
+		n = pick_idle(bot, u, UNIT_ENGINEER, take - n, h, n);
 		emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_BUILD, .target = site, .count = n,
 		                                .units = h, .unit_type = UNIT_TRANSPORTER});
 		if (transporters == 0) return;
 	}
-	if (!own_transporter(u, true) || sending) return; // one send at a time
+	if (!own_transporter(bot, u, true) || sending) return; // one send at a time
 
 	// Dig in at the front: the garrison, as turrets (it can't be sent then).
 	if (d->entrench && front && turrets < d->garrison && idle_army > 0) {
 		int32_t n = d->garrison - turrets;
 		UnitHandle *h = PUSH(arena, UnitHandle, n);
-		int32_t got = pick_idle(u, UNIT_TANK, n, h, 0);
-		got = pick_idle(u, UNIT_RAIDER, n - got, h, got);
+		int32_t got = pick_idle(bot, u, UNIT_TANK, n, h, 0);
+		got = pick_idle(bot, u, UNIT_RAIDER, n - got, h, got);
 		if (got) emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_ENTRENCH, .count = got, .units = h});
 	}
 
@@ -388,8 +429,8 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 			if (z != here && w->linked[z] && !w->ours[z]) target = z;
 		if (target >= 0) {
 			UnitHandle *h = PUSH(arena, UnitHandle, crew);
-			int32_t n = pick_idle(u, d->crew_builder, d->crew_builders, h, 0);
-			n = pick_idle(u, UNIT_RAIDER, d->crew_escort, h, n);
+			int32_t n = pick_idle(bot, u, d->crew_builder, d->crew_builders, h, 0);
+			n = pick_idle(bot, u, UNIT_RAIDER, d->crew_escort, h, n);
 			bot_send(bot, arena, out, count, cap, target, h, n);
 			return;
 		}
@@ -400,7 +441,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		for (int z = 0; z < w->count; z++) {
 			if (z == here || !w->linked[z] || w->ours[z] || !bot_believes_enemy(w, z)) continue;
 			UnitHandle *h = PUSH(arena, UnitHandle, RAID);
-			bot_send(bot, arena, out, count, cap, z, h, pick_idle(u, UNIT_RAIDER, RAID, h, 0));
+			bot_send(bot, arena, out, count, cap, z, h, pick_idle(bot, u, UNIT_RAIDER, RAID, h, 0));
 			return;
 		}
 	}
@@ -438,7 +479,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	if (target < 0) return;
 	if (spare > PAIRED_BATCH) spare = PAIRED_BATCH;
 	UnitHandle *h = PUSH(arena, UnitHandle, spare);
-	bot_send(bot, arena, out, count, cap, target, h, pick_idle(u, UNIT_TYPE_COUNT, spare, h, 0));
+	bot_send(bot, arena, out, count, cap, target, h, pick_idle(bot, u, UNIT_TYPE_COUNT, spare, h, 0));
 }
 
 // Idle scouts wander the zone, the enemy's side of it most: our eyes.
@@ -447,7 +488,7 @@ static void bot_patrol(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptr
 	const Units *u = &sim->factions[bot->faction.v].units;
 	const Terrain *t = &sim->terrain;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
-		if (u->type[i] != UNIT_SCOUT || u->order[i] != ORDER_IDLE) continue;
+		if (!mine(bot, u, i) || u->type[i] != UNIT_SCOUT || u->order[i] != ORDER_IDLE) continue;
 		float x = rng_range(&bot->rng, 0.15f, 0.95f);
 		if (bot->faction.v == 1) x = 1.0f - x;
 		UnitHandle *h = PUSH(arena, UnitHandle, 1);
@@ -461,12 +502,27 @@ static void bot_patrol(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptr
 // in groups to attack-move on the enemy base from a random angle (in a
 // world, only once we see an enemy). Every STRATEGY_PERIOD, on
 // a tick of its own, the map.
+static void bot_think_side(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *count, ptrdiff_t cap);
+
+// A bot's commands are its player's, and what it sends stays its own.
 void bot_think(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *count, ptrdiff_t cap)
 {
 	if (!bot->enabled) return;
-	if (bot->world && sim->config.economy && (sim->tick.v + 7 + bot->faction.v * 150) % STRATEGY_PERIOD == 0)
+	ptrdiff_t first = *count;
+	bot_think_side(bot, sim, arena, out, count, cap);
+	for (ptrdiff_t k = first; k < *count; k++) {
+		out[k].player = bot->player;
+		out[k].to = bot->player;
+	}
+}
+
+static void bot_think_side(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *count, ptrdiff_t cap)
+{
+	// Teammates think on ticks of their own.
+	int64_t t = sim->tick.v + bot->player.v * 4;
+	if (bot->world && sim->config.economy && (t + bot->player.v * 33 + 7 + bot->faction.v * 150) % STRATEGY_PERIOD == 0)
 		bot_strategy(bot, sim, arena, out, count, cap);
-	if ((sim->tick.v + bot->faction.v * 15) % bot->period != 0) return;
+	if ((t + bot->faction.v * 15) % bot->period != 0) return;
 	if (sim->config.economy) bot_economy(bot, sim, arena, out, count, cap);
 	const Faction *f = &sim->factions[bot->faction.v];
 	const Faction *enemy = &sim->factions[faction_enemy(bot->faction).v];
@@ -493,7 +549,7 @@ void bot_think(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *
 			in_group = 0;
 		}
 		if (i == u->count) break;
-		if (u->order[i] != ORDER_IDLE || u->engaged[i] || !unit_is_combat(u->type[i])) continue;
+		if (!mine(bot, u, i) || u->order[i] != ORDER_IDLE || u->engaged[i] || !unit_is_combat(u->type[i])) continue;
 		if (in_group == 0) group = PUSH(arena, UnitHandle, bot->group_size);
 		group[in_group++] = units_handle(u, i);
 	}

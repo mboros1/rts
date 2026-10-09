@@ -102,7 +102,7 @@ static void handle_input(Game *g)
 		g->queued[g->queued_count++] = (Command){.faction = {0}, .kind = orders[k].kind, .target = orders[k].target,
 		                                       .count = orders[k].count, .units = orders[k].units,
 		                                       .unit_type = orders[k].type, .amount = orders[k].amount,
-		                                       .flags = orders[k].flags};
+		                                       .flags = orders[k].flags, .player = g->controls.player, .to = orders[k].to};
 }
 
 // ---------------------------------------------------------------- stepping

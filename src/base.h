@@ -49,6 +49,17 @@ typedef struct {
 	uint32_t v;
 } FactionId;
 
+// A player: a slot within a side, 0 to MAX_PLAYERS - 1. Who is in the slot
+// (a person's name, or a bot) is the coordinator's to say; units only carry
+// the slot, so it holds in every zone and across sends and saves.
+enum { MAX_PLAYERS = 8 };
+typedef struct {
+	uint8_t v;
+} PlayerSlot;
+
+static inline bool player_eq(PlayerSlot a, PlayerSlot b) { return a.v == b.v; }
+static inline bool player_ok(PlayerSlot p) { return p.v < MAX_PLAYERS; }
+
 // A unit, addressed through its faction's handle pool. Stale once the unit
 // dies: the slot's generation moves on and lookups refuse the old handle.
 typedef struct {

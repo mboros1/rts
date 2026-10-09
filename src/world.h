@@ -8,6 +8,7 @@
 //   zone east   0.8 0.5 home red
 //   link west middle                 both ways
 //   link middle east
+//   players blue 3                   a side's players (1..8; default 1), every zone
 //   doctrine red turtle              how a side's bots play (bot.h), every zone
 //   doctrine blue in middle raider   ... or one zone (after its zone line)
 //
@@ -32,6 +33,7 @@ typedef struct {
 	uint8_t links[WORLD_MAX_LINKS][2];
 	int link_count;
 	int port;
+	uint8_t players[FACTION_COUNT];                        // slots per side
 	char doctrine[FACTION_COUNT][192];                     // every zone ("": the default)
 	char doctrine_in[COORD_MAX_ZONES][FACTION_COUNT][192]; // one zone, over that
 } World;
@@ -96,10 +98,15 @@ typedef struct {
 	int link_count;
 	DirectoryTransit transit[DIRECTORY_MAX_TRANSIT];
 	int transit_count;
+	// Each side's players: how many slots, and who plays each ("": nobody
+	// yet, so its bots do).
+	uint8_t players[FACTION_COUNT];
+	char player[FACTION_COUNT][MAX_PLAYERS][ZONE_NAME];
 } Directory;
 
 // A side's view of a directory (fog of war on the map): its own presence,
-// its own transits, and its intel; nothing of the enemy's numbers.
+// its own transits, its own players, and its intel; nothing of the enemy's
+// numbers or who they are.
 // SPECTATOR (wire.h): the whole of it.
 void directory_fog(Directory *d, uint8_t viewer);
 

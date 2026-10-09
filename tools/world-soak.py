@@ -83,6 +83,11 @@ def main():
         log.flush()
 
     port = 50000 + os.getpid() % 1500 * 8  # its own band, clear of the check stages
+    places = {"blue": 1, "red": 1}
+    for line in open(a.world):
+        f = line.split()
+        if len(f) == 3 and f[0] == "players":
+            places[f[1]] = int(f[2])
     world_file = os.path.join(a.out, "soak.world")
     with open(a.world) as src, open(world_file, "w") as dst:
         dst.write(re.sub(r"^port .*$", f"port {port}", src.read(), flags=re.M))
@@ -168,8 +173,12 @@ def main():
         if not player and now >= next_player:
             sessions += 1
             zone = rng.choice(zones)
+            # One name per place on the side, so players take every place
+            # (each keeps its name's) and none is turned away.
+            side = rng.choice(["blue", "red"])
+            name = f"{side}{rng.randrange(places[side])}"
             player = subprocess.Popen(
-                [f"{a.bin}/rts", "--coord", f"127.0.0.1:{port}", "--headless", "--faction", rng.choice(["blue", "red"]),
+                [f"{a.bin}/rts", "--coord", f"127.0.0.1:{port}", "--headless", "--faction", side, "--name", name,
                  "--bot", "--journey", f"map:1,{zone}:{rng.randint(10, 60)}",
                  "--stats", os.path.join(a.out, f"player-{sessions:03d}.txt")],
                 stdout=open(os.path.join(a.out, "player.out"), "a"), stderr=subprocess.STDOUT)

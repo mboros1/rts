@@ -100,6 +100,8 @@ static void directory(const Coord *c, Directory *d)
 		}
 	}
 	memcpy(d->links, c->world.links, sizeof d->links);
+	for (int f = 0; f < FACTION_COUNT; f++) d->players[f] = c->world.zone_count ? c->world.players[f] : 1;
+	memcpy(d->player, c->ledger.player, sizeof d->player);
 	// Pending transfers between zones, summed by route and side.
 	for (int32_t k = 0; k < c->ledger.transfer_count; k++) {
 		const Transfer *t = &c->ledger.transfers[k];
@@ -195,6 +197,23 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 		if (!from || !get_zone_status(&r, &st)) break;
 		from->status = st;
 		from->reported = true;
+		break;
+	}
+	case COORD_JOIN: {
+		// A player's slot on their side, kept by name: the same in every zone.
+		uint8_t faction = get8(&r);
+		if (!get_name(&r, name) || faction >= FACTION_COUNT) {
+			conn_close(&p->conn, "bad join");
+			break;
+		}
+		int slots = c->world.zone_count ? c->world.players[faction] : 1;
+		uint8_t slot = ledger_join(&c->ledger, faction, name, slots);
+		if (slot == SIDE_FULL) printf("coord: %s can't join %s: all %d places taken\n", name, faction ? "red" : "blue", slots);
+		else printf("coord: %s plays %s.%u\n", name, faction ? "red" : "blue", slot);
+		arena_reset(&c->out);
+		ByteBuf b = bytebuf_make(&c->out, 4);
+		put8(&b, slot);
+		send_to(c, p, COORD_SLOT, &b, now);
 		break;
 	}
 	case COORD_DIRECTORY_ASK: {

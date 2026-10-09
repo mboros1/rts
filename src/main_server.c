@@ -32,8 +32,10 @@
 //   - otherwise refused.
 // Arrivals wait while their landing area is full (LANDING_ROOM).
 //
-// When a side's last player leaves, its bot takes over, unless the zone's
-// setup turned that bot off; a player joining sends it back.
+// Each client plays one player (a slot) of its side, and its commands are
+// that player's. When a side's last player leaves, its players' bots take
+// over, unless the zone's setup turned them off; a player joining sends
+// them back.
 //
 // In a world, setup scripts only set up: spawning after tick 0 is refused.
 //
@@ -80,6 +82,7 @@ typedef struct {
 	ClientState state;
 	Conn conn;
 	uint8_t faction;          // 0, 1 or SPECTATOR
+	PlayerSlot player;        // which of the faction's players: its commands are theirs
 	int64_t joined_tick;
 	int64_t commands;
 } Client;
@@ -134,7 +137,7 @@ typedef struct {
 	uint64_t applied[1024];      // transfers recently brought in
 	int applied_count;
 	int players[FACTION_COUNT];
-	bool bot_allowed[FACTION_COUNT];   // the bot plays a side nobody's playing
+	bool bot_allowed[FACTION_COUNT][MAX_PLAYERS]; // a player's bot plays while nobody of the side is here
 	// Persistence (spike 6).
 	const char *state_path;
 	double save_every, next_save;
@@ -167,25 +170,33 @@ static void send_or_drop(Server *s, Client *c, uint8_t kind, const ByteBuf *b, d
 	(void)s;
 }
 
-// Away from the keyboard: the bot plays the side, if the zone allows it.
+// Away from the keyboard: the side's players' bots play it, where the zone
+// allows them. (One player's bot standing in for that player alone, beside
+// people, is spike 15.)
 static void last_player_leaves(Server *s, uint8_t faction)
 {
-	s->run.bots[faction].enabled = s->bot_allowed[faction];
-	if (s->bot_allowed[faction])
-		printf("server %s: %s's last player left: the bot takes over\n", s->zone_name, faction ? "red" : "blue");
+	for (int p = 0; p < MAX_PLAYERS; p++) s->run.bots[faction][p].enabled = s->bot_allowed[faction][p];
+	if (s->bot_allowed[faction][0])
+		printf("server %s: %s's last player left: the bots take over\n", s->zone_name, faction ? "red" : "blue");
 }
 
-static void player_returns(Server *s, uint8_t faction) { s->run.bots[faction].enabled = false; }
+static void player_returns(Server *s, uint8_t faction)
+{
+	for (int p = 0; p < MAX_PLAYERS; p++) s->run.bots[faction][p].enabled = false;
+}
 
 static void handle_hello(Server *s, Client *c, ByteReader *r, double now)
 {
 	uint32_t version = get32(r);
 	uint8_t faction = get8(r);
-	if (r->bad || version != WIRE_VERSION || (faction >= FACTION_COUNT && faction != SPECTATOR)) {
+	PlayerSlot player = {get8(r)};
+	bool slot_ok = faction == SPECTATOR || (faction < FACTION_COUNT && player.v < s->sim.config.players[faction]);
+	if (r->bad || version != WIRE_VERSION || !slot_ok) {
 		conn_close(&c->conn, "bad hello");
 		return;
 	}
 	c->faction = faction;
+	c->player = player;
 	c->state = CLIENT_READY;
 	if (faction < FACTION_COUNT && s->players[faction]++ == 0) player_returns(s, faction);
 	c->joined_tick = s->sim.tick.v;
@@ -202,20 +213,22 @@ static void handle_hello(Server *s, Client *c, ByteReader *r, double now)
 	}
 	send_or_drop(s, c, MSG_WELCOME, &b, now);
 	ByteBuf snap = bytebuf_make(&s->encode, FRAME_MAX);
-	bool player = faction < FACTION_COUNT;
-	if (player) wire_encode_faction_snapshot(&s->sim, (FactionId){faction}, &snap);
+	bool plays = faction < FACTION_COUNT;
+	if (plays) wire_encode_faction_snapshot(&s->sim, (FactionId){faction}, &snap);
 	else wire_encode_snapshot(&s->mirror, &snap);
-	send_or_drop(s, c, player ? MSG_FACTION_SNAPSHOT : MSG_SNAPSHOT, &snap, now);
+	send_or_drop(s, c, plays ? MSG_FACTION_SNAPSHOT : MSG_SNAPSHOT, &snap, now);
 	arena_rewind(m);
-	printf("server: client joined as %s at tick %lld (snapshot %td bytes)\n",
-	       faction == SPECTATOR ? "spectator" : faction == 0 ? "blue" : "red",
+	printf("server: client joined as %s.%d at tick %lld (snapshot %td bytes)\n",
+	       faction == SPECTATOR ? "spectator" : faction == 0 ? "blue" : "red", player.v,
 	       (long long)s->sim.tick.v, snap.len);
 }
 
-// Commands are untrusted: only orders, only for the client's own faction,
-// with sane targets; handles are checked by the sim like anyone's.
+// Commands are untrusted: only orders, only as the client's own player of its
+// own faction, with sane targets; handles (and whose units they are) are
+// checked by the sim like anyone's.
 static void handle_command(Server *s, Client *c, ByteReader *r)
 {
+	PlayerSlot to = {get8(r)};
 	uint8_t kind = get8(r);
 	V2 target = {getf(r), getf(r)};
 	uint8_t unit_type = get8(r);
@@ -227,8 +240,8 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	// Arriving comes from the coordinator, never players. Whether a send is
 	// paired is the server's to say (route_send).
 	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE || kind == COMMAND_SEND
-	            || kind == COMMAND_ENTRENCH || kind == COMMAND_MOBILIZE;
-	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && unit_type < UNIT_TYPE_COUNT
+	            || kind == COMMAND_ENTRENCH || kind == COMMAND_MOBILIZE || kind == COMMAND_GIVE || kind == COMMAND_OUTPUT;
+	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && to.v < s->sim.config.players[c->faction] && unit_type < UNIT_TYPE_COUNT
 	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : ZONE_MAX)
 	       && flags <= COMMAND_REPEAT && route_ok(route)
 	       && n <= (uint32_t)s->sim.config.max_units && (ptrdiff_t)n * 8 == r->len - r->pos
@@ -239,7 +252,7 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	}
 	UnitHandle *h = PUSH(&s->tick, UnitHandle, n);
 	for (uint32_t i = 0; i < n; i++) h[i] = (UnitHandle){get32(r), get32(r)};
-	s->queued[s->queued_count++] = (Command){.faction = {c->faction}, .kind = (CommandKind)kind,
+	s->queued[s->queued_count++] = (Command){.faction = {c->faction}, .player = c->player, .to = to, .kind = (CommandKind)kind,
 	                                         .target = target, .count = n, .units = h,
 	                                         .unit_type = (UnitType)unit_type, .amount = amount, .flags = flags,
 	                                         .route = route};
@@ -399,6 +412,7 @@ static void on_deliver(Server *s, ByteReader *r, double now)
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) {
 		if (!counts[k] || s->queued_count == MAX_COMMANDS) continue;
 		s->queued[s->queued_count++] = (Command){.faction = {faction}, .kind = COMMAND_ARRIVE, .target = at,
+		                                         .player = leg.owner,
 		                                         .unit_type = (UnitType)k, .amount = counts[k], .route = leg.route,
 		                                         .flags = leg.unpaired ? COMMAND_UNPAIRED : 0};
 	}
@@ -483,7 +497,7 @@ static void coord_service(Server *s, double now)
 //   "RTSZ" u32 version, config (wire_put_config), u64 last departure number,
 //   u32 n, n x outgoing departure, u32 m, m x u64 applied transfer, sim_save
 
-enum { ZONE_STATE_VERSION = 3 };
+enum { ZONE_STATE_VERSION = 4 };
 
 static void put_outgoing(ByteBuf *b, const Outgoing *o)
 {
@@ -566,7 +580,7 @@ static bool load_zone(Server *s, Arena *scratch)
 static bool same_leg(const Departure *a, const Departure *b)
 {
 	return a->dest == b->dest && a->route == b->route && a->unpaired == b->unpaired && a->landing.x == b->landing.x
-	    && a->landing.z == b->landing.z;
+	    && a->landing.z == b->landing.z && player_eq(a->owner, b->owner);
 }
 
 static void report_to_coord(Server *s, double now)
@@ -589,7 +603,7 @@ static void report_to_coord(Server *s, double now)
 			if (s->outgoing_count == (int)countof(s->outgoing)) fatal("server %s: departure outbox full", s->zone_name);
 			Outgoing *o = &s->outgoing[s->outgoing_count++];
 			*o = (Outgoing){.seq = ++s->depart_seq, .faction = (uint8_t)f,
-			                .leg = {.unpaired = d->unpaired, .route = d->route, .landing = d->landing}};
+			                .leg = {.unpaired = d->unpaired, .owner = d->owner, .route = d->route, .landing = d->landing}};
 			memcpy(o->dst, dst, strlen(dst) + 1); // zone names fit: world_parse saw to that
 			for (ptrdiff_t j = k; j < fa->departure_count; j++)
 				if (same_leg(&fa->departures[j], d)) o->counts[fa->departures[j].type] += fa->departures[j].count;
@@ -739,7 +753,7 @@ static void update_bot_worlds(Server *s)
 		w->seen_age[s->here] = age_of(s, s->contact_tick[f]);
 		w->transporter_age[s->here] = s->transporters_seen[f] ? age_of(s, s->transporter_tick[f]) : BOT_NEVER;
 		bot_world_links(w, &fogged);
-		s->run.bots[f].world = w;
+		for (int p = 0; p < MAX_PLAYERS; p++) s->run.bots[f][p].world = w;
 	}
 }
 
@@ -925,8 +939,10 @@ int main(int argc, char **argv)
 		       s.state_path, (long long)s.sim.tick.v, s.outgoing_count);
 	script_run_init(&s.run, &s.script, &s.program, stdout);
 	for (int f = 0; f < FACTION_COUNT; f++) {
-		if (bot_override[f] >= 0) s.run.bots[f].enabled = bot_override[f];
-		s.bot_allowed[f] = s.run.bots[f].enabled;
+		for (int p = 0; p < MAX_PLAYERS; p++) {
+			if (bot_override[f] >= 0) s.run.bots[f][p].enabled = bot_override[f];
+			s.bot_allowed[f][p] = s.run.bots[f][p].enabled;
+		}
 	}
 	mirror_init(&s.mirror, &s.program, s.sim.config.max_units, s.sim.config.max_projectiles);
 	{

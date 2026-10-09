@@ -8,9 +8,14 @@
 //   about Raiders swing north and hit red's side
 //   scenario skirmish                 # starting config and bot behaviour
 //   seed 7 | units 400 | weights 6 3 2 | respawn off | economy on
+//   players blue 3                    # a side's players (1..8), each with their own base
 //   bases blue | bases red | bases none | bases both  # economy: who starts with a base
 //   doctrine red turtle army_cap=500  # how a side's bot plays (bot.h); default balanced
-//   bot red off                       # at tick 0
+//   bot red off                       # at tick 0; bot red.1 off: one player's
+//
+// A side is blue or red, or blue.N for its player N (0..7); plain blue is
+// player 0. Units belong to a player, and only their owner's orders move
+// them: a group's orders are given by whoever selected it.
 //   clip 200..700                     # default clip window
 //   speed 4                           # time-lapse clips: a frame every 4 ticks
 //   camera director | camera 256,256 180
@@ -27,6 +32,9 @@
 //                                     #   point; unpaired: say so (no server to decide)
 //   at 50  arrive blue tank 10        # as if through blue's transporter (tests)
 //   at 40  produce plant raider 2 repeat    # factories: queue N (0 clears)
+//   at 55  give column to 1           # the units now belong to player 1 of their side
+//   at 55  output plant to 1          # factories: what they make goes to player 1
+//   at 60  send army to gamma for 2   # they arrive belonging to player 2
 //   at 70  entrench line              # combat units dig in as turrets (paid, takes time);
 //   at 90  mobilize line              #   mobilize turns entrenched turrets back
 //   at 60  bot red on
@@ -35,10 +43,11 @@
 //                                     #   and finished counts: raiders tanks artillery
 //                                     #   engineers extractors generators factories transporters
 //                                     #   departed arrived
+//   at 600 expect blue.1 tanks >= 5   # a player's: units and finished counts
 //   at 600 expect column alive >= 15  # group field: alive
 //
-// Selections are queries resolved at their tick: SIDE, TYPE (raider, tank,
-// artillery, any), optionally within R of X,Z, optionally the nearest max N.
+// Selections are queries resolved at their tick: SIDE (a player's units
+// only), TYPE (raider, tank, artillery, any), optionally within R of X,Z, optionally the nearest max N.
 // Units spawned at tick T exist from tick T+1.
 #pragma once
 
@@ -88,6 +97,10 @@ typedef struct {
 	CommandKind command;    // order; build and produce use type and limit
 	uint8_t flags;          // produce: COMMAND_REPEAT; send: COMMAND_UNPAIRED
 	Route route;            // send: the hops after the first (limit)
+	PlayerSlot player;      // select, spawn, arrive, bot, expect: SIDE.N (0 if just SIDE)
+	bool player_given;      //   ... and whether .N was written
+	PlayerSlot to;          // give, output; send: who it arrives for
+	bool to_given;          // send: `for N` was written
 	bool on;                // bot
 	ExpectField field;      // expect
 	ExpectOp op;
@@ -101,7 +114,7 @@ typedef struct {
 	const char *about;
 	const Scenario *scenario;
 	SimConfig config;
-	bool bots_on[FACTION_COUNT];   // at tick 0
+	bool bots_on[FACTION_COUNT][MAX_PLAYERS]; // at tick 0
 	Doctrine doctrine[FACTION_COUNT]; // how each side's bot plays (bot.h)
 	ScriptAction *actions;         // sorted by tick, then by line
 	ptrdiff_t action_count;
@@ -124,10 +137,11 @@ bool script_load(Script *s, Arena *arena, const char *path, char *err, ptrdiff_t
 typedef struct {
 	const Script *script;
 	ptrdiff_t next;
-	Bot bots[FACTION_COUNT];
+	Bot bots[FACTION_COUNT][MAX_PLAYERS]; // each player's; those past config.players never run
 	UnitHandle **group_units;
 	ptrdiff_t *group_len;
 	FactionId *group_side;
+	PlayerSlot *group_player;      // who selected it: the group's orders are theirs
 	// Queued builds per group, issued one at a time as the group goes idle.
 	const ScriptAction ***queued;
 	int32_t *queued_head, *queued_len;

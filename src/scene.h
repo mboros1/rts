@@ -18,6 +18,7 @@ typedef struct {
 	const float *progress;      // build progress, 1 when finished; may be nullptr
 	const OrderKind *order;     // own units only (else nullptr): transforming shows
 	const float *work;          //   with its progress
+	const PlayerSlot *owner;    // own units only (else nullptr): each player's own shade
 } SceneUnits;
 
 typedef struct {

@@ -61,9 +61,9 @@ static void test_units(void)
 	Arena a = arena_create("units", 1 << 20);
 	Units u;
 	units_init(&u, &a, 4);
-	ptrdiff_t d0 = units_spawn(&u, UNIT_RAIDER, 1, 1, 0);
-	ptrdiff_t d1 = units_spawn(&u, UNIT_TANK, 2, 2, 0);
-	ptrdiff_t d2 = units_spawn(&u, UNIT_ARTILLERY, 3, 3, 0);
+	ptrdiff_t d0 = units_spawn(&u, UNIT_RAIDER, (PlayerSlot){0}, 1, 1, 0);
+	ptrdiff_t d1 = units_spawn(&u, UNIT_TANK, (PlayerSlot){0}, 2, 2, 0);
+	ptrdiff_t d2 = units_spawn(&u, UNIT_ARTILLERY, (PlayerSlot){0}, 3, 3, 0);
 	UnitHandle h0 = units_handle(&u, d0), h1 = units_handle(&u, d1), h2 = units_handle(&u, d2);
 	CHECK(h0.index == 0 && h1.index == 1 && h2.index == 2);
 
@@ -75,7 +75,7 @@ static void test_units(void)
 	CHECK(moved == 1 && u.px[moved] == 3.0f && u.type[moved] == UNIT_ARTILLERY);
 
 	// The freed slot comes back with a new generation; the old handle stays dead.
-	ptrdiff_t d3 = units_spawn(&u, UNIT_RAIDER, 4, 4, 0);
+	ptrdiff_t d3 = units_spawn(&u, UNIT_RAIDER, (PlayerSlot){0}, 4, 4, 0);
 	UnitHandle h3 = units_handle(&u, d3);
 	CHECK(h3.index == h1.index && h3.generation != h1.generation);
 	CHECK(units_find(&u, h1) == -1);
@@ -258,7 +258,7 @@ static void test_shell_hits(void)
 	Faction *f1 = &sim.factions[1];
 	const Terrain *t = &sim.terrain;
 	float tx = 256.0f, tz = 256.0f;
-	ptrdiff_t d = units_spawn(&f1->units, UNIT_TANK, tx, tz, terrain_height(t, tx, tz));
+	ptrdiff_t d = units_spawn(&f1->units, UNIT_TANK, (PlayerSlot){0}, tx, tz, terrain_height(t, tx, tz));
 	UnitHandle target = units_handle(&f1->units, d);
 
 	V3 from = v3(tx - 40.0f, terrain_height(t, tx - 40.0f, tz) + 2.0f, tz);
@@ -310,7 +310,7 @@ static void test_script(void)
 	CHECK(!strcmp(s.title, "Test"));
 	CHECK(s.action_count == 5 && s.group_count == 1);
 	CHECK(s.actions[0].tick == 0 && s.actions[4].tick == 90); // sorted by tick
-	CHECK(!s.bots_on[1] && s.config.initial_units == 0);
+	CHECK(!s.bots_on[1][0] && s.config.initial_units == 0);
 
 	Sim sim;
 	sim_init(&sim, s.config);
@@ -821,7 +821,7 @@ static void test_doctrine(void)
 	      && sc.doctrine[1].transporters == 2 && sc.doctrine[1].raids);
 	ScriptRun run;
 	script_run_init(&run, &sc, &a, nullptr);
-	CHECK(run.bots[1].doctrine.transporters == 2 && !strcmp(run.bots[0].doctrine.name, "balanced"));
+	CHECK(run.bots[1][0].doctrine.transporters == 2 && !strcmp(run.bots[0][0].doctrine.name, "balanced"));
 	const char *nonsense = "scenario economy\ndoctrine red blitz\n";
 	CHECK(!script_parse(&sc, &a, (Str){nonsense, (ptrdiff_t)strlen(nonsense)}, "t.script", err, sizeof err));
 
@@ -1113,6 +1113,119 @@ static void test_entrench(void)
 	arena_destroy(&a);
 }
 
+// Players: every unit has an owner and only the owner's orders move it;
+// giving, factory output and sends name who units go to; each player
+// starts a base of their own; ownership survives a snapshot.
+static void test_ownership(void)
+{
+	const char *text =
+		"scenario economy\n"
+		"players blue 3\n"
+		"bot blue off\n"
+		"bot red off\n"
+		"at 0 spawn blue.1 tank 5 at 150,300 radius 4\n"
+		"at 0 spawn blue.1 transporter 1 at 120,330 radius 0\n"
+		"at 1 select blue.1 tank as b1\n"
+		"at 1 select blue factory as plant\n"     // player 0's: blue is blue.0
+		"at 2 give b1 to 2\n"
+		"at 2 output plant to 1\n"
+		"at 2 produce plant raider 2\n"
+		"at 3 expect blue.1 tanks == 0\n"
+		"at 3 expect blue.2 tanks == 5\n"
+		"at 3 expect blue factories == 3\n"       // one each
+		"at 3 expect blue.2 factories == 1\n"
+		"at 700 expect blue.1 raiders == 2\n"     // made by player 0's factory, for player 1
+		"at 700 expect blue.0 raiders == 0\n";
+	Arena a = arena_create("ownership", 32 << 20);
+	Script sc;
+	char err[512];
+	bool parsed = script_parse(&sc, &a, (Str){text, (ptrdiff_t)strlen(text)}, "t.script", err, sizeof err);
+	if (!parsed) fprintf(stderr, "%s\n", err);
+	CHECK(parsed);
+	Sim sim;
+	sim_init(&sim, sc.config);
+	ScriptRun run;
+	script_run_init(&run, &sc, &a, nullptr);
+	Arena tick = arena_create("tick", 8 << 20);
+	Units *u = &sim.factions[0].units;
+	UnitHandle tanks[5];
+	int ignored_ok = 0, obeyed_ok = 0, foreign_send_ok = 0, own_send_ok = 0, departed_for_2 = 0, arrived_for_2 = 0;
+	while (sim.tick.v < 701) {
+		arena_reset(&tick);
+		Command cmds[40];
+		ptrdiff_t n = script_tick(&run, &sim, &tick, cmds, 32);
+		if (sim.tick.v == 10) {
+			int k = 0;
+			for (ptrdiff_t i = 0; i < u->count && k < 5; i++)
+				if (u->type[i] == UNIT_TANK) tanks[k++] = units_handle(u, i);
+			// Player 0 orders player 2's tanks: nothing happens.
+			cmds[n++] = (Command){.faction = {0}, .player = {0}, .to = {0}, .kind = COMMAND_MOVE,
+			                      .target = v2(250, 300), .count = 5, .units = tanks};
+		}
+		if (sim.tick.v == 12) {
+			// Player 2 can; and player 0 can't send them through player 1's transporter.
+			cmds[n++] = (Command){.faction = {0}, .player = {2}, .to = {2}, .kind = COMMAND_MOVE,
+			                      .target = v2(150, 320), .count = 2, .units = tanks};
+			cmds[n++] = (Command){.faction = {0}, .player = {0}, .to = {0}, .kind = COMMAND_SEND,
+			                      .amount = 1, .count = 5, .units = tanks};
+		}
+		if (sim.tick.v == 14) {
+			// Player 2 gives three back to player 1, who sends them to arrive for player 2.
+			cmds[n++] = (Command){.faction = {0}, .player = {2}, .to = {1}, .kind = COMMAND_GIVE, .count = 3, .units = tanks + 2};
+			cmds[n++] = (Command){.faction = {0}, .player = {1}, .to = {2}, .kind = COMMAND_SEND,
+			                      .amount = 1, .count = 3, .units = tanks + 2};
+		}
+		if (sim.tick.v == 20) {
+			cmds[n++] = (Command){.faction = {0}, .player = {2}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_SCOUT,
+			                      .amount = 2, .target = v2(120, 330)};
+		}
+		sim_step(&sim, cmds, n);
+		ptrdiff_t d0 = units_find(u, tanks[0]), d2 = units_find(u, tanks[2]);
+		if (sim.tick.v == 11) ignored_ok = d0 >= 0 && u->order[d0] == ORDER_IDLE;
+		if (sim.tick.v == 13) {
+			obeyed_ok = d0 >= 0 && u->order[d0] == ORDER_MOVE;
+			foreign_send_ok = d2 >= 0 && u->order[d2] != ORDER_SEND;
+		}
+		if (sim.tick.v == 15) own_send_ok = d2 >= 0 && u->order[d2] == ORDER_SEND && player_eq(u->output[d2], (PlayerSlot){2})
+		                                    && player_eq(u->owner[d2], (PlayerSlot){1});
+		for (ptrdiff_t k = 0; k < sim.factions[0].departure_count; k++) {
+			const Departure *d = &sim.factions[0].departures[k];
+			if (d->type == UNIT_TANK && player_eq(d->owner, (PlayerSlot){2})) departed_for_2 += d->count;
+		}
+		if (sim.tick.v == 21)
+			for (ptrdiff_t i = 0; i < u->count; i++) arrived_for_2 += u->type[i] == UNIT_SCOUT && player_eq(u->owner[i], (PlayerSlot){2});
+	}
+	if (run.failures) fprintf(stderr, "ownership: %d of %d expectations failed\n", run.failures, run.expects);
+	CHECK(run.expects == 6 && run.failures == 0);
+	CHECK(ignored_ok && obeyed_ok);
+	CHECK(foreign_send_ok && own_send_ok);
+	CHECK(departed_for_2 == 3);
+	CHECK(arrived_for_2 == 2);
+	// Each player's base where sim_player_base says.
+	int kits = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] != UNIT_FACTORY) continue;
+		V2 at = sim_player_base(&sim, (FactionId){0}, u->owner[i]);
+		kits += v2_len(v2_sub(v2(u->px[i], u->pz[i]), at)) < 12.0f;
+	}
+	CHECK(kits == 3);
+	// Owners and outputs survive a snapshot, and are in the hash.
+	ByteBuf b = bytebuf_make(&a, (ptrdiff_t)8 << 20);
+	faction_write(&sim.factions[0], &b);
+	Sim copy;
+	sim_init(&copy, sc.config);
+	ByteReader r = byte_reader(b.data, b.len);
+	CHECK(faction_read(&copy.factions[0], &r));
+	CHECK(faction_hash(&copy.factions[0]).v == faction_hash(&sim.factions[0]).v);
+	Units *cu = &copy.factions[0].units;
+	cu->owner[0].v ^= 1;
+	CHECK(faction_hash(&copy.factions[0]).v != faction_hash(&sim.factions[0]).v);
+	sim_destroy(&copy);
+	sim_destroy(&sim);
+	arena_destroy(&tick);
+	arena_destroy(&a);
+}
+
 typedef struct {
 	const char *name;
 	void (*run)(void);
@@ -1137,6 +1250,7 @@ static const Test tests[] = {
 	{"siege", test_siege},
 	{"snapshot", test_snapshot},
 	{"entrench", test_entrench},
+	{"ownership", test_ownership},
 };
 
 // tests            run all, in order

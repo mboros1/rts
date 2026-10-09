@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 9; // 9: siege and sappers (four combat types)
+static constexpr uint32_t REPLAY_VERSION = 10; // 10: players (a command's player and `to`, players per side)
 
 // ---------------------------------------------------------------- writing
 
@@ -53,6 +53,7 @@ void replay_begin_from(ReplayWriter *w, Arena *buf, SimConfig c, Str snapshot)
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) put_u32(w, (uint32_t)c.type_weight[k]);
 	put_u32(w, c.economy);
 	put_u32(w, c.bases);
+	for (int f = 0; f < FACTION_COUNT; f++) put_u32(w, c.players[f]);
 	put_u32(w, (uint32_t)snapshot.len);
 	if (snapshot.len) put(w, snapshot.ptr, snapshot.len);
 }
@@ -72,6 +73,8 @@ void replay_tick(ReplayWriter *w, Tick tick, const Command *cmds, ptrdiff_t coun
 	for (ptrdiff_t k = 0; k < count; k++) {
 		const Command *c = &cmds[k];
 		put_u32(w, c->faction.v);
+		put_u32(w, c->player.v);
+		put_u32(w, c->to.v);
 		put_u32(w, c->kind);
 		put_f32(w, c->target.x);
 		put_f32(w, c->target.z);
@@ -177,6 +180,12 @@ ReplayStatus replay_open(ReplayReader *r, Str data)
 	if (!weights_ok || weights <= 0 || economy > 1 || bases >= 1u << FACTION_COUNT) return REPLAY_BAD_CONFIG;
 	c->economy = economy;
 	c->bases = (uint8_t)bases;
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		uint32_t players;
+		if (!get_u32(r, &players)) return REPLAY_TRUNCATED;
+		if (players < 1 || players > MAX_PLAYERS) return REPLAY_BAD_CONFIG;
+		c->players[f] = (uint8_t)players;
+	}
 	// sim_init asserts on these; a file must not be able to trip an assert.
 	if (c->max_units <= 0 || c->max_projectiles <= 0 || c->spawn_interval <= 0
 	    || c->population > c->max_units || c->initial_units > c->population
@@ -197,19 +206,19 @@ ReplayStatus replay_next(ReplayReader *r, Arena *arena, Tick *tick,
 	uint64_t t;
 	uint32_t n;
 	if (!get_u64(r, &t) || !get_u32(r, &n)) return REPLAY_TRUNCATED;
-	// Each command takes at least 40 bytes, which bounds n before allocating.
-	if ((ptrdiff_t)n > (r->data.len - r->pos) / 40) return REPLAY_TRUNCATED;
+	// Each command takes at least 48 bytes, which bounds n before allocating.
+	if ((ptrdiff_t)n > (r->data.len - r->pos) / 48) return REPLAY_TRUNCATED;
 	Command *out = arena_try_push(arena, (ptrdiff_t)n * (ptrdiff_t)sizeof(Command), alignof(Command));
 	if (n && !out) return REPLAY_TOO_LARGE;
 	for (uint32_t k = 0; k < n; k++) {
-		uint32_t faction, kind, unit_type, amount, flags, route, units;
+		uint32_t faction, player, to, kind, unit_type, amount, flags, route, units;
 		V2 target;
 		float radius;
-		if (!get_u32(r, &faction) || !get_u32(r, &kind) || !get_f32(r, &target.x)
+		if (!get_u32(r, &faction) || !get_u32(r, &player) || !get_u32(r, &to) || !get_u32(r, &kind) || !get_f32(r, &target.x)
 		    || !get_f32(r, &target.z) || !get_u32(r, &unit_type) || !get_u32(r, &amount)
 		    || !get_f32(r, &radius) || !get_u32(r, &flags) || !get_u32(r, &route) || !get_u32(r, &units))
 			return REPLAY_TRUNCATED;
-		if (faction >= FACTION_COUNT || kind >= COMMAND_KIND_COUNT || unit_type >= UNIT_TYPE_COUNT
+		if (faction >= FACTION_COUNT || player >= MAX_PLAYERS || to >= MAX_PLAYERS || kind >= COMMAND_KIND_COUNT || unit_type >= UNIT_TYPE_COUNT
 		    || amount > SPAWN_MAX || flags > 0xff || !route_ok(route))
 			return REPLAY_BAD_COMMAND;
 		if ((ptrdiff_t)units > (r->data.len - r->pos) / 8) return REPLAY_TRUNCATED;
@@ -217,8 +226,10 @@ ReplayStatus replay_next(ReplayReader *r, Arena *arena, Tick *tick,
 		if (units && !h) return REPLAY_TOO_LARGE;
 		for (uint32_t i = 0; i < units; i++)
 			if (!get_u32(r, &h[i].index) || !get_u32(r, &h[i].generation)) return REPLAY_TRUNCATED;
-		out[k] = (Command){(FactionId){faction}, (CommandKind)kind, target, (ptrdiff_t)units, h,
-		                   (UnitType)unit_type, (int32_t)amount, radius, (uint8_t)flags, route};
+		out[k] = (Command){.faction = {faction}, .player = {(uint8_t)player}, .to = {(uint8_t)to},
+		                   .kind = (CommandKind)kind, .target = target, .count = (ptrdiff_t)units, .units = h,
+		                   .unit_type = (UnitType)unit_type, .amount = (int32_t)amount, .radius = radius,
+		                   .flags = (uint8_t)flags, .route = route};
 	}
 	uint64_t hash;
 	if (!get_u64(r, &hash)) return REPLAY_TRUNCATED;

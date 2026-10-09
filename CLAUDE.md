@@ -15,6 +15,9 @@ persistent map. Read these before changing anything:
   (random SIGKILLs; checks no unit is lost and replays chain).
 - Touched the bots or anything a whole world does? `make world-soak MINUTES=10`
   (a self-playing world under random kills; an hour for a release).
+  Run soaks in the background on the commit and carry on; fix forward if
+  one finds something. The hour-long soak runs at the end of a series of
+  spikes, not after each one.
 - Programs: `rts` (the game: `rts world`; also clips and the dev sandbox),
   `rts-headless` (bench, replays, scripts), `rts-server` (a zone),
   `rts-coord` (the coordinator).

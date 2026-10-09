@@ -6,6 +6,9 @@
 #     nothing of red's numbers (fog);
 #   - a player's journey (map, a zone, the map, another zone) keeps its
 #     faction in step, with the bot playing as that player;
+#   - players join a side by name: blue has two places; alice and bob each
+#     get one (and keep it), a third name is turned away, and blue's map
+#     lists them;
 #   - stopping saves every zone and the world continues where it was;
 #   - a save can be loaded back;
 #   - a clip of the journey renders, map and zones.
@@ -13,7 +16,7 @@ set -eu
 bin=$1; out=$2
 rm -rf "$out"; mkdir -p "$out"
 port=$((35000 + ($$ % 2500) * 4)) # its own band, 4 ports apart: check stages run side by side
-sed "s/^port .*/port $port/" worlds/three.world > "$out/three.world"
+{ sed "s/^port .*/port $port/" worlds/three.world; echo "players blue 2"; } > "$out/three.world"
 world="$bin/rts world --dir $out/w"
 fail() { echo "world-smoke: $1"; for f in "$out"/w/live/*.out; do echo "== $f"; tail -5 "$f"; done; $world --stop >/dev/null 2>&1 || true; exit 1; }
 seconds() { # a zone's clock, as h:mm:ss in the status line, in seconds
@@ -34,12 +37,28 @@ $world --status --as blue > "$out/status-blue.txt"
 grep '^east ' "$out/status-blue.txt" | grep -q 'red 0 units 0 bldg 0 transporters' \
 	|| fail "blue's map shows red's numbers: $(grep '^east ' "$out/status-blue.txt")"
 
-"$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --bot --journey map:0.5,west:2.5,map:0.5,middle:2 \
-	--netlog "$out/journey.netlog" --stats "$out/journey.txt" > "$out/journey.out" 2>&1 || fail "the journey failed"
+"$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --name alice --bot --journey map:0.5,west:2.5,map:0.5,middle:2 \
+	--netlog "$out/journey.netlog" --stats "$out/journey.txt" > "$out/journey.out" 2>&1 &
+alice=$!
+for i in $(seq 50); do grep -q ' plays ' "$out/journey.out" 2>/dev/null && break; sleep 0.1; done # alice first
+"$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --bot --name bob --zone west --quit-after 240 \
+	--stats "$out/bob.txt" > "$out/bob.out" 2>&1 &
+bob=$!
+wait $alice || fail "the journey failed"
 grep -q '^zones_visited 2$' "$out/journey.txt" || fail "visited $(grep zones_visited "$out/journey.txt")"
 grep -q '^digest_mismatches 0$' "$out/journey.txt" || fail "faction hash mismatch on the journey"
 grep -q '^reconnects 0$' "$out/journey.txt" || fail "launches counted as reconnects"
 [ "$(awk '/^commands_sent/ { print $2 }' "$out/journey.txt")" -gt 0 ] || fail "the bot sent no orders as the player"
+wait $bob || fail "bob's game failed: $(tail -3 "$out/bob.out")"
+grep -q 'alice plays blue.0' "$out/journey.out" || fail "alice didn't get blue's first place: $(head -3 "$out/journey.out")"
+grep -q 'bob plays blue.1' "$out/bob.out" || fail "bob didn't get blue's second place: $(head -3 "$out/bob.out")"
+grep -q '^digest_mismatches 0$' "$out/bob.txt" || fail "faction hash mismatch for bob"
+[ "$(awk '/^commands_sent/ { print $2 }' "$out/bob.txt")" -gt 0 ] || fail "bob's bot sent no orders"
+"$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --name carol --zone west --quit-after 1 > "$out/carol.out" 2>&1 \
+	&& fail "a third player got onto blue's two places"
+grep -q 'every place on blue is taken' "$out/carol.out" || fail "carol wasn't told why: $(tail -1 "$out/carol.out")"
+$world --status --as blue | grep -q '^players: blue 0 alice, 1 bob | red$' \
+	|| fail "blue's map doesn't list its players: $($world --status --as blue | grep players)"
 
 before=$(seconds west)
 $world --stop > /dev/null || fail "cannot stop"
@@ -49,6 +68,9 @@ $world --headless --speed 8 > /dev/null || fail "cannot continue"
 sleep 1
 after=$(seconds west)
 grep -q 'resumed' "$out/w/live/west.out" || fail "west didn't resume from its state"
+"$bin/rts" --coord "127.0.0.1:$port" --headless --faction blue --name bob --zone west --quit-after 1 > "$out/bob2.out" 2>&1 \
+	|| fail "bob couldn't come back: $(tail -1 "$out/bob2.out")"
+grep -q 'bob plays blue.1' "$out/bob2.out" || fail "bob lost his place across a restart"
 [ "$after" -ge "$before" ] || fail "west went back in time: $before s, then $after s"
 
 $world --save smoke --headless --speed 8 > /dev/null || fail "cannot save"

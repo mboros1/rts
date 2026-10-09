@@ -6,7 +6,8 @@
 
 void controls_init(Controls *c, FactionId me, Arena *a, ptrdiff_t max_units)
 {
-	*c = (Controls){.me = me, .selection = PUSH(a, UnitHandle, max_units), .placing = -1, .landing_for = -1};
+	*c = (Controls){.me = me, .selection = PUSH(a, UnitHandle, max_units), .placing = -1, .landing_for = -1,
+	                .send_for = -1, .team_count = 1};
 }
 
 void controls_clear(Controls *c)
@@ -16,6 +17,8 @@ void controls_clear(Controls *c)
 	c->placing = -1;
 	c->sending = false;
 	c->landing_for = -1;
+	c->send_for = -1;
+	c->giving = 0;
 }
 
 static const Units *own_units(const Controls *c, const Sim *sim) { return &sim->factions[c->me.v].units; }
@@ -27,6 +30,7 @@ static void select_units(Controls *c, const Sim *sim, const View *view, Rectangl
 	ptrdiff_t best = -1;
 	float best_d2 = 14.0f * 14.0f;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (!player_eq(u->owner[i], c->player)) continue; // teammates' units aren't yours to order
 		Vector2 s = GetWorldToScreen((Vector3){u->px[i], u->py[i] + 0.5f, u->pz[i]}, view->camera);
 		if (click) {
 			float dx = s.x - box.x, dy = s.y - box.y;
@@ -47,7 +51,7 @@ uint8_t *controls_selected(Controls *c, const Units *own, Arena *frame)
 	ptrdiff_t kept = 0;
 	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
 		ptrdiff_t i = units_find(own, c->selection[k]);
-		if (i < 0 || marked[i]) continue;
+		if (i < 0 || marked[i] || !player_eq(own->owner[i], c->player)) continue; // gone, or given away
 		marked[i] = 1;
 		c->selection[kept++] = c->selection[k];
 	}
@@ -81,9 +85,31 @@ static V2 placement_site(const Sim *sim, UnitType type, V2 at)
 	return best >= 0 ? sim->spots.at[best] : at;
 }
 
+static bool selection_only(const Controls *c, const Sim *sim, UnitType type)
+{
+	const Units *u = own_units(c, sim);
+	bool any = false;
+	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
+		ptrdiff_t d = units_find(u, c->selection[k]);
+		if (d < 0) continue;
+		if (u->type[d] != type) return false;
+		any = true;
+	}
+	return any;
+}
+
+// A teammate's number key this frame (1 is player 0), or -1.
+static int player_key(const Controls *c)
+{
+	for (int k = 0; k < c->team_count; k++)
+		if (IsKeyPressed(KEY_ONE + k)) return k;
+	return -1;
+}
+
 static void order(Controls *c, Arena *frame, Order *out, ptrdiff_t cap, ptrdiff_t *n, Order o)
 {
 	if (c->selection_count == 0 || *n == cap) return;
+	if (o.kind != COMMAND_GIVE && o.kind != COMMAND_OUTPUT && o.kind != COMMAND_SEND) o.to = c->player;
 	o.units = arena_copy(frame, c->selection, c->selection_count * (ptrdiff_t)sizeof(UnitHandle), alignof(UnitHandle));
 	o.count = c->selection_count;
 	out[(*n)++] = o;
@@ -106,8 +132,20 @@ static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *fra
 		for (int k = 0; k < z->count && k < 9; k++) {
 			if (!IsKeyPressed(KEY_ONE + k) || k == z->here) continue;
 			c->sending = false;
-			if (z->transporter[k]) order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = k});
+			if (z->transporter[k] && c->team_count > 1) c->send_for = k; // then: for whom
+			else if (z->transporter[k]) order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = k, .to = c->player});
 			else if (z->neighbour[k]) c->landing_for = k;
+		}
+		return true;
+	}
+	if (c->send_for >= 0) {
+		int p = player_key(c);
+		bool self = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_T);
+		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->send_for = -1;
+		else if (p >= 0 || self) {
+			PlayerSlot to = p >= 0 ? (PlayerSlot){(uint8_t)p} : c->player;
+			order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = c->send_for, .to = to});
+			c->send_for = -1;
 		}
 		return true;
 	}
@@ -116,7 +154,7 @@ static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *fra
 		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->landing_for = -1;
 		else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && pick_ground(view, &sim->terrain, GetMousePosition(), &at)) {
 			at = sim_strip_point(&sim->terrain, c->me, at);
-			order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = c->landing_for, .target = at});
+			order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = c->landing_for, .target = at, .to = c->player});
 			c->landing_for = -1;
 		}
 		return true;
@@ -136,6 +174,22 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 		order(c, frame, out, cap, &n, (Order){.kind = COMMAND_MOBILIZE});
 	}
 	if (send_input(c, sim, view, frame, out, cap, &n)) return n;
+
+	// H, then a teammate: give them the selection (or point factories at them).
+	if (IsKeyPressed(KEY_H) && c->selection_count && c->team_count > 1) {
+		c->giving = shift ? 3 : selection_only(c, sim, UNIT_FACTORY) ? 2 : 1;
+		return n;
+	}
+	if (c->giving) {
+		int p = player_key(c);
+		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->giving = 0;
+		else if (p >= 0) {
+			CommandKind kind = c->giving == 2 ? COMMAND_OUTPUT : COMMAND_GIVE;
+			order(c, frame, out, cap, &n, (Order){.kind = kind, .to = {(uint8_t)p}});
+			c->giving = 0;
+		}
+		return n;
+	}
 
 	if (sim->config.economy) {
 		if (selection_has(c, sim, UNIT_ENGINEER) || selection_has(c, sim, UNIT_SAPPER)) {
@@ -232,6 +286,16 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 		                    e->rate < 0.99f ? TextFormat("   STALL %.0f%%", e->rate * 100.0f) : ""),
 		         14, y, 20, e->rate < 0.99f ? ORANGE : (Color){230, 220, 160, 255});
 	}
+	// Your side's players, above the bar, in their colours; you're marked.
+	if (c->team_count > 1) {
+		int x = 14;
+		for (int k = 0; k < c->team_count; k++) {
+			const char *who = TextFormat("%d %s%s", k + 1, c->team[k] && c->team[k][0] ? c->team[k] : "(bot)",
+			                             k == c->player.v ? " (you)" : "");
+			DrawText(who, x, y - 32, 18, render_player_color((int)c->me.v, (PlayerSlot){(uint8_t)k}));
+			x += MeasureText(who, 18) + 24;
+		}
+	}
 	// What's selected, by type.
 	const Units *u = own_units(c, sim);
 	int counts[UNIT_TYPE_COUNT] = {0};
@@ -265,9 +329,19 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 	}
 	if (c->landing_for >= 0)
 		snprintf(sel, sizeof sel, "landing in %s: click where, in your strip (esc cancels)", z->name[c->landing_for]);
+	if (c->send_for >= 0 || c->giving) {
+		used = snprintf(sel, sizeof sel, "%s",
+		                c->send_for >= 0 ? TextFormat("send to %s, for:   Enter you", z->name[c->send_for])
+		                : c->giving == 2 ? "factories make units for:"
+		                                 : "give to:");
+		for (int k = 0; k < c->team_count && used < (int)sizeof sel; k++)
+			if (k != c->player.v || c->giving == 2)
+				used += snprintf(sel + used, sizeof sel - (size_t)used, "   %d %s", k + 1, c->team[k] && c->team[k][0] ? c->team[k] : "(bot)");
+		if (used < (int)sizeof sel) snprintf(sel + used, sizeof sel - (size_t)used, "   (esc cancels)");
+	}
 	DrawText(sel, 14, y + 26, 18, RAYWHITE);
 	DrawText(sim->config.economy
-	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear | T send"
+	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear | T send | H give"
 	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear")
 	             : "drag select | right attack-move | ctrl+right move | X stop | V entrench",
 	         14, y + 50, 14, GRAY);

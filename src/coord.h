@@ -3,15 +3,18 @@
 // Every change is a line in an append-only log, written and fsynced before
 // anyone is told, so a restarted coordinator rebuilds exactly what it had:
 //
-//   transfer ID SRC DST FACTION paired|unpaired SEQ ROUTE X,Z TYPE:N ...
-//       units left SRC for DST (SEQ: SRC's own number for it), going on
+//   transfer ID SRC DST FACTION PLAYER paired|unpaired SEQ ROUTE X,Z TYPE:N ...
+//       units left SRC for DST, to arrive owned by PLAYER (a slot of FACTION)
+//       (SEQ: SRC's own number for it), going on
 //       along ROUTE (a Route, in hex) from there; unpaired ones land at X,Z
 //   delivered ID                            DST took them in
+//   player NAME FACTION SLOT                NAME plays slot SLOT of FACTION,
+//                                           in every zone, from now on
 //   next ID / seq ZONE N                    after compaction: the next transfer
 //                                           id, and ZONE's highest departure number
 //
 // The log is compacted at startup and every COMPACT_EVERY lines: rewritten
-// (atomically) as next and seq lines plus the transfers still pending.
+// (atomically) as next, seq and player lines plus the transfers still pending.
 //
 // A transfer is pending until delivered; while DST is down, has no
 // transporter for a paired transfer, or has no room where they'd land, it
@@ -39,12 +42,18 @@ typedef enum : uint8_t {
 	COORD_DIRECTORY,        // coord: Directory (world.h)
 	COORD_DEPART_ACK,       // coord: u64 seq: logged (or already had it)
 	COORD_ZONE_STATUS,      // zone, every second: ZoneStatus (world.h)
+	COORD_JOIN,             // player: u8 faction, name: which slot is mine?
+	COORD_SLOT,             // coord: u8 slot, or SIDE_FULL: the side is full
 } CoordMsg;
 
-// How a transfer goes on: unpaired or not, the route after its destination,
-// and where unpaired ones land. On the wire: u8 unpaired, u32 route, f32 x, z.
+enum : uint8_t { SIDE_FULL = 255 };
+
+// How a transfer goes on: unpaired or not, who the units arrive owned by,
+// the route after its destination, and where unpaired ones land.
+// On the wire: u8 unpaired, u8 owner, u32 route, f32 x, z.
 typedef struct {
 	bool unpaired;
+	PlayerSlot owner;
 	Route route;
 	V2 landing;
 } Leg;
@@ -76,6 +85,9 @@ typedef struct {
 	char seq_zone[COORD_MAX_ZONES * 2][ZONE_NAME];
 	uint64_t seq_max[COORD_MAX_ZONES * 2];
 	int32_t seq_zones;
+	// Who plays each slot: a name, or "" while nobody has taken it. A name
+	// keeps its slot for good (no accounts: a name is all there is).
+	char player[FACTION_COUNT][MAX_PLAYERS][ZONE_NAME];
 	FILE *log;              // nullptr: changes aren't recorded (tests)
 	int32_t lines;          // appended since the last compaction
 } Ledger;
@@ -88,6 +100,9 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line);
 Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *dst, uint8_t faction, const Leg *leg,
                         const int32_t counts[UNIT_TYPE_COUNT]);
 void ledger_delivered(Ledger *l, uint64_t id);
+// NAME's slot on a side with `slots` players: theirs from before, else the
+// first free one (logged), else SIDE_FULL.
+uint8_t ledger_join(Ledger *l, uint8_t faction, const char *name, int slots);
 
 Transfer *ledger_find(Ledger *l, uint64_t id);
 

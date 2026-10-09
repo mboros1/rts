@@ -1,11 +1,13 @@
 // The network client: draws what the server sends, sends what you order.
 //
-//   rts --connect HOST:PORT [--faction blue|red|spectator]
+//   rts --connect HOST:PORT [--faction blue|red|spectator] [--slot N]
 //       [--latency MS] [--jitter MS]       delay what this client sends
 //       [--netlog PATH] [--stats PATH]
 //       [--headless] [--auto-orders]       no window; order idle units forward
 //       [--disconnect-at TICK] [--reconnect-after SECONDS] [--quit-at TICK]
 //   rts --coord HOST:PORT [--zone NAME]   a world, through its coordinator
+//       [--faction blue|red|spectator] [--name NAME]   who you are (default $USER):
+//                                          the coordinator gives NAME a player slot
 //       [--switch-to NAME --switch-at N] [--quit-after N]   (N: ticks received)
 //       [--journey STEP,STEP,...]          scripted: map:SECONDS or ZONE:SECONDS
 //       [--bot] [--doctrine SPEC]          the bot plays your side, as a player (bot.h)
@@ -49,6 +51,8 @@ typedef struct {
 	const char *host;
 	int port;
 	uint8_t faction;
+	const char *name;              // --name: who plays, in a world
+	PlayerSlot slot;               // --slot, or the coordinator's answer
 	double latency, jitter;
 	const char *netlog_path, *stats_path;
 	bool headless, auto_orders;
@@ -164,6 +168,35 @@ static bool directory_fetch(const char *coord, uint8_t viewer, Arena *a, Directo
 	return got;
 }
 
+// Ask the coordinator which of our side's players NAME is. Blocks up to half
+// a second; SIDE_FULL if every place on the side is taken, -1 if no answer.
+static int coord_join(const char *coord, uint8_t faction, const char *name, Arena *a)
+{
+	const char *colon = strrchr(coord, ':');
+	char host[64];
+	snprintf(host, sizeof host, "%.*s", (int)(colon - coord), coord);
+	int fd = net_connect(host, atoi(colon + 1));
+	if (fd < 0) return -1;
+	Conn q;
+	conn_init(&q, a, fd, 1 << 12, 1 << 12);
+	ArenaMark m = arena_mark(a);
+	ByteBuf b = bytebuf_make(a, 64);
+	put8(&b, faction);
+	put_name(&b, name);
+	conn_send(&q, COORD_JOIN, b.data, b.len, platform_seconds());
+	arena_rewind(m);
+	int slot = -1;
+	for (int i = 0; i < 100 && q.open && slot < 0; i++) {
+		conn_pump(&q, platform_seconds());
+		Frame f;
+		while (slot < 0 && conn_next(&q, &f))
+			if (f.kind == COORD_SLOT && f.len == 1) slot = f.data[0];
+		if (slot < 0) net_sleep(0.005);
+	}
+	conn_close(&q, "done");
+	return slot;
+}
+
 static bool client_directory(Client *c)
 {
 	arena_reset(&c->out);
@@ -201,6 +234,7 @@ static bool client_connect(Client *c)
 	ByteBuf b = bytebuf_make(&c->out, 16);
 	put32(&b, WIRE_VERSION);
 	put8(&b, c->opt.faction);
+	put8(&b, c->opt.slot.v);
 	conn_send(&c->conn, MSG_HELLO, b.data, b.len, client_now(c));
 	client_event(c, NETLOG_CONNECTED, "");
 	c->zones_visited++;
@@ -260,7 +294,9 @@ static void client_welcome(Client *c, ByteReader *r)
 	if (c->player) remote_init(&c->remote, &config, (FactionId){faction}, &c->world);
 	else mirror_init(&c->mirror, &c->world, config.max_units, config.max_projectiles);
 	controls_init(&c->controls, (FactionId){faction < FACTION_COUNT ? faction : 0}, &c->world, config.max_units);
-	c->bot = bot_create((FactionId){faction < FACTION_COUNT ? faction : 0}, config.seed ^ 0x5eedu);
+	c->controls.player = c->opt.slot;
+	c->controls.team_count = faction < FACTION_COUNT ? config.players[faction] : 1;
+	c->bot = bot_create_player((FactionId){faction < FACTION_COUNT ? faction : 0}, c->opt.slot, config.seed ^ 0x5eedu);
 	char why[160];
 	if (c->opt.doctrine && !doctrine_parse(&c->bot.doctrine, c->opt.doctrine, why, sizeof why)) fatal("%s", why);
 	c->bot_tick = -1;
@@ -328,12 +364,14 @@ static void client_frames(Client *c)
 	}
 }
 
+// As our player; `to`: who a give or an output is for, or who a send arrives for.
 static void client_send_order(Client *c, CommandKind kind, V2 target, UnitType type, int32_t amount, uint8_t flags,
-                              const UnitHandle *units, ptrdiff_t n)
+                              PlayerSlot to, const UnitHandle *units, ptrdiff_t n)
 {
 	if (!c->conn.open || n == 0) return;
 	arena_reset(&c->out);
 	ByteBuf b = bytebuf_make(&c->out, 24 + n * 8);
+	put8(&b, to.v);
 	put8(&b, kind);
 	putf(&b, target.x);
 	putf(&b, target.z);
@@ -351,7 +389,7 @@ static void client_send_order(Client *c, CommandKind kind, V2 target, UnitType t
 
 static void client_send_command(Client *c, CommandKind kind, V2 target, const UnitHandle *units, ptrdiff_t n)
 {
-	client_send_order(c, kind, target, UNIT_RAIDER, 0, 0, units, n);
+	client_send_order(c, kind, target, UNIT_RAIDER, 0, 0, c->opt.slot, units, n);
 }
 
 // A stand-in player for tests and demos: every three seconds, own units with
@@ -372,7 +410,7 @@ static void client_auto_orders(Client *c)
 			n = 0;
 		}
 		if (i == u->count) break;
-		if (u->order[i] != ORDER_IDLE || u->engaged[i]) continue;
+		if (u->order[i] != ORDER_IDLE || u->engaged[i] || !player_eq(u->owner[i], c->opt.slot)) continue;
 		group[n++] = units_handle(u, i);
 	}
 }
@@ -387,6 +425,7 @@ static void client_targets(Client *c)
 	*t = (SendTargets){.here = c->zone_at};
 	if (!c->opt.coord || !c->player) return;
 	const Directory *d = &c->dir;
+	for (int k = 0; k < MAX_PLAYERS; k++) c->controls.team[k] = d->player[c->opt.faction][k];
 	for (int k = 0; k < d->zone_count && k < (int)countof(t->name); k++) {
 		t->name[k] = d->zones[k].name;
 		t->transporter[k] = d->zones[k].reported && d->zones[k].status.transporters[c->opt.faction] > 0;
@@ -405,7 +444,7 @@ static void client_input(Client *c)
 	ptrdiff_t n = controls_input(&c->controls, &c->remote.sim, &c->view, &c->frame, orders, countof(orders));
 	for (ptrdiff_t k = 0; k < n; k++)
 		client_send_order(c, orders[k].kind, orders[k].target, orders[k].type, orders[k].amount, orders[k].flags,
-		                  orders[k].units, orders[k].count);
+		                  orders[k].to, orders[k].units, orders[k].count);
 }
 
 // --bot: the game's bot, on what this client knows, sending what a player can.
@@ -434,7 +473,7 @@ static void client_bot(Client *c)
 	bot_think(&c->bot, &c->remote.sim, &c->frame, cmds, &n, countof(cmds));
 	for (ptrdiff_t k = 0; k < n; k++)
 		client_send_order(c, cmds[k].kind, cmds[k].target, cmds[k].unit_type, cmds[k].amount, cmds[k].flags,
-		                  cmds[k].units, cmds[k].count);
+		                  cmds[k].to, cmds[k].units, cmds[k].count);
 }
 
 static void client_overlay(const Client *c, bool connected)
@@ -541,6 +580,12 @@ static int client_main(int argc, char **argv)
 			c.opt.host = host;
 			c.opt.port = atoi(colon + 1);
 		} else if (!strcmp(a, "--faction")) c.opt.faction = parse_faction(v);
+		else if (!strcmp(a, "--name")) c.opt.name = v;
+		else if (!strcmp(a, "--slot")) {
+			int slot = atoi(v);
+			if (slot < 0 || slot >= MAX_PLAYERS) fatal("--slot is 0..%d", MAX_PLAYERS - 1);
+			c.opt.slot = (PlayerSlot){(uint8_t)slot};
+		}
 		else if (!strcmp(a, "--latency")) c.opt.latency = atof(v) / 1000.0;
 		else if (!strcmp(a, "--jitter")) c.opt.jitter = atof(v) / 1000.0;
 		else if (!strcmp(a, "--netlog")) c.opt.netlog_path = v;
@@ -592,6 +637,22 @@ static int client_main(int argc, char **argv)
 		bool listed = false;
 		for (int tries = 0; tries < 50 && !(listed = client_directory(&c) && c.dir.zone_count > 0); tries++) net_sleep(0.1);
 		if (!listed) fatal("no zones from the coordinator at %s", c.opt.coord);
+		if (c.opt.faction < FACTION_COUNT) {
+			// Who we are: a name, and the slot on our side that's theirs.
+			const char *name = c.opt.name ? c.opt.name : getenv("USER");
+			if (!name || !*name) name = "player";
+			int slot = -1;
+			for (int tries = 0; tries < 50 && slot < 0; tries++)
+				if ((slot = coord_join(c.opt.coord, c.opt.faction, name, &c.out)) < 0) net_sleep(0.1);
+			if (slot < 0) fatal("no answer from the coordinator at %s", c.opt.coord);
+			if (slot == SIDE_FULL) { // not a fault: someone else got there first
+				fprintf(stderr, "client: every place on %s is taken\n", c.opt.faction ? "red" : "blue");
+				return 1;
+			}
+			c.opt.slot = (PlayerSlot){(uint8_t)slot};
+			c.opt.name = name;
+			printf("client: %s plays %s.%d\n", name, c.opt.faction ? "red" : "blue", slot);
+		}
 		// Where to start: a zone, or the map (in a window, or a journey's first step).
 		const char *first = c.opt.journey_len ? c.opt.journey[0] : c.opt.zone;
 		if (c.opt.journey_len) c.journey_until = platform_seconds() + c.opt.journey_s[0];

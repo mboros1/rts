@@ -48,6 +48,17 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 10 | Strategic bots | The world plays itself | A cross-zone layer for both sides expands, reinforces beachheads and relays; from a fresh world both sides push into the middle; an hour-long soak passes (with coordinator log compaction) |
 | 11 | Fog on the map | A side knows only what it has seen | The strategic map shows a side its own presence and nothing of the enemy's numbers: contact, last seen (with its age, fading), enemy transporters spotted; bots play by the same fog; a scout unit to see with |
 | 12 | Doctrines and units | Worlds that don't stall | Configurable bot doctrines (per side, world or zone) and new units, both sides with the same roster; fronts move in the hour soak |
+| 13 | Players and ownership | A side is a team | Players join a side by name into one of 8 slots; every unit has an owner and only the owner commands it; one key gives a selection to a teammate; a factory's output goes to the owner it names; a send names who the units arrive owned by; ownership survives sends, saves and kills. The economy stays shared |
+| 14 | Separate economies | Each player runs their own | Each player has their own economy in each zone; a builder's owner pays for its work; resources are given to a teammate instantly up to their free storage; what's past a player's storage spills to teammates with room |
+| 15 | AI slots | Teams with gaps still play | A slot nobody plays, or whose player left, is AI-held: one bot per side drives every AI-held slot (units and economy) alongside the humans; a teammate can take its units; a returning player gets the slot back; an 8v8 bot benchmark records its cost |
+| 16 | Containers | Resources cross zones | A mobile container holds part of its owner's resources and carries them through transporters; in the zone it reaches, they join its owner's economy there |
+
+Then the UI spikes: the command grid and selection panel, the strategic map
+as the logistics console with pings and chat, minimap, control groups and
+overlays, and a team playtest. Through spikes 13-16 a soak runs in the
+background on each spike's commit (3 minutes of `make soak` when saving or
+the coordinator changes, 10 of `make world-soak`), and the hour-long soak
+runs once, at the end of the series.
 
 ## Spike 1 results (2026-10-07)
 
@@ -478,6 +489,56 @@ Done. Doctrines and two new units; the same roster for both sides.
   concentrates on one contested zone. No doctrine adapts (a rush keeps
   rushing against a wall); turtle at home is too passive to win anything; the
   presets' numbers are first guesses, to be tuned by running matchups.
+
+## Spike 13 results (2026-10-09)
+
+Done. A side is a team of players, each with units of their own.
+
+- **Players are slots**: up to 8 a side (`PlayerSlot`, a byte; widening it is
+  a typedef). A world or script says how many (`players blue 3`, default 1).
+  Each player starts a base of their own in their side's home zone, above
+  and below the side's base in turn. Who is in a slot is the coordinator's
+  to say: a client joins a side by name (`--name`, default `$USER`) and gets
+  the first free slot, logged (`player NAME FACTION SLOT`), so the same name
+  has the same slot in every zone and across restarts; a full side turns
+  the name away. Blue's map lists blue's players, nothing of red's. No
+  authentication.
+- **Every unit has an owner, and only the owner's orders move it.** The sim
+  checks it like a stale handle: a command carries its player, and units
+  that aren't theirs are ignored. A structure belongs to the builder who
+  started it; a send leaves only through one of the player's own
+  transporters.
+- **Giving**: a give order hands units over as they are, mid-order. A
+  factory has an output owner (who what it makes belongs to). A send names
+  who the units arrive owned by, and the transfer carries it through the
+  coordinator, saves and kills. The economy is still one per side (spike 14).
+- **Bots play a slot.** One per player the side has, each ordering only its
+  own units, keeping clear of sites and metal teammates are taking, and
+  planning with an even share of the side's economy (three bots reading the
+  whole store as theirs stalled it: 11 engineers, 13 generators, no metal).
+  A factory pointed at a teammate makes them army only. All of a side's
+  bots stand down while one of its people is in the zone (per slot is spike
+  15). The client's `--bot` plays its own slot.
+- **In the client**: you select only your own units; each player is drawn in
+  their own shade of the side's colour (player 0 in the side's own, so
+  older clips are unchanged pixel for pixel); a team line above the HUD.
+  H then a player's number gives the selection (only factories: points their
+  output; shift+H gives them); T, a zone, then a player's number sends for
+  them (Enter: yourself). Stopgap keys until the UI spikes.
+- **Evidence**: `test_ownership` (another player's orders ignored, the
+  owner's obeyed; give, output, a send through someone else's transporter
+  refused, a send for a teammate leaving and arriving theirs; a base each;
+  owners in the snapshot and the hash); the world smoke test (alice and bob
+  join blue as 0 and 1, a third name is turned away, bob keeps his place
+  across a stop and continue, blue's map lists them); arm64 and x86-64 agree.
+  Demo 15: blue is three bots, red one; blue.0's factory makes blue.1's
+  army; blue grows to 60 units against red's 35.
+- **Formats**: replay v10, wire v7, zone state v4, coordinator log (transfer
+  lines carry the player). Worlds from before need `rts world --new`.
+- **Not yet**: the H and T keys have only been tried headlessly (scripts and
+  the stand-in player send the same orders), never by hand. A bot doesn't
+  ask for or answer anything: teammates' bots only share a map and stay out
+  of each other's way.
 
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client

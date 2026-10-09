@@ -23,6 +23,19 @@ static const char *UNIT_FS =
 	"void main() { finalColor = vec4(colDiffuse.rgb * shade, colDiffuse.a); }\n";
 
 static const Color FACTION_COLOR[FACTION_COUNT] = {{70, 140, 235, 255}, {225, 80, 60, 255}};
+
+// Each player in a shade of their side's colour: the first in the side's own,
+// the rest turned toward neighbouring hues, lighter and darker in turn.
+Color render_player_color(int faction, PlayerSlot p)
+{
+	static const Color shades[FACTION_COUNT][MAX_PLAYERS] = {
+		{{70, 140, 235, 255}, {60, 205, 215, 255}, {135, 110, 240, 255}, {40, 95, 175, 255},
+		 {120, 200, 255, 255}, {95, 160, 150, 255}, {175, 150, 255, 255}, {30, 150, 205, 255}},
+		{{225, 80, 60, 255}, {240, 160, 50, 255}, {215, 60, 140, 255}, {165, 50, 40, 255},
+		 {255, 130, 110, 255}, {200, 120, 70, 255}, {245, 110, 190, 255}, {230, 205, 80, 255}},
+	};
+	return shades[faction][p.v];
+}
 static const Color SELECTED_COLOR = {120, 255, 140, 255};
 static const Color SHELL_COLOR = {255, 220, 120, 255};
 
@@ -184,11 +197,22 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		const SceneUnits *u = &scene->units[f];
 		float *heading = r->heading[f];
-		// Three buckets per type: normal, selected, and under construction.
-		Matrix *bucket[UNIT_TYPE_COUNT][3];
-		ptrdiff_t count[UNIT_TYPE_COUNT][3] = {0};
+		// Buckets per type: selected, under construction, and then one per
+		// player (each in its own shade of the side's colour). Counted first,
+		// so each holds exactly what goes in it.
+		enum { SELECTED = 0, BUILDING = 1, PLAYER0 = 2, BUCKETS = PLAYER0 + MAX_PLAYERS };
+		Matrix *bucket[UNIT_TYPE_COUNT][BUCKETS];
+		ptrdiff_t count[UNIT_TYPE_COUNT][BUCKETS] = {0}, size[UNIT_TYPE_COUNT][BUCKETS] = {0};
+		uint8_t *which = PUSH(frame, uint8_t, u->count > 0 ? u->count : 1);
+		for (ptrdiff_t i = 0; i < u->count; i++) {
+			int s = PLAYER0 + (u->owner ? u->owner[i].v : 0);
+			if (f == selected_faction && selected && selected[i]) s = SELECTED;
+			if ((u->progress && u->progress[i] < 1.0f) || (u->order && u->order[i] == ORDER_TRANSFORM)) s = BUILDING;
+			which[i] = (uint8_t)s;
+			size[u->type[i]][s]++;
+		}
 		for (int t = 0; t < UNIT_TYPE_COUNT; t++)
-			for (int s = 0; s < 3; s++) bucket[t][s] = PUSH(frame, Matrix, u->count);
+			for (int s = 0; s < BUCKETS; s++) bucket[t][s] = size[t][s] ? PUSH(frame, Matrix, size[t][s]) : nullptr;
 
 		for (ptrdiff_t i = 0; i < u->count; i++) {
 			const UnitDef *def = &unit_defs[u->type[i]];
@@ -197,15 +221,13 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 				heading[slot] = atan2f(u->vx[i], u->vz[i]);
 			float x = u->px[i] + u->vx[i] * ahead, z = u->pz[i] + u->vz[i] * ahead;
 			float d = 2.0f * def->radius;
-			int s = (f == selected_faction && selected && selected[i]) ? 1 : 0;
+			int s = which[i];
 			int t = u->type[i];
 			// Structures rise as they're built.
 			float built = u->progress ? u->progress[i] : 1.0f;
-			if (built < 1.0f) s = 2;
 			float h = def->height * f_max(0.15f, built);
 			// Transforming: pale, and sinking as it digs in (or rising as it packs up).
 			if (u->order && u->order[i] == ORDER_TRANSFORM) {
-				s = 2;
 				float w = u->work[i];
 				h *= unit_is_combat(u->type[i]) ? 1.0f - 0.6f * w : 0.4f + 0.6f * w;
 			}
@@ -218,9 +240,11 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 		}
 		Color building = ColorLerp(FACTION_COLOR[f], WHITE, 0.55f);
 		for (int t = 0; t < UNIT_TYPE_COUNT; t++) {
-			draw_bucket(r, r->unit_mesh[t], FACTION_COLOR[f], bucket[t][0], count[t][0]);
-			draw_bucket(r, r->unit_mesh[t], SELECTED_COLOR, bucket[t][1], count[t][1]);
-			draw_bucket(r, r->unit_mesh[t], building, bucket[t][2], count[t][2]);
+			for (int p = 0; p < MAX_PLAYERS; p++)
+				draw_bucket(r, r->unit_mesh[t], render_player_color(f, (PlayerSlot){(uint8_t)p}), bucket[t][PLAYER0 + p],
+				            count[t][PLAYER0 + p]);
+			draw_bucket(r, r->unit_mesh[t], SELECTED_COLOR, bucket[t][SELECTED], count[t][SELECTED]);
+			draw_bucket(r, r->unit_mesh[t], building, bucket[t][BUILDING], count[t][BUILDING]);
 		}
 	}
 

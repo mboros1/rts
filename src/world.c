@@ -31,7 +31,7 @@ static bool parse_unit(const char *t, float *out)
 
 bool world_parse(World *w, Str text, const char *path, char *err, ptrdiff_t err_len)
 {
-	*w = (World){.port = 7700};
+	*w = (World){.port = 7700, .players = {1, 1}};
 	char line[512];
 	int line_no = 0;
 	for (ptrdiff_t i = 0; i < text.len;) {
@@ -75,6 +75,13 @@ bool world_parse(World *w, Str text, const char *path, char *err, ptrdiff_t err_
 			if (w->link_count == WORLD_MAX_LINKS) return world_bad(err, err_len, path, line_no, "too many links");
 			w->links[w->link_count][0] = (uint8_t)a;
 			w->links[w->link_count++][1] = (uint8_t)b;
+		} else if (!strcmp(tok[0], "players") && n == 3) {
+			int side = !strcmp(tok[1], "blue") ? 0 : !strcmp(tok[1], "red") ? 1 : -1;
+			char *end;
+			long k = strtol(tok[2], &end, 10);
+			if (side < 0 || *end || k < 1 || k > MAX_PLAYERS)
+				return world_bad(err, err_len, path, line_no, "players blue|red N (1..8)");
+			w->players[side] = (uint8_t)k;
 		} else if (!strcmp(tok[0], "doctrine") && n >= 3) {
 			// Checked when a zone's setup reads it; here only where it goes.
 			int side = !strcmp(tok[1], "blue") ? 0 : !strcmp(tok[1], "red") ? 1 : -1;
@@ -90,7 +97,8 @@ bool world_parse(World *w, Str text, const char *path, char *err, ptrdiff_t err_
 			char *to = zone < 0 ? w->doctrine[side] : w->doctrine_in[zone][side];
 			snprintf(to, sizeof w->doctrine[side], "%s", spec);
 		} else {
-			return world_bad(err, err_len, path, line_no, "expected: port N | zone NAME X Y [home SIDE] | link A B | doctrine ...");
+			return world_bad(err, err_len, path, line_no,
+			                 "expected: port N | zone NAME X Y [home SIDE] | link A B | players SIDE N | doctrine ...");
 		}
 	}
 	if (w->zone_count == 0) return world_bad(err, err_len, path, line_no, "no zones");
@@ -162,6 +170,13 @@ void put_directory(ByteBuf *b, const Directory *d)
 		put8(b, d->transit[k].faction);
 		put32(b, (uint32_t)d->transit[k].units);
 	}
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		put8(b, d->players[f]);
+		for (int k = 0; k < d->players[f]; k++) {
+			put8(b, d->player[f][k][0] != 0);
+			if (d->player[f][k][0]) put_name(b, d->player[f][k]);
+		}
+	}
 }
 
 bool get_directory(ByteReader *r, Directory *d)
@@ -204,6 +219,14 @@ bool get_directory(ByteReader *r, Directory *d)
 		if (t->src >= n || t->dst >= n || t->faction >= FACTION_COUNT || t->units < 0) return false;
 	}
 	d->transit_count = transit;
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		d->players[f] = get8(r);
+		if (d->players[f] > MAX_PLAYERS) return false;
+		for (int k = 0; k < d->players[f]; k++) {
+			uint8_t named = get8(r);
+			if (named > 1 || (named && !get_name(r, d->player[f][k]))) return false;
+		}
+	}
 	return !r->bad;
 }
 
@@ -238,6 +261,14 @@ void directory_print(const Directory *d, FILE *out)
 		fprintf(out, "transit: %s %d %s->%s\n", t->faction ? "red" : "blue", t->units, d->zones[t->src].name,
 		        d->zones[t->dst].name);
 	}
+	// players: blue 0 alice, 1 (bot) | red 0 (bot)
+	fprintf(out, "players:");
+	for (int f = 0; f < FACTION_COUNT; f++) {
+		fprintf(out, "%s %s", f ? " |" : "", f ? "red" : "blue");
+		for (int k = 0; k < d->players[f]; k++)
+			fprintf(out, "%s %d %s", k ? "," : "", k, d->player[f][k][0] ? d->player[f][k] : "(bot)");
+	}
+	fprintf(out, "\n");
 }
 
 void bot_world_build(BotWorld *w, const Directory *d, int here, uint8_t f)
@@ -280,6 +311,8 @@ void directory_fog(Directory *d, uint8_t viewer)
 		s->transporters[enemy] = 0;
 		s->intel[enemy] = (Intel){.seen_age = INTEL_NEVER, .transporter_age = INTEL_NEVER};
 	}
+	d->players[enemy] = 0;
+	memset(d->player[enemy], 0, sizeof d->player[enemy]);
 	int kept = 0;
 	for (int k = 0; k < d->transit_count; k++)
 		if (d->transit[k].faction == viewer) d->transit[kept++] = d->transit[k];

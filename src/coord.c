@@ -39,6 +39,7 @@ bool get_counts(ByteReader *r, int32_t counts[UNIT_TYPE_COUNT])
 void put_leg(ByteBuf *b, const Leg *l)
 {
 	put8(b, l->unpaired);
+	put8(b, l->owner.v);
 	put32(b, l->route);
 	putf(b, l->landing.x);
 	putf(b, l->landing.z);
@@ -47,12 +48,13 @@ void put_leg(ByteBuf *b, const Leg *l)
 bool get_leg(ByteReader *r, Leg *l)
 {
 	uint8_t unpaired = get8(r);
+	l->owner = (PlayerSlot){get8(r)};
 	l->route = get32(r);
 	l->landing = v2(getf(r), getf(r));
 	l->unpaired = unpaired;
 	// Comparisons are false for NaN, so this refuses those too.
 	bool sane = l->landing.x >= -1e5f && l->landing.x <= 1e5f && l->landing.z >= -1e5f && l->landing.z <= 1e5f;
-	return !r->bad && unpaired <= 1 && route_ok(l->route) && !(unpaired && l->route) && sane;
+	return !r->bad && unpaired <= 1 && player_ok(l->owner) && route_ok(l->route) && !(unpaired && l->route) && sane;
 }
 
 // ---------------------------------------------------------------- the log
@@ -149,13 +151,17 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 		int32_t counts[UNIT_TYPE_COUNT];
 		if (!strcmp(verb, "transfer")) {
 			char *src = strtok_r(nullptr, " ", &save), *dst = strtok_r(nullptr, " ", &save);
-			char *fac = strtok_r(nullptr, " ", &save), *kind = strtok_r(nullptr, " ", &save);
+			char *fac = strtok_r(nullptr, " ", &save), *owner = strtok_r(nullptr, " ", &save);
+			char *kind = strtok_r(nullptr, " ", &save);
 			char *seq_s = strtok_r(nullptr, " ", &save), *route_s = strtok_r(nullptr, " ", &save);
 			char *at_s = strtok_r(nullptr, " ", &save);
-			if (!src || !dst || !fac || !kind || !seq_s || !route_s || !at_s || !parse_counts(&save, counts)) return false;
+			if (!src || !dst || !fac || !owner || !kind || !seq_s || !route_s || !at_s || !parse_counts(&save, counts)) return false;
 			long faction = strtol(fac, nullptr, 10);
 			if (faction < 0 || faction >= FACTION_COUNT) return false;
-			Leg leg = {.unpaired = !strcmp(kind, "unpaired"), .route = (Route)strtoul(route_s, nullptr, 16)};
+			long player = strtol(owner, nullptr, 10);
+			if (player < 0 || player >= MAX_PLAYERS) return false;
+			Leg leg = {.unpaired = !strcmp(kind, "unpaired"), .route = (Route)strtoul(route_s, nullptr, 16),
+			           .owner = {(uint8_t)player}};
 			if (!leg.unpaired && strcmp(kind, "paired")) return false;
 			if (sscanf(at_s, "%f,%f", &leg.landing.x, &leg.landing.z) != 2) return false;
 			if (!route_ok(leg.route) || (leg.unpaired && leg.route)) return false;
@@ -170,6 +176,13 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 			if (!n_s || strlen(id_s) >= ZONE_NAME) return false;
 			uint64_t n = strtoull(n_s, nullptr, 10), *max = seq_of(l, id_s);
 			if (n > *max) *max = n;
+		} else if (!strcmp(verb, "player")) {
+			// player NAME FACTION SLOT: id_s is the name here.
+			char *fac = strtok_r(nullptr, " ", &save), *slot_s = strtok_r(nullptr, " ", &save);
+			if (!fac || !slot_s || strlen(id_s) >= ZONE_NAME) return false;
+			long faction = strtol(fac, nullptr, 10), slot = strtol(slot_s, nullptr, 10);
+			if (faction < 0 || faction >= FACTION_COUNT || slot < 0 || slot >= MAX_PLAYERS) return false;
+			snprintf(l->player[faction][slot], ZONE_NAME, "%s", id_s);
 		} else if (!strcmp(verb, "delivered")) {
 			Transfer *t = ledger_find(l, id);
 			if (!t) return false;
@@ -189,8 +202,8 @@ Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *ds
 	*max = seq;
 	char line[512], list[384];
 	format_counts(list, sizeof list, counts);
-	snprintf(line, sizeof line, "transfer %llu %s %s %u %s %llu %x %.9g,%.9g%s", (unsigned long long)l->next_id, src, dst,
-	         faction, leg->unpaired ? "unpaired" : "paired", (unsigned long long)seq, leg->route, (double)leg->landing.x,
+	snprintf(line, sizeof line, "transfer %llu %s %s %u %u %s %llu %x %.9g,%.9g%s", (unsigned long long)l->next_id, src, dst,
+	         faction, leg->owner.v, leg->unpaired ? "unpaired" : "paired", (unsigned long long)seq, leg->route, (double)leg->landing.x,
 	         (double)leg->landing.z, list);
 	log_line(l, line);
 	return add_transfer(l, l->next_id, src, dst, faction, leg, counts);
@@ -206,19 +219,36 @@ void ledger_delivered(Ledger *l, uint64_t id)
 	t->delivered = true;
 }
 
+uint8_t ledger_join(Ledger *l, uint8_t faction, const char *name, int slots)
+{
+	ASSERT(faction < FACTION_COUNT && slots <= MAX_PLAYERS);
+	for (int k = 0; k < slots; k++)
+		if (!strcmp(l->player[faction][k], name)) return (uint8_t)k;
+	for (int k = 0; k < slots; k++) {
+		if (l->player[faction][k][0]) continue;
+		char line[64];
+		snprintf(line, sizeof line, "player %s %u %d", name, faction, k);
+		log_line(l, line);
+		snprintf(l->player[faction][k], ZONE_NAME, "%s", name);
+		return (uint8_t)k;
+	}
+	return SIDE_FULL;
+}
+
 static void format_transfer(char *line, size_t size, const Transfer *t, uint64_t seq)
 {
 	char list[384];
 	format_counts(list, sizeof list, t->counts);
-	snprintf(line, size, "transfer %llu %s %s %u %s %llu %x %.9g,%.9g%s", (unsigned long long)t->id, t->src, t->dst,
-	         t->faction, t->leg.unpaired ? "unpaired" : "paired", (unsigned long long)seq, t->leg.route,
+	snprintf(line, size, "transfer %llu %s %s %u %u %s %llu %x %.9g,%.9g%s", (unsigned long long)t->id, t->src, t->dst,
+	         t->faction, t->leg.owner.v, t->leg.unpaired ? "unpaired" : "paired", (unsigned long long)seq, t->leg.route,
 	         (double)t->leg.landing.x, (double)t->leg.landing.z, list);
 }
 
 bool ledger_compact(Ledger *l, const char *path, Arena *scratch)
 {
 	ArenaMark m = arena_mark(scratch);
-	ByteBuf b = bytebuf_make(scratch, (ptrdiff_t)l->transfer_count * 512 + 64 * (COORD_MAX_ZONES * 2) + 64);
+	ByteBuf b = bytebuf_make(scratch, (ptrdiff_t)l->transfer_count * 512 + 64 * (COORD_MAX_ZONES * 2)
+	                                    + 64 * FACTION_COUNT * MAX_PLAYERS + 64);
 	char line[512];
 	snprintf(line, sizeof line, "next %llu\n", (unsigned long long)l->next_id);
 	put_bytes(&b, line, (ptrdiff_t)strlen(line));
@@ -226,6 +256,12 @@ bool ledger_compact(Ledger *l, const char *path, Arena *scratch)
 		snprintf(line, sizeof line, "seq %s %llu\n", l->seq_zone[k], (unsigned long long)l->seq_max[k]);
 		put_bytes(&b, line, (ptrdiff_t)strlen(line));
 	}
+	for (int f = 0; f < FACTION_COUNT; f++)
+		for (int k = 0; k < MAX_PLAYERS; k++) {
+			if (!l->player[f][k][0]) continue;
+			snprintf(line, sizeof line, "player %s %d %d\n", l->player[f][k], f, k);
+			put_bytes(&b, line, (ptrdiff_t)strlen(line));
+		}
 	int32_t kept = 0;
 	for (int32_t k = 0; k < l->transfer_count; k++) {
 		const Transfer *t = &l->transfers[k];

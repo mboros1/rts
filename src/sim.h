@@ -105,6 +105,7 @@ typedef struct {
 	// everything else; the spawner and initial_units are unused.
 	bool economy;
 	uint8_t bases;            // economy: which factions start with a base (bit per faction)
+	uint8_t players[FACTION_COUNT]; // slots per side, 1..MAX_PLAYERS: each starts its own base
 } SimConfig;
 
 SimConfig sim_config_default(void);
@@ -115,6 +116,7 @@ static inline bool sim_config_equal(const SimConfig *a, const SimConfig *b)
 	bool same = a->seed == b->seed && a->initial_units == b->initial_units && a->population == b->population
 	         && a->spawn_interval == b->spawn_interval && a->max_units == b->max_units
 	         && a->max_projectiles == b->max_projectiles && a->economy == b->economy && a->bases == b->bases;
+	for (int f = 0; f < FACTION_COUNT; f++) same = same && a->players[f] == b->players[f];
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) same = same && a->type_weight[k] == b->type_weight[k];
 	return same;
 }
@@ -159,6 +161,9 @@ typedef struct {
 	uint32_t *route;       // ... and the hops after it (a Route), | ROUTE_UNPAIRED
 	uint8_t *seeded;       // turrets: an entrenched unit, of type build_type
 	                       // (entrenching or mobilizing: order TRANSFORM, work the progress)
+	PlayerSlot *owner;     // the only player whose orders it takes
+	PlayerSlot *output;    // factories: who what they make belongs to;
+	                       // units on a send order: who they arrive owned by
 } Units;
 
 // Zones are numbered by the world's zone list, 0 to ZONE_MAX - 1.
@@ -196,6 +201,7 @@ typedef struct {
 	Route route;
 	bool unpaired;
 	V2 landing;
+	PlayerSlot owner;    // who they arrive owned by
 } Departure;
 
 enum { FACTORY_QUEUE = 8 };
@@ -387,6 +393,8 @@ typedef enum : uint8_t {
 	                    // target, or (UNPAIRED) spread around target; then on to `route`
 	COMMAND_ENTRENCH,   // these combat units dig in as turrets where they stand
 	COMMAND_MOBILIZE,   // these entrenched turrets become the units they were
+	COMMAND_GIVE,       // these units now belong to player `to`
+	COMMAND_OUTPUT,     // these factories' units go to player `to` from now on
 	COMMAND_KIND_COUNT,
 } CommandKind;
 
@@ -436,12 +444,16 @@ static constexpr float MOBILIZE_ENERGY = 150.0f;
 static constexpr int32_t SPAWN_MAX = 4096;      // units per spawn command
 static constexpr float SPAWN_MAX_RADIUS = 200.0f;
 
-// An input to the sim for one faction. Handles that are stale or not that
-// faction's are ignored. Spawn uses unit_type, amount and radius around
-// target, and no handles. Build uses unit_type and target; produce uses
-// unit_type, amount and flags.
+// An input to the sim for one faction, from one of its players. Handles that
+// are stale, not that faction's, or not that player's are ignored: only a
+// unit's owner orders it. Spawn uses unit_type, amount and radius around
+// target, and no handles; spawned and arriving units belong to `player`.
+// Build uses unit_type and target; produce uses unit_type, amount and flags.
+// Give, output and send name a player `to`.
 typedef struct {
 	FactionId faction;
+	PlayerSlot player;
+	PlayerSlot to;
 	CommandKind kind;
 	V2 target;
 	ptrdiff_t count;
@@ -497,6 +509,10 @@ ptrdiff_t units_find(const Units *u, UnitHandle h);
 UnitHandle units_handle(const Units *u, ptrdiff_t dense);
 
 static inline FactionId faction_enemy(FactionId f) { return (FactionId){1 - f.v}; }
+
+// Where player p of faction f starts: the faction's base for the first, then
+// above and below it in turn.
+V2 sim_player_base(const Sim *sim, FactionId f, PlayerSlot p);
 
 // One tick of shell flight: exact for constant gravity, so shells land where
 // the aim solved. Clients fly shells with this too, from the server's start

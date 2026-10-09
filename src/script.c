@@ -61,11 +61,39 @@ static bool parse_point(const char *t, V2 *out)
 	return parse_f(buf, &out->x) && parse_f(comma + 1, &out->z);
 }
 
+// SIDE or SIDE.PLAYER: blue is blue's player 0, blue.2 its player 2.
+static bool parse_player(const char *t, FactionId *side, PlayerSlot *player, bool *given)
+{
+	const char *dot = strchr(t, '.');
+	size_t len = dot ? (size_t)(dot - t) : strlen(t);
+	if (len == 4 && !strncmp(t, "blue", 4)) *side = (FactionId){0};
+	else if (len == 3 && !strncmp(t, "red", 3)) *side = (FactionId){1};
+	else return false;
+	*player = (PlayerSlot){0};
+	*given = dot != nullptr;
+	if (!dot) return true;
+	if (dot[1] < '0' || dot[1] >= '0' + MAX_PLAYERS || dot[2]) return false;
+	*player = (PlayerSlot){(uint8_t)(dot[1] - '0')};
+	return true;
+}
+
 static bool parse_side(const char *t, FactionId *out)
 {
-	if (!strcmp(t, "blue")) *out = (FactionId){0};
-	else if (!strcmp(t, "red")) *out = (FactionId){1};
-	else return false;
+	PlayerSlot p;
+	bool given;
+	return parse_player(t, out, &p, &given) && !given;
+}
+
+static bool parse_action_side(const char *t, ScriptAction *a)
+{
+	return parse_player(t, &a->side, &a->player, &a->player_given);
+}
+
+// A player of the same side, by number.
+static bool parse_slot(const char *t, PlayerSlot *out)
+{
+	if (t[0] < '0' || t[0] >= '0' + MAX_PLAYERS || t[1]) return false;
+	*out = (PlayerSlot){(uint8_t)(t[0] - '0')};
 	return true;
 }
 
@@ -132,7 +160,7 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		// select SIDE TYPE [within R of X,Z] [max N] as NAME
 		if (!(a = new_action(p, tick, ACTION_SELECT, text))) return bad(p, "too many actions", nullptr);
 		if (n < 5) return bad(p, "select SIDE TYPE [within R of X,Z] [max N] as NAME", nullptr);
-		if (!parse_side(tok[1], &a->side)) return bad(p, "side is blue or red", tok[1]);
+		if (!parse_action_side(tok[1], a)) return bad(p, "side is blue or red, or blue.N for player N", tok[1]);
 		if (!parse_type(tok[2], &a->type, true)) return bad(p, "unknown unit type", tok[2]);
 		int i = 3;
 		if (i + 3 < n && !strcmp(tok[i], "within")) {
@@ -192,7 +220,7 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 	}
 	if (!strcmp(verb, "send")) {
 		// send GROUP to ZONE [via Z1,Z2,...] [at X,Z] [unpaired]
-		static const char *usage = "send GROUP to ZONE [via ZONE,ZONE...] [at X,Z] [unpaired]";
+		static const char *usage = "send GROUP to ZONE [via ZONE,ZONE...] [at X,Z] [unpaired] [for PLAYER]";
 		if (n < 4 || strcmp(tok[2], "to")) return bad(p, usage, nullptr);
 		if (!(a = new_action(p, tick, ACTION_ORDER, text))) return bad(p, "too many actions", nullptr);
 		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
@@ -211,6 +239,9 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 				if (!parse_point(tok[++i], &a->at)) return bad(p, "at X,Z", tok[i]);
 			} else if (!strcmp(tok[i], "unpaired")) {
 				a->flags = COMMAND_UNPAIRED;
+			} else if (!strcmp(tok[i], "for") && i + 1 < n) {
+				if (!parse_slot(tok[++i], &a->to)) return bad(p, "for PLAYER: a player is 0..7", tok[i]);
+				a->to_given = true;
 			} else {
 				return bad(p, usage, tok[i]);
 			}
@@ -226,7 +257,7 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		int64_t amount;
 		if (n != 4) return bad(p, "arrive SIDE TYPE N", nullptr);
 		if (!(a = new_action(p, tick, ACTION_SPAWN, text))) return bad(p, "too many actions", nullptr);
-		if (!parse_side(tok[1], &a->side)) return bad(p, "side is blue or red", tok[1]);
+		if (!parse_action_side(tok[1], a)) return bad(p, "side is blue or red, or blue.N for player N", tok[1]);
 		if (!parse_type(tok[2], &a->type, false) || unit_is_structure((UnitType)a->type))
 			return bad(p, "units arrive, not structures", tok[2]);
 		if (!parse_i64(tok[3], &amount) || amount <= 0 || amount > SPAWN_MAX) return bad(p, "amount out of range", tok[3]);
@@ -247,7 +278,7 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		if (n != 6 && n != 8) return bad(p, "spawn SIDE TYPE N at X,Z [radius R]", nullptr);
 		if (!(a = new_action(p, tick, ACTION_SPAWN, text))) return bad(p, "too many actions", nullptr);
 		int64_t amount;
-		if (!parse_side(tok[1], &a->side)) return bad(p, "side is blue or red", tok[1]);
+		if (!parse_action_side(tok[1], a)) return bad(p, "side is blue or red, or blue.N for player N", tok[1]);
 		if (!parse_type(tok[2], &a->type, false)) return bad(p, "unknown unit type", tok[2]);
 		if (!parse_i64(tok[3], &amount) || amount <= 0 || amount > SPAWN_MAX)
 			return bad(p, "amount out of range", tok[3]);
@@ -262,7 +293,17 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 	if (!strcmp(verb, "bot")) {
 		if (n != 3) return bad(p, "bot SIDE on|off", nullptr);
 		if (!(a = new_action(p, tick, ACTION_BOT, text))) return bad(p, "too many actions", nullptr);
-		if (!parse_side(tok[1], &a->side) || !parse_on(tok[2], &a->on)) return bad(p, "bot SIDE on|off", nullptr);
+		if (!parse_action_side(tok[1], a) || !parse_on(tok[2], &a->on)) return bad(p, "bot SIDE[.N] on|off", nullptr);
+		return true;
+	}
+	if (!strcmp(verb, "give") || !strcmp(verb, "output")) {
+		// give GROUP to N: the group's units now belong to player N of their
+		// side. output GROUP to N: its factories make units for player N.
+		if (n != 4 || strcmp(tok[2], "to")) return bad(p, "give|output GROUP to PLAYER", nullptr);
+		if (!(a = new_action(p, tick, ACTION_ORDER, text))) return bad(p, "too many actions", nullptr);
+		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
+		if (!parse_slot(tok[3], &a->to)) return bad(p, "a player is 0..7", tok[3]);
+		a->command = !strcmp(verb, "give") ? COMMAND_GIVE : COMMAND_OUTPUT;
 		return true;
 	}
 	if (!strcmp(verb, "expect")) {
@@ -290,8 +331,10 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		a->op = (ExpectOp)o;
 		if (a->field == FIELD_ALIVE) {
 			if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
-		} else if (!parse_side(tok[1], &a->side)) {
-			return bad(p, "side is blue or red (groups only have: alive)", tok[1]);
+		} else if (!parse_action_side(tok[1], a)) {
+			return bad(p, "side is blue or red, or blue.N (groups only have: alive)", tok[1]);
+		} else if (a->player_given && a->field != FIELD_UNITS && a->field != FIELD_COUNT) {
+			return bad(p, "a player's fields are units and finished counts; the rest are the side's", tok[2]);
 		}
 		char *end;
 		a->value = strtod(tok[4], &end);
@@ -407,9 +450,21 @@ static bool parse_line(Parser *p, char *line)
 	}
 	if (!strcmp(key, "bot")) {
 		FactionId side;
-		bool on;
-		if (n != 3 || !parse_side(tok[1], &side) || !parse_on(tok[2], &on)) return bad(p, "bot SIDE on|off", nullptr);
-		s->bots_on[side.v] = on;
+		PlayerSlot player;
+		bool on, given;
+		if (n != 3 || !parse_player(tok[1], &side, &player, &given) || !parse_on(tok[2], &on))
+			return bad(p, "bot SIDE[.N] on|off", nullptr);
+		for (int k = 0; k < MAX_PLAYERS; k++)
+			if (!given || k == player.v) s->bots_on[side.v][k] = on;
+		return true;
+	}
+	if (!strcmp(key, "players")) {
+		// players SIDE N: the side's players, each with a base of their own.
+		FactionId side;
+		if (n != 3 || !parse_side(tok[1], &side) || !parse_i64(tok[2], &v) || v < 1 || v > MAX_PLAYERS)
+			return bad(p, "players SIDE N (1..8)", nullptr);
+		if (p->s->action_count > 0) return bad(p, "players must come before actions", nullptr);
+		s->config.players[side.v] = (uint8_t)v;
 		return true;
 	}
 	if (!strcmp(key, "clip")) {
@@ -473,7 +528,7 @@ bool script_parse(Script *s, Arena *arena, Str text, const char *path, char *err
 		.about = "",
 		.scenario = def,
 		.config = scenario_config(def),
-		.bots_on = {true, true},
+		.bots_on = {{true, true, true, true, true, true, true, true}, {true, true, true, true, true, true, true, true}},
 		.groups = PUSH(arena, const char *, MAX_GROUPS),
 		.clip_from = def->clip_from,
 		.clip_to = def->clip_to,
@@ -527,14 +582,21 @@ bool script_load(Script *s, Arena *arena, const char *path, char *err, ptrdiff_t
 void script_run_init(ScriptRun *r, const Script *s, Arena *arena, FILE *log)
 {
 	*r = (ScriptRun){.script = s, .log = log};
-	scenario_bots(s->scenario, r->bots);
-	for (int k = 0; k < FACTION_COUNT; k++) {
-		r->bots[k].enabled = s->bots_on[k];
-		r->bots[k].doctrine = s->doctrine[k];
-	}
+	Bot side[FACTION_COUNT];
+	scenario_bots(s->scenario, side);
+	for (int k = 0; k < FACTION_COUNT; k++)
+		for (int p = 0; p < MAX_PLAYERS; p++) {
+			Bot *b = &r->bots[k][p];
+			*b = side[k];
+			b->player = (PlayerSlot){(uint8_t)p};
+			b->rng = bot_create_player(side[k].faction, b->player, s->scenario->seed).rng;
+			b->enabled = s->bots_on[k][p];
+			b->doctrine = s->doctrine[k];
+		}
 	r->group_units = PUSH(arena, UnitHandle *, s->group_count);
 	r->group_len = PUSH(arena, ptrdiff_t, s->group_count);
 	r->group_side = PUSH(arena, FactionId, s->group_count);
+	r->group_player = PUSH(arena, PlayerSlot, s->group_count);
 	r->queued = PUSH(arena, const ScriptAction **, s->group_count);
 	r->queued_head = PUSH(arena, int32_t, s->group_count);
 	r->queued_len = PUSH(arena, int32_t, s->group_count);
@@ -548,6 +610,8 @@ static Command build_command(const ScriptRun *r, const ScriptAction *a, Arena *t
 {
 	return (Command){
 		.faction = r->group_side[a->group],
+		.player = r->group_player[a->group],
+		.to = r->group_player[a->group],
 		.kind = COMMAND_BUILD,
 		.unit_type = (UnitType)a->type,
 		.target = a->at,
@@ -587,6 +651,7 @@ static void run_select(ScriptRun *r, const ScriptAction *a, const Sim *sim, Aren
 	ptrdiff_t n = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (a->type >= 0 && u->type[i] != a->type) continue;
+		if (!player_eq(u->owner[i], a->player)) continue;
 		float d2 = a->area ? v2_len2(v2_sub(v2(u->px[i], u->pz[i]), a->at)) : 0.0f;
 		if (a->area && d2 > a->radius * a->radius) continue;
 		c[n++] = (Candidate){d2, (int32_t)i};
@@ -598,6 +663,7 @@ static void run_select(ScriptRun *r, const ScriptAction *a, const Sim *sim, Aren
 	for (ptrdiff_t i = 0; i < n; i++) r->group_units[a->group][i] = units_handle(u, c[i].dense);
 	r->group_len[a->group] = n;
 	r->group_side[a->group] = a->side;
+	r->group_player[a->group] = a->player;
 	if (n == 0 && r->log)
 		fprintf(r->log, "  note line %d at %lld: selection is empty: %s\n", a->line, (long long)a->tick, a->text);
 }
@@ -617,8 +683,11 @@ static void run_expect(ScriptRun *r, const ScriptAction *a, const Sim *sim)
 		actual = (double)group_alive(r, a->group, sim);
 	} else {
 		const Faction *f = &sim->factions[a->side.v];
+		const Units *u = &f->units;
 		switch (a->field) {
-		case FIELD_UNITS: actual = (double)f->units.count; break;
+		case FIELD_UNITS:
+			for (ptrdiff_t i = 0; i < u->count; i++) actual += !a->player_given || player_eq(u->owner[i], a->player);
+			break;
 		case FIELD_LOST: actual = (double)f->stats.units_lost; break;
 		case FIELD_FIRED: actual = (double)f->stats.shots_fired; break;
 		case FIELD_SHELLS: actual = (double)f->incoming.count; break;
@@ -628,8 +697,9 @@ static void run_expect(ScriptRun *r, const ScriptAction *a, const Sim *sim)
 		case FIELD_METAL_INCOME: actual = (double)f->economy.metal_income; break;
 		case FIELD_ENERGY_INCOME: actual = (double)f->economy.energy_income; break;
 		case FIELD_COUNT:
-			for (ptrdiff_t i = 0; i < f->units.count; i++)
-				actual += f->units.type[i] == a->type && f->units.progress[i] >= 1.0f;
+			for (ptrdiff_t i = 0; i < u->count; i++)
+				actual += u->type[i] == a->type && u->progress[i] >= 1.0f
+				       && (!a->player_given || player_eq(u->owner[i], a->player));
 			break;
 		case FIELD_DEPARTED: actual = (double)f->stats.units_departed; break;
 		case FIELD_ARRIVED: actual = (double)f->stats.units_arrived; break;
@@ -668,6 +738,11 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			if (n == cap || r->group_len[a->group] == 0) break;
 			out[n++] = (Command){
 				.faction = r->group_side[a->group],
+				.player = r->group_player[a->group],
+				// Give and output name `to`; a send arrives with its sender
+				// unless it says who for.
+				.to = a->command == COMMAND_GIVE || a->command == COMMAND_OUTPUT || a->to_given ? a->to
+				                                                                             : r->group_player[a->group],
 				.kind = a->command,
 				.unit_type = a->type >= 0 ? (UnitType)a->type : UNIT_RAIDER,
 				.amount = a->limit,
@@ -683,18 +758,19 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 		case ACTION_SPAWN:
 			if (n == cap) break;
 			if (a->flags == 0xff) {
-				out[n++] = (Command){.faction = a->side, .kind = COMMAND_ARRIVE, .unit_type = (UnitType)a->type,
+				out[n++] = (Command){.faction = a->side, .player = a->player, .kind = COMMAND_ARRIVE, .unit_type = (UnitType)a->type,
 				                     .amount = a->limit, .target = sim->factions[a->side.v].base};
 				break;
 			}
-			out[n++] = (Command){.faction = a->side, .kind = COMMAND_SPAWN, .target = a->at,
+			out[n++] = (Command){.faction = a->side, .player = a->player, .kind = COMMAND_SPAWN, .target = a->at,
 			                     .unit_type = (UnitType)a->type, .amount = a->limit, .radius = a->radius};
 			break;
 		case ACTION_QUEUE:
 			r->queued[a->group][r->queued_head[a->group] + r->queued_len[a->group]++] = a;
 			break;
 		case ACTION_BOT:
-			r->bots[a->side.v].enabled = a->on;
+			for (int p = 0; p < MAX_PLAYERS; p++)
+				if (!a->player_given || p == a->player.v) r->bots[a->side.v][p].enabled = a->on;
 			break;
 		case ACTION_EXPECT:
 			run_expect(r, a, sim);
@@ -708,6 +784,7 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 		r->queued_head[g]++;
 		r->queued_len[g]--;
 	}
-	for (int k = 0; k < FACTION_COUNT; k++) bot_think(&r->bots[k], sim, tick_arena, out, &n, cap);
+	for (int k = 0; k < FACTION_COUNT; k++)
+		for (int p = 0; p < sim->config.players[k]; p++) bot_think(&r->bots[k][p], sim, tick_arena, out, &n, cap);
 	return n;
 }

@@ -1,4 +1,7 @@
-// A bot plays one faction by issuing commands, the same way a player does.
+// A bot plays one player's units in one faction by issuing commands, the
+// same way a person in that slot would. Teammates (other slots, people or
+// bots) are friendly: it never orders their units, and it keeps clear of
+// sites and metal spots they're taking.
 //
 // In a world it also plays the map, every STRATEGY_PERIOD ticks: it builds a
 // transporter where its side has none, opens empty neighbouring zones with an
@@ -75,6 +78,7 @@ bool doctrine_parse(Doctrine *d, const char *spec, char *err, size_t err_len);
 
 typedef struct {
 	FactionId faction;
+	PlayerSlot player;
 	Rng rng;
 	int32_t period;       // ticks between decisions
 	int32_t group_size;   // units per attack command
@@ -83,7 +87,8 @@ typedef struct {
 	Doctrine doctrine;
 } Bot;
 
-Bot bot_create(FactionId faction, uint64_t seed);
+Bot bot_create(FactionId faction, uint64_t seed);     // plays player 0
+Bot bot_create_player(FactionId faction, PlayerSlot player, uint64_t seed);
 
 // Appends up to cap - *count commands to out; handle lists come from arena.
 void bot_think(Bot *bot, const Sim *sim, Arena *arena, Command *out, ptrdiff_t *count, ptrdiff_t cap);
