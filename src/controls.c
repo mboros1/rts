@@ -193,7 +193,7 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 		else if (p >= 0 && c->giving == 4) {
 			const Economy *e = &sim->factions[c->me.v].economy[c->player.v];
 			if (n < cap && p != c->player.v)
-				out[n++] = (Order){.kind = COMMAND_SHARE, .target = {0.25f * e->metal, 0.25f * e->energy}, .to = {(uint8_t)p}};
+				out[n++] = (Order){.kind = COMMAND_SHARE, .metal = 0.25f * e->metal, .energy = 0.25f * e->energy, .to = {(uint8_t)p}};
 			c->giving = 0;
 		} else if (p >= 0) {
 			CommandKind kind = c->giving == 2 ? COMMAND_OUTPUT : COMMAND_GIVE;
@@ -211,7 +211,8 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 			if (IsKeyPressed(KEY_R)) c->placing = UNIT_TRANSPORTER;
 		}
 		if (selection_has(c, sim, UNIT_FACTORY)) {
-			const UnitType keys[] = {UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_ENGINEER, UNIT_SCOUT, UNIT_SAPPER, UNIT_SIEGE};
+			const UnitType keys[] = {UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_ENGINEER, UNIT_SCOUT, UNIT_SAPPER, UNIT_SIEGE,
+			                         UNIT_CONTAINER};
 			for (int k = 0; k < (int)countof(keys); k++)
 				if (IsKeyPressed(KEY_ONE + k))
 					order(c, frame, out, cap, &n, (Order){.kind = COMMAND_PRODUCE, .type = keys[k], .amount = 1,
@@ -356,8 +357,8 @@ void controls_draw_screen(const Controls *c, const Sim *sim)
 	}
 	DrawText(sel, 14, y + 26, 18, RAYWHITE);
 	DrawText(sim->config.economy
-	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear | T send | H give | K take"
-	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-7, 0 clear")
+	             ? (c->targets.count ? "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-8, 0 clear | T send | H give | K take"
+	                                 : "drag select | right attack-move | ctrl+right move | X stop | V entrench | engineers: E G F R | factories: 1-8, 0 clear")
 	             : "drag select | right attack-move | ctrl+right move | X stop | V entrench",
 	         14, y + 50, 14, GRAY);
 }

@@ -74,6 +74,7 @@ typedef struct {
 	char dst[ZONE_NAME];
 	Leg leg;
 	int32_t counts[UNIT_TYPE_COUNT];
+	Cargo cargo;
 } Outgoing;
 
 typedef enum { CLIENT_FREE, CLIENT_HELLO, CLIENT_READY } ClientState;
@@ -179,6 +180,19 @@ static void send_or_drop(Server *s, Client *c, uint8_t kind, const ByteBuf *b, d
 // away from the start. Recorded as COMMAND_AI_SLOTS by the script runner.
 static constexpr int64_t AWAY_GRACE = 30 * 30;   // ticks: 30 game seconds
 
+// Side f's players here (bit per slot) short of metal or energy: under half
+// a held store's worth, containers parked here included. Where their
+// containers would help.
+static uint8_t side_short_of(const Sim *sim, int f)
+{
+	uint8_t mask = 0;
+	for (int p = 0; sim->config.economy && p < sim->config.players[f]; p++) {
+		const Economy *e = &sim->factions[f].economy[p];
+		if (e->metal < 0.5f * HELD_METAL_CAP || e->energy < 0.5f * HELD_ENERGY_CAP) mask |= (uint8_t)(1u << p);
+	}
+	return mask;
+}
+
 static void update_presence(Server *s)
 {
 	int64_t now = s->sim.tick.v;
@@ -257,6 +271,7 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	int32_t amount = (int32_t)get32(r);
 	uint8_t flags = get8(r);
 	Route route = get32(r);
+	float metal = getf(r), energy = getf(r);
 	uint32_t n = get32(r);
 	// Players order, build, produce, send and entrench; spawning is for scripts only.
 	// Arriving comes from the coordinator, never players. Whether a send is
@@ -278,7 +293,7 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	s->queued[s->queued_count++] = (Command){.faction = {c->faction}, .player = c->player, .to = to, .kind = (CommandKind)kind,
 	                                         .target = target, .count = n, .units = h,
 	                                         .unit_type = (UnitType)unit_type, .amount = amount, .flags = flags,
-	                                         .route = route};
+	                                         .route = route, .metal = metal, .energy = energy};
 	c->commands++;
 	s->commands_admitted++;
 }
@@ -335,6 +350,7 @@ static void send_departure(Server *s, const Outgoing *o, double now)
 	put_name(&b, o->dst);
 	put_leg(&b, &o->leg);
 	put_counts(&b, o->counts);
+	put_cargo(&b, &o->cargo);
 	conn_send(&s->coord, COORD_DEPART, b.data, b.len, now);
 	arena_rewind(m);
 }
@@ -389,7 +405,8 @@ static void on_deliver(Server *s, ByteReader *r, double now)
 	uint8_t faction = get8(r);
 	Leg leg;
 	int32_t counts[UNIT_TYPE_COUNT];
-	if (!get_leg(r, &leg) || !get_counts(r, counts) || faction >= FACTION_COUNT) return;
+	Cargo cargo;
+	if (!get_leg(r, &leg) || !get_counts(r, counts) || !get_cargo(r, &cargo) || faction >= FACTION_COUNT) return;
 	if (was_applied(s, id)) {
 		// Already in: confirm (again) unless it's still waiting for its tick.
 		for (int k = 0; k < s->applied_count; k++)
@@ -435,6 +452,8 @@ static void on_deliver(Server *s, ByteReader *r, double now)
 		s->queued[s->queued_count++] = (Command){.faction = {faction}, .kind = COMMAND_ARRIVE, .target = at,
 		                                         .player = leg.owner,
 		                                         .unit_type = (UnitType)k, .amount = counts[k], .route = leg.route,
+		                                         .metal = k == UNIT_CONTAINER ? cargo.metal : 0.0f,
+		                                         .energy = k == UNIT_CONTAINER ? cargo.energy : 0.0f,
 		                                         .flags = leg.unpaired ? COMMAND_UNPAIRED : 0};
 	}
 	s->confirm[s->confirm_count++] = id;
@@ -493,6 +512,7 @@ static void coord_service(Server *s, double now)
 			st.units[f] = (uint16_t)(units < 65535 ? units : 65535);
 			st.structures[f] = (uint16_t)(structures < 65535 ? structures : 65535);
 			st.transporters[f] = (uint8_t)(transporters < 255 ? transporters : 255);
+			st.short_of[f] = side_short_of(&s->sim, f);
 			st.intel[f] = (Intel){.contact = s->contact[f], .seen_age = age_of(s, s->contact_tick[f]),
 			                      .transporters = s->transporters_seen[f],
 			                      .transporter_age = age_of(s, s->transporter_tick[f])};
@@ -518,7 +538,7 @@ static void coord_service(Server *s, double now)
 //   "RTSZ" u32 version, config (wire_put_config), u64 last departure number,
 //   u32 n, n x outgoing departure, u32 m, m x u64 applied transfer, sim_save
 
-enum { ZONE_STATE_VERSION = 6 };
+enum { ZONE_STATE_VERSION = 7 };
 
 static void put_outgoing(ByteBuf *b, const Outgoing *o)
 {
@@ -527,6 +547,7 @@ static void put_outgoing(ByteBuf *b, const Outgoing *o)
 	put_name(b, o->dst);
 	put_leg(b, &o->leg);
 	put_counts(b, o->counts);
+	put_cargo(b, &o->cargo);
 }
 
 static bool save_zone(Server *s)
@@ -579,7 +600,7 @@ static bool load_zone(Server *s, Arena *scratch)
 		o->seq = get64(&r);
 		o->faction = get8(&r);
 		if (!get_name(&r, o->dst) || !get_leg(&r, &o->leg)) fatal("%s: bad departure", s->state_path);
-		if (!get_counts(&r, o->counts) || o->faction >= FACTION_COUNT) fatal("%s: bad departure", s->state_path);
+		if (!get_counts(&r, o->counts) || !get_cargo(&r, &o->cargo) || o->faction >= FACTION_COUNT) fatal("%s: bad departure", s->state_path);
 	}
 	s->outgoing_count = (int)n;
 	uint32_t m = get32(&r);
@@ -627,7 +648,11 @@ static void report_to_coord(Server *s, double now)
 			                .leg = {.unpaired = d->unpaired, .owner = d->owner, .route = d->route, .landing = d->landing}};
 			memcpy(o->dst, dst, strlen(dst) + 1); // zone names fit: world_parse saw to that
 			for (ptrdiff_t j = k; j < fa->departure_count; j++)
-				if (same_leg(&fa->departures[j], d)) o->counts[fa->departures[j].type] += fa->departures[j].count;
+				if (same_leg(&fa->departures[j], d)) {
+					o->counts[fa->departures[j].type] += fa->departures[j].count;
+					o->cargo.metal += fa->departures[j].metal;
+					o->cargo.energy += fa->departures[j].energy;
+				}
 		}
 	}
 	int confirmed = s->confirm_count;
@@ -770,6 +795,7 @@ static void update_bot_worlds(Server *s)
 		for (ptrdiff_t i = 0; i < u->count; i++) mine += unit_is_structure(u->type[i]) ? 2 : unit_is_combat(u->type[i]);
 		w->mine[s->here] = mine;
 		w->ours[s->here] = has_transporter(s, s->here, (uint8_t)f);
+		w->short_of[s->here] = side_short_of(&s->sim, f);
 		w->contact[s->here] = s->contact[f];
 		w->seen_age[s->here] = age_of(s, s->contact_tick[f]);
 		w->transporter_age[s->here] = s->transporters_seen[f] ? age_of(s, s->transporter_tick[f]) : BOT_NEVER;
@@ -1076,6 +1102,13 @@ int main(int argc, char **argv)
 			int transporters = 0;
 			for (ptrdiff_t i = 0; i < u->count; i++) transporters += u->type[i] == UNIT_TRANSPORTER && u->progress[i] >= 1.0f;
 			fprintf(f, "transporters_%s %d\n", k ? "red" : "blue", transporters);
+			// units_blue raider:12 tank:4 ...: what each side has here, by type.
+			int32_t by_type[UNIT_TYPE_COUNT] = {0};
+			for (ptrdiff_t i = 0; i < u->count; i++) by_type[u->type[i]]++;
+			fprintf(f, "units_%s", k ? "red" : "blue");
+			for (int t = 0; t < UNIT_TYPE_COUNT; t++)
+				if (by_type[t]) fprintf(f, " %s:%d", unit_defs[t].name, by_type[t]);
+			fprintf(f, "\n");
 		}
 		fprintf(f, "sends_routed %lld\nsends_refused %lld\narrivals_held %lld\n", (long long)s.sends_routed,
 		        (long long)s.sends_refused, (long long)s.arrivals_held);

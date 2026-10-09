@@ -629,6 +629,55 @@ Done. A player nobody is playing has their bot play them.
   is all or nothing. The grace is game time, so at 8x it's under 4 seconds
   of wall time. An 8v8 needs a bigger zone (more metal) to be a big battle.
 
+## Spike 16 results (2026-10-09)
+
+Done. Resources cross zones in containers.
+
+- **Containers** are trucks of their owner's metal and energy (1000 and 5000
+  at most): slow (5), fragile, unarmed, 100 metal and 1000 energy at a
+  factory (key 8), paired sends only. In whatever zone a container is, its
+  cargo is part of its owner's store and its room adds to their storage.
+  Income past the held store fills containers; spending empties them first;
+  and a container unloads into the held store whenever it has room, so a
+  truck arriving where its owner is short empties, and one where the store
+  is full stays full. Giving resources fills a teammate's containers too.
+  Each container keeps its own cargo. A container that dies loses it.
+- **Vaults**: entrenching a container makes it a vault (hardened storage,
+  900 hp, can't move), cargo and all; mobilizing makes it a truck again.
+- **Across zones**: a send takes the cargo with it. Departures, the
+  coordinator's transfers (`cargo:M,E` in its log) and arrivals carry it, so
+  it survives restarts and kills like the units do; arriving containers
+  share it.
+- **Bots, minimally**: a bot whose held store is nearly full keeps up to two
+  containers waiting to fill; a full one goes to the zone of ours furthest
+  forward where that same player is short (each zone reports which of a
+  side's players are short of metal or energy, parked cargo included); in
+  any zone but home, empties beyond two go home, like trucks. Bots budget
+  only their held store. Getting there took four tries, each a team world
+  watched by type: containers piling at the front (124 in one zone) because
+  fronts float full stores too; a hundred generators because the bot judged
+  "enough power" against the containers' room; trucks never unloading
+  because spending came out of the held store first; and a side shipping to
+  a zone where another of its players was short. Zones' stats files now list
+  each side's units by type.
+- **Evidence**: `test_containers` (room adds; income past the held store
+  fills a container, not the teammate; spending empties containers first; a
+  vault keeps its cargo; a send carries it, owned by its recipient; arriving
+  containers bring it; a destroyed vault loses it) and the ledger test
+  (cargo through the coordinator's log). Demo 18: blue.0's overflow fills
+  three trucks (25,000 energy), it gives them to blue.1 (10,000 -> 25,000),
+  who drives them forward and digs them in as vaults. Demo 19: a team world
+  at 15x, 46 loaded containers crossing from blue's home to its fronts.
+  arm64 and x86-64 agree.
+- **Found by make check**: the client's command buffer was sized for the old
+  message, and the two new floats overflowed it silently; the server
+  refused every command. It's sized from the fields now, and an overflow is
+  fatal.
+- **Formats**: replay v13, wire v10, zone state v7, coordinator log (cargo).
+- **Not yet**: no explicit load or unload; which containers fill is their
+  order in the zone. Trucks carry energy almost only (metal rarely
+  overflows). Demo 19's spectator view can't tell a player's units apart.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.

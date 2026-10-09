@@ -69,6 +69,7 @@ typedef struct {
 	uint16_t units[FACTION_COUNT];       // combat units
 	uint16_t structures[FACTION_COUNT];  // everything that doesn't move
 	uint8_t transporters[FACTION_COUNT]; // finished transporters
+	uint8_t short_of[FACTION_COUNT];     // bit per player: under half a held store's metal or energy
 	Intel intel[FACTION_COUNT];          // each side's, of the other
 } ZoneStatus;
 

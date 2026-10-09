@@ -7,11 +7,13 @@
 //   ctrl+right-click    move                     X            stop
 //   engineers: E / G / F / R then click to place an extractor, generator,
 //   factory or transporter (shift keeps placing; right-click or esc cancels)
-//   factories: 1-7 queue raider, tank, artillery, engineer, scout, sapper, siege
+//   factories: 1-8 queue raider, tank, artillery, engineer, scout, sapper, siege,
+//   container
 //   (shift: repeat),
 //   0 clears
-//   V: selected combat units entrench as turrets; selected entrenched turrets
-//   mobilize (both paid for as they go, and helpless while they do)
+//   V: selected combat units entrench as turrets, containers as vaults;
+//   selected entrenched turrets and vaults mobilize (both paid for as they
+//   go, and helpless while they do)
 //   T then a zone's number: send the selection there through our nearest
 //   transporter. Where we have no transporter (a neighbouring zone, only
 //   raiders and engineers), click where in our strip they should land.
@@ -42,6 +44,7 @@ typedef struct {
 	int32_t amount;
 	uint8_t flags;
 	PlayerSlot to;          // give, output; send: who they arrive for
+	float metal, energy;    // share: how much
 	const UnitHandle *units;
 	ptrdiff_t count;
 } Order;

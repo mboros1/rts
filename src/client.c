@@ -372,11 +372,12 @@ static void client_frames(Client *c)
 
 // As our player; `to`: who a give or an output is for, or who a send arrives for.
 static void client_send_order(Client *c, CommandKind kind, V2 target, UnitType type, int32_t amount, uint8_t flags,
-                              PlayerSlot to, const UnitHandle *units, ptrdiff_t n)
+                              PlayerSlot to, float metal, float energy, const UnitHandle *units, ptrdiff_t n)
 {
 	if (!c->conn.open || (n == 0 && kind != COMMAND_SHARE && kind != COMMAND_TAKE)) return; // these name no units
 	arena_reset(&c->out);
-	ByteBuf b = bytebuf_make(&c->out, 24 + n * 8);
+	// to, kind, x, z, type, amount, flags, route, metal, energy, n: 32 bytes; then the handles.
+	ByteBuf b = bytebuf_make(&c->out, 32 + n * 8);
 	put8(&b, to.v);
 	put8(&b, kind);
 	putf(&b, target.x);
@@ -385,17 +386,20 @@ static void client_send_order(Client *c, CommandKind kind, V2 target, UnitType t
 	put32(&b, (uint32_t)amount);
 	put8(&b, flags);
 	put32(&b, 0); // route: the server works it out
+	putf(&b, metal);
+	putf(&b, energy);
 	put32(&b, (uint32_t)n);
 	for (ptrdiff_t i = 0; i < n; i++) {
 		put32(&b, units[i].index);
 		put32(&b, units[i].generation);
 	}
+	if (b.overflow) fatal("command buffer overflow"); // sized wrong above: a bug, not input
 	if (conn_send(&c->conn, MSG_COMMAND, b.data, b.len, client_now(c))) c->commands_sent++;
 }
 
 static void client_send_command(Client *c, CommandKind kind, V2 target, const UnitHandle *units, ptrdiff_t n)
 {
-	client_send_order(c, kind, target, UNIT_RAIDER, 0, 0, c->opt.slot, units, n);
+	client_send_order(c, kind, target, UNIT_RAIDER, 0, 0, c->opt.slot, 0.0f, 0.0f, units, n);
 }
 
 // A stand-in player for tests and demos: every three seconds, own units with
@@ -450,7 +454,7 @@ static void client_input(Client *c)
 	ptrdiff_t n = controls_input(&c->controls, &c->remote.sim, &c->view, &c->frame, orders, countof(orders));
 	for (ptrdiff_t k = 0; k < n; k++)
 		client_send_order(c, orders[k].kind, orders[k].target, orders[k].type, orders[k].amount, orders[k].flags,
-		                  orders[k].to, orders[k].units, orders[k].count);
+		                  orders[k].to, orders[k].metal, orders[k].energy, orders[k].units, orders[k].count);
 }
 
 // --bot: the game's bot, on what this client knows, sending what a player can.
@@ -479,7 +483,7 @@ static void client_bot(Client *c)
 	bot_think(&c->bot, &c->remote.sim, &c->frame, cmds, &n, countof(cmds));
 	for (ptrdiff_t k = 0; k < n; k++)
 		client_send_order(c, cmds[k].kind, cmds[k].target, cmds[k].unit_type, cmds[k].amount, cmds[k].flags,
-		                  cmds[k].to, cmds[k].units, cmds[k].count);
+		                  cmds[k].to, cmds[k].metal, cmds[k].energy, cmds[k].units, cmds[k].count);
 }
 
 static void client_overlay(const Client *c, bool connected)

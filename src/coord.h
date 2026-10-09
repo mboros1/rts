@@ -3,8 +3,9 @@
 // Every change is a line in an append-only log, written and fsynced before
 // anyone is told, so a restarted coordinator rebuilds exactly what it had:
 //
-//   transfer ID SRC DST FACTION PLAYER paired|unpaired SEQ ROUTE X,Z TYPE:N ...
-//       units left SRC for DST, to arrive owned by PLAYER (a slot of FACTION)
+//   transfer ID SRC DST FACTION PLAYER paired|unpaired SEQ ROUTE X,Z TYPE:N ... [cargo:M,E]
+//       units left SRC for DST, to arrive owned by PLAYER (a slot of FACTION),
+//       their containers carrying M metal and E energy
 //       (SEQ: SRC's own number for it), going on
 //       along ROUTE (a Route, in hex) from there; unpaired ones land at X,Z
 //   delivered ID                            DST took them in
@@ -34,10 +35,10 @@ enum { COORD_MAX_ZONES = 8, COORD_MAX_TRANSFERS = 4096, ZONE_NAME = 24, COMPACT_
 // Messages between zones, players and the coordinator (framed by net.h).
 typedef enum : uint8_t {
 	COORD_ZONE_HELLO = 100, // zone: name, u16 player port
-	COORD_DEPART,           // zone: u64 seq, u8 faction, dst name, Leg, counts
+	COORD_DEPART,           // zone: u64 seq, u8 faction, dst name, Leg, counts, Cargo
 	COORD_DELIVERED,        // zone: u64 id
 	COORD_HOLD,             // zone: u64 id: can't take them yet
-	COORD_DELIVER,          // coord: u64 id, u8 faction, Leg, counts
+	COORD_DELIVER,          // coord: u64 id, u8 faction, Leg, counts, Cargo
 	COORD_DIRECTORY_ASK,    // player: [u8 faction: its fogged view [, name: and I'm online [, u8 1: logging out]]]
 	COORD_DIRECTORY,        // coord: Directory (world.h)
 	COORD_DEPART_ACK,       // coord: u64 seq: logged (or already had it)
@@ -61,6 +62,14 @@ typedef struct {
 void put_leg(ByteBuf *b, const Leg *l);
 bool get_leg(ByteReader *r, Leg *l);
 
+// What a transfer's containers carry, all together. On the wire: f32 metal, energy.
+typedef struct {
+	float metal, energy;
+} Cargo;
+
+void put_cargo(ByteBuf *b, const Cargo *c);
+bool get_cargo(ByteReader *r, Cargo *c);
+
 // Names travel as u8 length + bytes; counts as UNIT_TYPE_COUNT x u32.
 void put_name(ByteBuf *b, const char *name);
 bool get_name(ByteReader *r, char out[ZONE_NAME]);
@@ -73,6 +82,7 @@ typedef struct {
 	uint8_t faction;
 	Leg leg;
 	int32_t counts[UNIT_TYPE_COUNT];
+	Cargo cargo;
 	bool delivered;
 	double retry_at;        // not logged: when to try delivering again
 } Transfer;
@@ -98,7 +108,7 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line);
 // Each records its change in the log (fsynced) before applying it.
 // nullptr if this departure (src, seq) is one the ledger already has.
 Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *dst, uint8_t faction, const Leg *leg,
-                        const int32_t counts[UNIT_TYPE_COUNT]);
+                        const int32_t counts[UNIT_TYPE_COUNT], const Cargo *cargo);
 void ledger_delivered(Ledger *l, uint64_t id);
 // NAME's slot on a side with `slots` players: theirs from before, else the
 // first free one (logged), else SIDE_FULL.

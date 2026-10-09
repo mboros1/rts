@@ -679,10 +679,10 @@ static void test_ledger(void)
 	l->log = log;
 	int32_t tanks[UNIT_TYPE_COUNT] = {[UNIT_TANK] = 10}, raiders[UNIT_TYPE_COUNT] = {[UNIT_RAIDER] = 4};
 	Leg relay = {.route = route_push_front(0, 2)}, open = {.unpaired = true, .landing = v2(40.5f, 300.25f)};
-	Transfer *t0 = ledger_depart(l, "alpha", 1, "beta", 0, &relay, tanks);
-	Transfer *t1 = ledger_depart(l, "alpha", 2, "beta", 0, &open, raiders);
+	Transfer *t0 = ledger_depart(l, "alpha", 1, "beta", 0, &relay, tanks, &(Cargo){0});
+	Transfer *t1 = ledger_depart(l, "alpha", 2, "beta", 0, &open, raiders, &(Cargo){250.5f, 1200.0f});
 	CHECK(t0 && t1 && !t0->delivered && !t1->delivered);
-	CHECK(ledger_depart(l, "alpha", 2, "beta", 0, &open, raiders) == nullptr); // re-sent: already had it
+	CHECK(ledger_depart(l, "alpha", 2, "beta", 0, &open, raiders, &(Cargo){0}) == nullptr); // re-sent: already had it
 	ledger_delivered(l, t0->id);
 	ledger_delivered(l, t0->id);                    // again: no second line
 	CHECK(ledger_pending(l) == 1);
@@ -698,7 +698,8 @@ static void test_ledger(void)
 	const Transfer *r0 = ledger_find(again, 0), *r1 = ledger_find(again, 1);
 	CHECK(r0 && r0->delivered && !r0->leg.unpaired && r0->leg.route == relay.route && r0->counts[UNIT_TANK] == 10);
 	CHECK(r1 && !r1->delivered && r1->leg.unpaired && r1->leg.landing.x == 40.5f && r1->leg.landing.z == 300.25f);
-	CHECK(ledger_depart(again, "alpha", 2, "beta", 0, &open, raiders) == nullptr); // remembered across a restart
+	CHECK(r1 && r1->cargo.metal == 250.5f && r1->cargo.energy == 1200.0f && r0 && r0->cargo.metal == 0.0f);
+	CHECK(ledger_depart(again, "alpha", 2, "beta", 0, &open, raiders, &(Cargo){0}) == nullptr); // remembered across a restart
 	int lines = 0;
 	for (ptrdiff_t i = 0; i < text.len; i++) lines += text.ptr[i] == '\n';
 	CHECK(lines == 3);
@@ -712,8 +713,8 @@ static void test_ledger(void)
 	CHECK(compact->transfer_count == 1 && ledger_pending(compact) == 1 && compact->next_id == 2);
 	const Transfer *c1 = ledger_find(compact, 1);
 	CHECK(c1 && c1->leg.unpaired && c1->counts[UNIT_RAIDER] == 4);
-	CHECK(ledger_depart(compact, "alpha", 2, "beta", 0, &open, raiders) == nullptr); // still a repeat
-	Transfer *t3 = ledger_depart(compact, "alpha", 3, "beta", 0, &open, raiders);
+	CHECK(ledger_depart(compact, "alpha", 2, "beta", 0, &open, raiders, &(Cargo){0}) == nullptr); // still a repeat
+	Transfer *t3 = ledger_depart(compact, "alpha", 3, "beta", 0, &open, raiders, &(Cargo){0});
 	CHECK(t3 && t3->id == 2);                       // ids carry on, never reused
 	if (again->log) fclose(again->log);
 
@@ -1118,6 +1119,8 @@ static void test_entrench(void)
 // Each player's economy: income to the earner, past storage to teammates;
 // each pays for their own (builders, factories) and stalls alone; shares
 // move only what the giver has and the taker has room for.
+// (A player's store is set through held_*: what they have is rebuilt from it
+// and their containers each tick.)
 static void test_economies(void)
 {
 	SimConfig c = sim_config_default();
@@ -1130,7 +1133,7 @@ static void test_economies(void)
 	Economy *e0 = &f->economy[0], *e1 = &f->economy[1];
 	Units *u = &f->units;
 	// Player 0 is full of metal: its income spills to player 1.
-	e0->metal = e0->metal_cap;
+	e0->metal = e0->held_metal = e0->metal_cap;
 	float before = e1->metal;
 	sim_step(&sim, nullptr, 0);
 	CHECK(e0->metal == e0->metal_cap);
@@ -1141,7 +1144,7 @@ static void test_economies(void)
 	before = e1->metal;
 	sim_step(&sim, &share, 1);    // 0 is full: nothing moves (but its income spills)
 	CHECK(e1->metal >= before);
-	e0->metal = 0.0f;
+	e0->metal = e0->held_metal = 0.0f;
 	before = e1->metal;
 	share = share_command((FactionId){0}, (PlayerSlot){1}, (PlayerSlot){0}, 100.0f, 1e9f);
 	sim_step(&sim, &share, 1);
@@ -1158,9 +1161,9 @@ static void test_economies(void)
 	for (int p = 0; p < 2; p++)
 		produce[p] = (Command){.faction = {0}, .player = {(uint8_t)p}, .kind = COMMAND_PRODUCE, .count = 1,
 		                       .units = &h[p], .unit_type = UNIT_RAIDER, .amount = 1};
-	e0->metal = 0.0f;
-	e1->metal = 500.0f;
-	e0->energy = e1->energy = 3000.0f;   // power for both: only metal differs
+	e0->metal = e0->held_metal = 0.0f;
+	e1->metal = e1->held_metal = 500.0f;
+	e0->energy = e1->energy = e0->held_energy = e1->held_energy = 3000.0f;   // power for both: only metal differs
 	sim_step(&sim, produce, 2);
 	for (int t = 0; t < 30; t++) sim_step(&sim, nullptr, 0);
 	float work0 = u->work[units_find(u, h[0])], work1 = u->work[units_find(u, h[1])];
@@ -1222,6 +1225,95 @@ static void test_take(void)
 	sim_destroy(&sim);
 	arena_destroy(&tick);
 	arena_destroy(&a);
+}
+
+// Containers: storage that moves. Their room adds to their owner's, income
+// past the held store fills them, spending empties them first (the held
+// store stays full while it can); a dead one loses its cargo; dug in as a
+// vault it keeps it; sent, its cargo leaves with it, and arriving, unloads
+// into the owner's store there.
+static void test_containers(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.bases = 0;
+	c.players[0] = 2;
+	Sim sim;
+	sim_init(&sim, c);
+	Faction *f = &sim.factions[0];
+	Units *u = &f->units;
+	Economy *e = &f->economy[0];
+	Command spawn = {.faction = {0}, .player = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_CONTAINER, .amount = 2,
+	                 .target = {100, 256}, .radius = 2};
+	Command gen = {.faction = {0}, .player = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_TRANSPORTER, .amount = 1,
+	               .target = {110, 256}, .radius = 0};
+	Command both[2] = {spawn, gen};
+	sim_step(&sim, both, 2);
+	CHECK(e->metal_cap == 2000.0f + 2.0f * CONTAINER_METAL && e->energy_cap == 10000.0f + 2.0f * CONTAINER_ENERGY);
+	// Full held store: income goes into the containers, not to the teammate.
+	e->held_metal = 2000.0f;
+	float teammate = f->economy[1].metal;
+	for (int t = 0; t < 30; t++) sim_step(&sim, nullptr, 0);
+	float cargo = 0.0f;
+	ptrdiff_t box[2] = {-1, -1};
+	for (ptrdiff_t i = 0, k = 0; i < u->count; i++)
+		if (u->type[i] == UNIT_CONTAINER) {
+			cargo += u->cargo_metal[i];
+			box[k++] = i;
+		}
+	CHECK(cargo > 0.9f && cargo < 1.1f);                // a second of base income
+	CHECK(f->economy[1].metal < teammate + 1.01f + 0.01f); // only the teammate's own trickle
+	CHECK(e->metal > 2000.9f && e->held_metal == 2000.0f);
+	// Spending empties the containers first: give 500 away.
+	Command share = share_command((FactionId){0}, (PlayerSlot){0}, (PlayerSlot){1}, 500.0f, 0.0f);
+	sim_step(&sim, &share, 1);
+	CHECK(e->held_metal < 1600.0f && u->cargo_metal[box[0]] == 0.0f);
+	// Fill the first container, then dig it in: a vault, cargo and all.
+	e->held_metal = 2000.0f;
+	u->cargo_metal[box[0]] = 800.0f;
+	UnitHandle h0 = units_handle(u, box[0]), h1 = units_handle(u, box[1]);
+	Command dig = {.faction = {0}, .player = {0}, .kind = COMMAND_ENTRENCH, .count = 1, .units = &h0};
+	sim_step(&sim, &dig, 1);
+	for (int t = 0; t < 200; t++) sim_step(&sim, nullptr, 0);
+	ptrdiff_t v = units_find(u, h0);
+	CHECK(v >= 0 && u->type[v] == UNIT_VAULT && u->cargo_metal[v] >= 750.0f); // less the digging in, paid from it
+	// The other, filled and sent through the transporter: its cargo goes with it.
+	ptrdiff_t b1 = units_find(u, h1);
+	u->cargo_metal[b1] = 300.0f;
+	u->cargo_energy[b1] = 2000.0f;
+	e->held_energy = 10000.0f;
+	Command send = {.faction = {0}, .player = {0}, .to = {1}, .kind = COMMAND_SEND, .amount = 1, .count = 1, .units = &h1};
+	sim_step(&sim, &send, 1);
+	float left_m = 0.0f, left_e = 0.0f;
+	for (int t = 0; t < 600 && left_m == 0.0f; t++) {
+		sim_step(&sim, nullptr, 0);
+		for (ptrdiff_t k = 0; k < f->departure_count; k++)
+			if (f->departures[k].type == UNIT_CONTAINER) {
+				left_m += f->departures[k].metal;
+				left_e += f->departures[k].energy;
+				CHECK(player_eq(f->departures[k].owner, (PlayerSlot){1}));
+			}
+	}
+	CHECK(left_m >= 299.0f && left_m <= 301.0f && left_e >= 1900.0f); // less the transporter's charge
+	sim_step(&sim, nullptr, 0);                          // what a player has is counted as each tick starts
+	CHECK(e->metal_cap == 2000.0f + CONTAINER_METAL);    // the vault's room only
+	// Arriving: two containers for player 1, carrying 1200 metal between them.
+	float before = f->economy[1].metal;
+	Command arrive = {.faction = {0}, .player = {1}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_CONTAINER, .amount = 2,
+	                  .target = {110, 256}, .metal = 1200.0f, .energy = 0.0f};
+	sim_step(&sim, &arrive, 1);
+	sim_step(&sim, nullptr, 0);
+	CHECK(f->economy[1].metal > before + 1199.0f);
+	// A vault destroyed: its cargo is gone with it.
+	e->held_metal = HELD_METAL_CAP;                      // full: the vault can't unload
+	sim_step(&sim, nullptr, 0);
+	ptrdiff_t vault = units_find(u, h0);
+	float had = e->metal, in_vault = u->cargo_metal[vault];
+	u->hp[vault] = 0.0f;
+	sim_step(&sim, nullptr, 0);                          // it dies
+	sim_step(&sim, nullptr, 0);                          // and isn't counted
+	CHECK(in_vault > 100.0f && e->metal < had - in_vault + 1.0f);
+	sim_destroy(&sim);
 }
 
 // Players: every unit has an owner and only the owner's orders move it;
@@ -1364,6 +1456,7 @@ static const Test tests[] = {
 	{"ownership", test_ownership},
 	{"economies", test_economies},
 	{"take", test_take},
+	{"containers", test_containers},
 };
 
 // tests            run all, in order

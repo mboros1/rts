@@ -36,6 +36,20 @@ bool get_counts(ByteReader *r, int32_t counts[UNIT_TYPE_COUNT])
 	return !r->bad;
 }
 
+void put_cargo(ByteBuf *b, const Cargo *c)
+{
+	putf(b, c->metal);
+	putf(b, c->energy);
+}
+
+bool get_cargo(ByteReader *r, Cargo *c)
+{
+	c->metal = getf(r);
+	c->energy = getf(r);
+	// Comparisons are false for NaN, so this refuses those too.
+	return !r->bad && c->metal >= 0.0f && c->metal <= 1e9f && c->energy >= 0.0f && c->energy <= 1e9f;
+}
+
 void put_leg(ByteBuf *b, const Leg *l)
 {
 	put8(b, l->unpaired);
@@ -69,21 +83,29 @@ static void log_line(Ledger *l, const char *line)
 	if (fflush(l->log) != 0 || fsync(fileno(l->log)) != 0) fatal("cannot write the coordinator's log");
 }
 
-static void format_counts(char *out, size_t size, const int32_t counts[UNIT_TYPE_COUNT])
+static void format_counts(char *out, size_t size, const int32_t counts[UNIT_TYPE_COUNT], const Cargo *cargo)
 {
 	size_t used = 0;
 	out[0] = 0;
 	for (int k = 0; k < UNIT_TYPE_COUNT && used < size; k++)
 		if (counts[k]) used += (size_t)snprintf(out + used, size - used, " %s:%d", unit_defs[k].name, counts[k]);
+	if ((cargo->metal > 0.0f || cargo->energy > 0.0f) && used < size)
+		snprintf(out + used, size - used, " cargo:%.9g,%.9g", (double)cargo->metal, (double)cargo->energy);
 }
 
-static bool parse_counts(char **save, int32_t counts[UNIT_TYPE_COUNT])
+static bool parse_counts(char **save, int32_t counts[UNIT_TYPE_COUNT], Cargo *cargo)
 {
 	memset(counts, 0, sizeof(int32_t) * UNIT_TYPE_COUNT);
+	*cargo = (Cargo){0};
 	for (char *tok; (tok = strtok_r(nullptr, " ", save));) {
 		char *colon = strchr(tok, ':');
 		if (!colon) return false;
 		*colon = 0;
+		if (!strcmp(tok, "cargo")) {
+			if (sscanf(colon + 1, "%f,%f", &cargo->metal, &cargo->energy) != 2) return false;
+			if (!(cargo->metal >= 0.0f && cargo->energy >= 0.0f)) return false;
+			continue;
+		}
 		int k = 0;
 		while (k < UNIT_TYPE_COUNT && strcmp(unit_defs[k].name, tok)) k++;
 		long n = strtol(colon + 1, nullptr, 10);
@@ -104,11 +126,11 @@ static uint64_t *seq_of(Ledger *l, const char *zone)
 }
 
 static Transfer *add_transfer(Ledger *l, uint64_t id, const char *src, const char *dst, uint8_t faction, const Leg *leg,
-                              const int32_t counts[UNIT_TYPE_COUNT])
+                              const int32_t counts[UNIT_TYPE_COUNT], const Cargo *cargo)
 {
 	if (l->transfer_count == COORD_MAX_TRANSFERS) fatal("coordinator: too many transfers");
 	Transfer *t = &l->transfers[l->transfer_count++];
-	*t = (Transfer){.id = id, .faction = faction, .leg = *leg};
+	*t = (Transfer){.id = id, .faction = faction, .leg = *leg, .cargo = *cargo};
 	snprintf(t->src, sizeof t->src, "%s", src);
 	snprintf(t->dst, sizeof t->dst, "%s", dst);
 	memcpy(t->counts, counts, sizeof t->counts);
@@ -149,13 +171,14 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 		if (!verb || !id_s) return false;
 		uint64_t id = strtoull(id_s, nullptr, 10);
 		int32_t counts[UNIT_TYPE_COUNT];
+		Cargo cargo;
 		if (!strcmp(verb, "transfer")) {
 			char *src = strtok_r(nullptr, " ", &save), *dst = strtok_r(nullptr, " ", &save);
 			char *fac = strtok_r(nullptr, " ", &save), *owner = strtok_r(nullptr, " ", &save);
 			char *kind = strtok_r(nullptr, " ", &save);
 			char *seq_s = strtok_r(nullptr, " ", &save), *route_s = strtok_r(nullptr, " ", &save);
 			char *at_s = strtok_r(nullptr, " ", &save);
-			if (!src || !dst || !fac || !owner || !kind || !seq_s || !route_s || !at_s || !parse_counts(&save, counts)) return false;
+			if (!src || !dst || !fac || !owner || !kind || !seq_s || !route_s || !at_s || !parse_counts(&save, counts, &cargo)) return false;
 			long faction = strtol(fac, nullptr, 10);
 			if (faction < 0 || faction >= FACTION_COUNT) return false;
 			long player = strtol(owner, nullptr, 10);
@@ -167,7 +190,7 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 			if (!route_ok(leg.route) || (leg.unpaired && leg.route)) return false;
 			uint64_t seq = strtoull(seq_s, nullptr, 10), *max = seq_of(l, src);
 			if (seq > *max) *max = seq;
-			add_transfer(l, id, src, dst, (uint8_t)faction, &leg, counts);
+			add_transfer(l, id, src, dst, (uint8_t)faction, &leg, counts, &cargo);
 		} else if (!strcmp(verb, "next")) {
 			if (id > l->next_id) l->next_id = id;
 		} else if (!strcmp(verb, "seq")) {
@@ -195,18 +218,18 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 }
 
 Transfer *ledger_depart(Ledger *l, const char *src, uint64_t seq, const char *dst, uint8_t faction, const Leg *leg,
-                        const int32_t counts[UNIT_TYPE_COUNT])
+                        const int32_t counts[UNIT_TYPE_COUNT], const Cargo *cargo)
 {
 	uint64_t *max = seq_of(l, src);
 	if (seq <= *max) return nullptr; // a zone re-sending after a restart
 	*max = seq;
 	char line[512], list[384];
-	format_counts(list, sizeof list, counts);
+	format_counts(list, sizeof list, counts, cargo);
 	snprintf(line, sizeof line, "transfer %llu %s %s %u %u %s %llu %x %.9g,%.9g%s", (unsigned long long)l->next_id, src, dst,
 	         faction, leg->owner.v, leg->unpaired ? "unpaired" : "paired", (unsigned long long)seq, leg->route, (double)leg->landing.x,
 	         (double)leg->landing.z, list);
 	log_line(l, line);
-	return add_transfer(l, l->next_id, src, dst, faction, leg, counts);
+	return add_transfer(l, l->next_id, src, dst, faction, leg, counts, cargo);
 }
 
 void ledger_delivered(Ledger *l, uint64_t id)
@@ -238,7 +261,7 @@ uint8_t ledger_join(Ledger *l, uint8_t faction, const char *name, int slots)
 static void format_transfer(char *line, size_t size, const Transfer *t, uint64_t seq)
 {
 	char list[384];
-	format_counts(list, sizeof list, t->counts);
+	format_counts(list, sizeof list, t->counts, &t->cargo);
 	snprintf(line, size, "transfer %llu %s %s %u %u %s %llu %x %.9g,%.9g%s", (unsigned long long)t->id, t->src, t->dst,
 	         t->faction, t->leg.owner.v, t->leg.unpaired ? "unpaired" : "paired", (unsigned long long)seq, t->leg.route,
 	         (double)t->leg.landing.x, (double)t->leg.landing.z, list);

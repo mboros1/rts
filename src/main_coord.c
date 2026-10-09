@@ -84,6 +84,7 @@ static void deliver(Coord *c, double now)
 		put8(&b, t->faction);
 		put_leg(&b, &t->leg);
 		put_counts(&b, t->counts);
+		put_cargo(&b, &t->cargo);
 		send_to(c, &c->peers[z->peer], COORD_DELIVER, &b, now);
 		t->retry_at = now + c->retry;
 		printf("coord: offered transfer %llu to %s\n", (unsigned long long)t->id, t->dst);
@@ -174,9 +175,11 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 		uint8_t faction = get8(&r);
 		bool ok = get_name(&r, name);
 		Leg leg;
-		if (!from || !ok || faction >= FACTION_COUNT || !get_leg(&r, &leg) || !get_counts(&r, counts)) break;
+		Cargo cargo;
+		if (!from || !ok || faction >= FACTION_COUNT || !get_leg(&r, &leg) || !get_counts(&r, counts) || !get_cargo(&r, &cargo))
+			break;
 		if (!zone_named(c, name)) printf("coord: %s sent units to %s, which isn't a zone here\n", from->name, name);
-		Transfer *t = ledger_depart(&c->ledger, from->name, seq, name, faction, &leg, counts);
+		Transfer *t = ledger_depart(&c->ledger, from->name, seq, name, faction, &leg, counts, &cargo);
 		int32_t units = 0;
 		for (int k = 0; k < UNIT_TYPE_COUNT; k++) units += counts[k];
 		// The soak test counts units from these lines (the log is compacted).

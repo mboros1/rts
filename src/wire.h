@@ -32,12 +32,13 @@
 //   SNAPSHOT  body; replaces the client's mirror
 //   DELTA     body for exactly the next tick
 //   COMMAND   u8 to, u8 kind, f32 x, f32 z, u8 unit type, i32 amount, u8 flags,
-//             u32 route, u32 n, n x (u32 slot, u32 generation)
+//             u32 route, f32 metal, f32 energy, u32 n, n x (u32 slot, u32 generation)
 //   FACTION_SNAPSHOT  i64 tick, faction_write
 //   FACTION_TICK      i64 tick, u16 dilation, u8 has hash, [u64 hash],
 //             u64 spots owned,
 //             u32 n, n x command: u8 player, u8 to, u8 kind, f32 x, f32 z, u8 unit type,
-//                                 i32 amount, f32 radius, u8 flags, u32 route, u32 m, m x handle
+//                                 i32 amount, f32 radius, u8 flags, u32 route, f32 metal, f32 energy,
+//                                 u32 m, m x handle
 //             u32 n, n x seen: u8 tag, u16 slot, then ENTER: u32 gen, u8 type,
 //                              u16 x, u16 z, i16 vx, i16 vz; MOVE: the last 4
 //             u32 n, n x arrival: f32 x, y, z, vx, vy, vz, u8 weapon
@@ -60,7 +61,7 @@
 #include "quant.h"
 #include "sim.h"
 
-enum { WIRE_VERSION = 9, DIGEST_EVERY = 30 };
+enum { WIRE_VERSION = 10, DIGEST_EVERY = 30 };
 static constexpr uint8_t SPECTATOR = 255;
 
 typedef enum : uint8_t {

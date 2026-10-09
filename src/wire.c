@@ -447,6 +447,8 @@ void wire_encode_faction_tick(const Sim *sim, FactionId f, const Command *cmds, 
 		putf(out, c->radius);
 		put8(out, c->flags);
 		put32(out, c->route);
+		putf(out, c->metal);
+		putf(out, c->energy);
 		put32(out, (uint32_t)c->count);
 		for (ptrdiff_t i = 0; i < c->count; i++) {
 			put32(out, c->units[i].index);
@@ -517,6 +519,8 @@ bool wire_read_faction_tick(ByteReader *r, Arena *a, const SimConfig *c, Faction
 		cmd->radius = getf(r);
 		cmd->flags = get8(r);
 		cmd->route = get32(r);
+		cmd->metal = getf(r);
+		cmd->energy = getf(r);
 		uint32_t m = get32(r);
 		if (r->bad || kind >= COMMAND_KIND_COUNT || type >= UNIT_TYPE_COUNT || m > (uint32_t)c->max_units
 		    || !player_ok(cmd->player) || !player_ok(cmd->to)

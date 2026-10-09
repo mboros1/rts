@@ -332,9 +332,14 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		static const char *fields[] = {"units", "lost", "fired", "shells", "spawned", "alive",
 		                               "metal", "energy", "metal_income", "energy_income",
 		                               "", "departed", "arrived"};
-		static const char *counts[UNIT_TYPE_COUNT] = {"raiders", "tanks", "artillery", "sieges", "engineers", "sappers", "scouts",
-		                                              "extractors", "generators", "factories", "transporters",
-		                                              "turrets"};
+		static const char *counts[UNIT_TYPE_COUNT] = {
+			[UNIT_RAIDER] = "raiders", [UNIT_TANK] = "tanks", [UNIT_ARTILLERY] = "artillery", [UNIT_SIEGE] = "sieges",
+			[UNIT_ENGINEER] = "engineers", [UNIT_SAPPER] = "sappers", [UNIT_SCOUT] = "scouts",
+			[UNIT_CONTAINER] = "containers", [UNIT_EXTRACTOR] = "extractors", [UNIT_GENERATOR] = "generators",
+			[UNIT_FACTORY] = "factories", [UNIT_TRANSPORTER] = "transporters", [UNIT_TURRET] = "turrets",
+			[UNIT_VAULT] = "vaults",
+		};
+		for (int k = 0; k < UNIT_TYPE_COUNT; k++) ASSERT(counts[k]); // a name for every type
 		static const char *ops[] = {"<", "<=", ">", ">=", "==", "!="};
 		int f = -1, o = -1;
 		for (int k = 0; k < (int)countof(fields); k++) if (!strcmp(tok[2], fields[k])) f = k;
