@@ -155,14 +155,20 @@ def main():
                 expected_down.add(name)
         if now >= next_kill["zone"]:
             victim = rng.choice(zones)
-            os.kill(pid(victim), signal.SIGKILL)
+            try:
+                os.kill(pid(victim), signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # already gone: the check above reports it next round
             killed["zone"] += 1
             say(f"killed zone {victim} (#{killed['zone']})")
             time.sleep(0.2)
             start()
             next_kill["zone"] = now + rng.uniform(20, 60)
         if now >= next_kill["coord"]:
-            os.kill(pid("coord"), signal.SIGKILL)
+            try:
+                os.kill(pid("coord"), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             killed["coord"] += 1
             say(f"killed the coordinator (#{killed['coord']})")
             time.sleep(0.2)

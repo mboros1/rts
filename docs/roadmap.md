@@ -533,6 +533,12 @@ Done. A side is a team of players, each with units of their own.
   across a stop and continue, blue's map lists them); arm64 and x86-64 agree.
   Demo 15: blue is three bots, red one; blue.0's factory makes blue.1's
   army; blue grows to 60 units against red's 35.
+- **Soaks**: 3 minutes of `make soak` pass (once the soak counted transfers
+  from the coordinator's output: since compaction, spike 10, its log drops
+  delivered ones). 10 minutes of `worlds/teams.world` (blue three players,
+  red two): 14 zone kills, 5 coordinator kills, every unit accounted for,
+  nothing died on its own; but neither side ever left its home zone (blue
+  sat on 903 units). A side of several bots doesn't expand: spike 14 fixes it.
 - **Formats**: replay v10, wire v7, zone state v4, coordinator log (transfer
   lines carry the player). Worlds from before need `rts world --new`.
 - **Not yet**: the H and T keys have only been tried headlessly (scripts and
