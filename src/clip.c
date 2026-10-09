@@ -466,9 +466,20 @@ int clip_run(const ClipRequest *req)
 		BeginMode3D(cam);
 		renderer_draw_scene(&renderer, &scene, 0.0f, &frame, nullptr, -1);
 		EndMode3D();
-		DrawText(caption(name, &now), 16 * SUPERSAMPLE, rh - 30 * SUPERSAMPLE, 18 * SUPERSAMPLE,
-		         (Color){230, 230, 230, 200});
-		draw_economies(&sim, rh);
+		bool showing = req->script && script_run.show_group >= 0;
+		if (!showing) // the controls take the bottom; the frame's label says the same
+			DrawText(caption(name, &now), 16 * SUPERSAMPLE, rh - 30 * SUPERSAMPLE, 18 * SUPERSAMPLE, (Color){230, 230, 230, 200});
+		if (showing) {
+			// The controls, as the group's player would see them with it selected.
+			int32_t g = script_run.show_group;
+			Controls ui = {.me = script_run.group_side[g], .player = script_run.group_player[g],
+			               .selection = script_run.group_units[g], .selection_count = script_run.group_len[g],
+			               .placing = -1, .aiming = -1, .landing_for = -1, .send_for = -1,
+			               .team_count = sim.config.players[script_run.group_side[g].v], .tab = script_run.show_tab};
+			controls_draw_screen(&ui, &sim, rw, rh, false);
+		} else {
+			draw_economies(&sim, rh);
+		}
 		if (title[0]) draw_title_card(title, about, req->label, (sim.tick.v - from) / speed, rw, rh);
 		if (sample) samples[out.taken] = now;
 		out_end(&out, sample, TextFormat("t%lld  %td v %td  shells %td", (long long)now.tick,

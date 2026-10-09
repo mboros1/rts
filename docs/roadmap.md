@@ -52,6 +52,7 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 14 | Separate economies | Each player runs their own | Each player has their own economy in each zone; a builder's owner pays for its work; resources are given to a teammate instantly up to their free storage; what's past a player's storage spills to teammates with room |
 | 15 | AI slots | Teams with gaps still play | A slot nobody plays, or whose player left, is AI-held: one bot per side drives every AI-held slot (units and economy) alongside the humans; a teammate can take its units; a returning player gets the slot back; an 8v8 bot benchmark records its cost |
 | 16 | Containers | Resources cross zones | A mobile container holds part of its owner's resources and carries them through transporters; in the zone it reaches, they join its owner's economy there |
+| 17 | Command grid | Everything a selection can do is on screen | BAR's layout: the build grid (items on QWER ASDF, tabs on ZXCV) over the info pane, the orders grid beside them, resources at the top, the team bottom right; every button clickable and keyed; placeholders where later spikes go; played by hand |
 
 Then the UI spikes: the command grid and selection panel, the strategic map
 as the logistics console with pings and chat, minimap, control groups and
@@ -719,6 +720,46 @@ Done. Storage is room; trucks carry it, split by resource like BAR.
   pass (14 zone kills, 5 coordinator kills, 11 player sessions, 1322 units
   across with none lost; centre changed hands three times).
 - **Formats**: replay v14, wire v11, zone state v8.
+
+## Spike 17 results (2026-10-09)
+
+Built; the hands-on playtest is next. The controls are on screen, laid out
+as BAR's (from a screenshot of it).
+
+- **The build grid** (bottom left): two rows of items on QWER and ASDF, each
+  with its metal and energy cost, and tabs on ZXCV. For builders the tabs
+  are categories (economy, combat, utility, build; combat is empty until
+  there's something to build there); for factories, pages (army,
+  logistics), with what's queued counted on each item; shift queues five.
+- **The info pane** (below it): with several types selected, a tile per
+  type with its count (click: only those; shift-click: not those); with
+  one, its details: health, what it's doing, range, damage, sight, speed,
+  storage, a factory's queue and progress, construction.
+- **The orders grid** (beside them, five wide): repeat (a toggle, with BAR's
+  green or red bar) and clear queue for factories; stop, move, fight,
+  entrench or mobilize; send, give, take. Each order has its own key (M F S
+  B Y T H K), which works while the build grid isn't open; with it open,
+  the grid letters are the build grid's and orders are clicks. Move and
+  fight wait for a click (shift: more); right-click is still fight and
+  ctrl+right-click move.
+- **Resources** top centre (have, storage, income and spending), **your
+  team** bottom right (names, you, who's away), and boxes marked UNDER
+  CONSTRUCTION where the minimap, control groups and idle builders go.
+- **menu.c** works out the grids from the selection, without raylib, so it's
+  tested (`test_menu`); controls.c draws them and binds keys and clicks from
+  one layout, so a click lands on what was drawn. A factory's repeat is now
+  its own command (it was set by whatever was queued last).
+- **Clips draw the controls**: `at T show GROUP [tab N]` in a script draws
+  them as that group's player would see them with it selected. Demo 20
+  walks through builders, a factory's two pages, a mixed group's tiles, one
+  factory's details and a raider's orders.
+- **`make play`** refuses, with a message, a world an older build made
+  (`rts world` stamps the formats it was made with) rather than failing in
+  each zone.
+- **Not yet**: nobody has used it by hand. The text is small in a
+  960 x 540 clip (as in a window that size). The orders' keys are idle
+  while builders or factories are selected; whether that's right is for the
+  playtest.
 
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client

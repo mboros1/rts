@@ -296,6 +296,17 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		if (!parse_action_side(tok[1], a) || !parse_on(tok[2], &a->on)) return bad(p, "bot SIDE[.N] on|off", nullptr);
 		return true;
 	}
+	if (!strcmp(verb, "show")) {
+		// show GROUP [tab N] | show none
+		if (!(a = new_action(p, tick, ACTION_SHOW, text))) return bad(p, "too many actions", nullptr);
+		if (n == 2 && !strcmp(tok[1], "none")) return true; // group -1
+		int64_t t = 0;
+		if ((n != 2 && n != 4) || (n == 4 && (strcmp(tok[2], "tab") || !parse_i64(tok[3], &t) || t < 0 || t > 3)))
+			return bad(p, "show GROUP [tab 0..3] | show none", nullptr);
+		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
+		a->limit = (int32_t)t;
+		return true;
+	}
 	if (!strcmp(verb, "take")) {
 		// take SIDE.N
 		if (n != 2) return bad(p, "take SIDE.N", nullptr);
@@ -607,7 +618,7 @@ bool script_load(Script *s, Arena *arena, const char *path, char *err, ptrdiff_t
 
 void script_run_init(ScriptRun *r, const Script *s, Arena *arena, FILE *log)
 {
-	*r = (ScriptRun){.script = s, .log = log};
+	*r = (ScriptRun){.script = s, .log = log, .show_group = -1};
 	Bot side[FACTION_COUNT];
 	scenario_bots(s->scenario, side);
 	for (int k = 0; k < FACTION_COUNT; k++)
@@ -823,6 +834,10 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			break;
 		case ACTION_SHARE:
 			if (n < cap) out[n++] = share_command(a->side, a->player, a->to, a->metal, a->energy);
+			break;
+		case ACTION_SHOW:
+			r->show_group = a->group;
+			r->show_tab = a->limit;
 			break;
 		case ACTION_TAKE:
 			if (n < cap) out[n++] = (Command){.faction = a->side, .player = a->player, .to = a->player, .kind = COMMAND_TAKE};

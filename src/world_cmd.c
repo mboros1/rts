@@ -75,6 +75,10 @@ static int read_pid(WorldCmd *w, const char *name)
 
 static bool running(WorldCmd *w, const char *name) { return platform_alive(read_pid(w, name)); }
 
+// The formats a world's saved state is in; a world made by another build
+// can't be continued, only replaced.
+static const char *formats(void) { return fmt("zone-state %d wire %d\n", ZONE_STATE_VERSION, WIRE_VERSION); }
+
 static bool load_world(WorldCmd *w)
 {
 	Str text;
@@ -82,6 +86,14 @@ static bool load_world(WorldCmd *w)
 	if (!platform_read_file(&w->arena, live_path(w, "world.txt"), &text)) return false;
 	if (!world_parse(&w->world, text, live_path(w, "world.txt"), err, sizeof err)) fatal("%s", err);
 	return true;
+}
+
+static bool same_build(WorldCmd *w)
+{
+	Str text;
+	const char *want = formats();
+	return platform_read_file(&w->arena, live_path(w, "formats"), &text) && text.len == (ptrdiff_t)strlen(want)
+	    && !memcmp(text.ptr, want, (size_t)text.len);
 }
 
 static void start_process(WorldCmd *w, const char *name, const char *const argv[])
@@ -242,6 +254,8 @@ int world_main(int argc, char **argv)
 			if (!world_parse(&check, text, new_file, err, sizeof err)) fatal("%s", err);
 			if (!platform_make_dir(w.live)) fatal("cannot create %s", w.live);
 			if (!platform_write_file(live_path(&w, "world.txt"), text.ptr, text.len)) fatal("cannot write world.txt");
+			if (!platform_write_file(live_path(&w, "formats"), formats(), (ptrdiff_t)strlen(formats())))
+				fatal("cannot write formats");
 			// Each zone's setup: its own terrain and spots, from its name.
 			for (int k = 0; k < check.zone_count; k++) {
 				uint64_t seed = 1469598103934665603u;
@@ -272,6 +286,12 @@ int world_main(int argc, char **argv)
 		have = load_world(&w);
 	}
 	if (!have) fatal("no world in %s yet: rts world --new worlds/three.world", w.live);
+	if (!same_build(&w) && !stop && !status) {
+		fprintf(stderr, "world: %s was made by an older build of the game and can't be continued.\n"
+		                "       Start a new one: make play WORLD=worlds/three.world (or rts world --new FILE)\n",
+		        w.live);
+		return 1;
+	}
 	if (stop) return world_stop(&w) ? 0 : 1;
 	if (save) {
 		bool was = any_running(&w);

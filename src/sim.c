@@ -819,6 +819,14 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		apply_share(f, sim, c);
 		return;
 	}
+	if (c->kind == COMMAND_SET_REPEAT) {
+		Units *u = &f->units;
+		for (ptrdiff_t k = 0; k < c->count; k++) {
+			ptrdiff_t d = units_find_own(u, c->units[k], c->player);
+			if (d >= 0 && u->type[d] == UNIT_FACTORY) u->repeat[d] = (c->flags & COMMAND_REPEAT) != 0;
+		}
+		return;
+	}
 	if (c->kind == COMMAND_AI_SLOTS) {
 		int players = sim->config.players[f->id.v];
 		if (c->amount >= 0 && c->amount < 1 << players) f->away = (uint8_t)c->amount;

@@ -1,29 +1,32 @@
 // The player's controls: selecting your units and ordering them, building
-// and producing, and the HUD that goes with it. The one set the game has:
-// the network client and the dev sandbox both use it, so a control added
-// here works in the game, not in a side copy.
+// and producing, and the panels that go with it, laid out as BAR's are. The
+// one set the game has: the network client and the dev sandbox both use it,
+// so a control added here works in the game, not in a side copy.
 //
-//   left-drag / click   select (shift adds)      right-click  attack-move
-//   ctrl+right-click    move                     X            stop
-//   engineers: E / G / F / R then click to place an extractor, generator,
-//   factory or transporter (shift keeps placing; right-click or esc cancels)
-//   factories: 1-9 queue raider, tank, artillery, engineer, scout, sapper, siege,
-//   metal truck, energy truck
-//   (shift: repeat),
-//   0 clears
-//   V: selected combat units entrench as turrets, trucks as vaults;
-//   selected entrenched turrets and vaults mobilize (both paid for as they
-//   go, and helpless while they do)
-//   T then a zone's number: send the selection there through our nearest
-//   transporter. Where we have no transporter (a neighbouring zone, only
-//   raiders and engineers), click where in our strip they should land.
-//   With teammates, a player's number then says who they arrive for
-//   (Enter: yourself).
-//   H then a player's number: give the selection to that teammate. With only
-//   factories selected, it points their output there instead (shift+H gives
-//   the factories themselves). With nothing selected, it gives them a quarter
-//   of your metal and energy (as much as they have room for).
-//   K: take every unit here of teammates who are away (BAR's /take).
+//   top centre      metal and energy: what you have, your storage, income and spending
+//   bottom left     the build grid (menu.h): two rows of items on QWER and
+//                   ASDF, tabs on ZXCV: builders' structures by category,
+//                   factories' units by page (shift: five)
+//   below it        the info pane: a tile per type selected (click: only
+//                   those; shift-click: not those), or one unit's details
+//   beside them     the orders grid: repeat, clear; stop, move, fight,
+//                   entrench; send, give, take; each on its own key while
+//                   the build grid isn't open, and every button a click
+//   bottom right    your side's players
+//   top left, and right of the orders: the minimap, control groups and idle
+//                   builders, under construction
+//
+// Then:
+//   left-drag / click   select your units (shift adds)
+//   right-click         fight (attack-move) there; ctrl+right-click move
+//   move, fight         then click where
+//   placing             click to put it down (shift keeps placing); right-click or esc cancels
+//   send                a zone's number; with teammates, then a player's (Enter: yourself);
+//                       where we have no transporter, click where in our strip to land
+//   give                a player's number: the selection (only factories: their
+//                       output; shift: the factories themselves), or with nothing
+//                       selected, a quarter of your metal and energy
+//   take                every unit here of teammates who are away (BAR's /take)
 //
 // You select and order only your own units; teammates' are drawn in their
 // own shades of the side's colour.
@@ -32,6 +35,7 @@
 #include <raylib.h>
 
 #include "arena.h"
+#include "menu.h"
 #include "sim.h"
 #include "view.h"
 
@@ -70,10 +74,12 @@ typedef struct {
 	bool dragging;
 	Vector2 drag_start;
 	int placing;            // a structure type being placed, or -1
-	bool sending;           // T pressed: waiting for a zone's number
+	int tab;                // the build grid's open category (builders) or page (factories)
+	int aiming;             // move or fight, waiting for a click: its CommandKind, or -1
+	bool sending;           // send: waiting for a zone's number
 	int landing_for;        // an unpaired send's zone, waiting for a click; -1
 	int send_for;           // a paired send's zone, waiting for who it's for; -1
-	int giving;             // H pressed: 1 give, 2 output, 3 give factories too, 4 resources; 0 not
+	int giving;             // give: 1 the selection, 2 output, 3 factories too, 4 resources; 0 not
 	SendTargets targets;    // set by the client each frame
 } Controls;
 
@@ -91,5 +97,6 @@ uint8_t *controls_selected(Controls *c, const Units *own, Arena *frame);
 
 // Inside BeginMode3D: the structure being placed, where it would go.
 void controls_draw_world(const Controls *c, const Sim *sim, const View *view);
-// After EndMode3D: the drag box and the HUD (economy, selection, keys).
-void controls_draw_screen(const Controls *c, const Sim *sim);
+// After EndMode3D: the panels, in a screen of w x h pixels: the game's
+// window (live: the mouse hovers and drags), or a clip's frame.
+void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, bool live);

@@ -1,0 +1,25 @@
+title Spike 17: the command grid
+about BAR's layout: the build grid (items on QWER ASDF, tabs on ZXCV) over the info pane, the orders grid beside them, resources at the top, the team bottom right. What blue.0 would see as it selects builders, a factory, a mixed group, one unit, an army.
+
+scenario economy
+players blue 2
+clip 0..2250
+speed 3
+camera 90,256 150
+
+at 30 select blue engineer as crew
+at 31 show crew                     # builders: the economy tab
+at 330 show crew tab 3              # ... the build tab
+at 600 select blue factory as plant
+at 601 show plant                   # a factory: the army page, what's queued
+at 900 show plant tab 1             # ... logistics: the trucks
+at 1200 select blue any within 40 of 74,256 as near
+at 1201 show near                   # a mixed group: a tile per type
+at 1500 select blue factory max 1 as one
+at 1501 show one                    # one unit: its details, its queue
+at 1800 select blue raider as army
+at 1801 show army                   # combat units: their orders (move, fight, stop, entrench)
+
+at 1200 expect near alive >= 3
+at 1500 expect one alive == 1
+at 1800 expect army alive >= 1

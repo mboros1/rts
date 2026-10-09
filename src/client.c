@@ -794,7 +794,7 @@ static int client_main(int argc, char **argv)
 			                    c.opt.faction < FACTION_COUNT ? c.opt.faction : -1);
 			if (c.player) controls_draw_world(&c.controls, &c.remote.sim, &c.view);
 			EndMode3D();
-			if (c.player) controls_draw_screen(&c.controls, &c.remote.sim);
+			if (c.player) controls_draw_screen(&c.controls, &c.remote.sim, GetScreenWidth(), GetScreenHeight(), true);
 		}
 		if (IsKeyPressed(KEY_F1)) c.overlay = !c.overlay;
 		if (c.overlay) client_overlay(&c, c.conn.open);

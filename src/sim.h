@@ -425,6 +425,7 @@ typedef enum : uint8_t {
 	COMMAND_SHARE,      // resources to player `to`: see share_command
 	COMMAND_AI_SLOTS,   // the zone's say: these players (bit per slot, in amount) are away, their bots playing
 	COMMAND_TAKE,       // the player takes every unit of every away teammate here (BAR's /take)
+	COMMAND_SET_REPEAT, // these factories repeat (flags COMMAND_REPEAT) or don't, queue as it is
 	COMMAND_KIND_COUNT,
 } CommandKind;
 

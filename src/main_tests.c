@@ -10,6 +10,7 @@
 #include "scenario.c"
 #include "script.c"
 #include "wire.c"
+#include "menu.c"
 #include "coord.c"
 #include "world.c"
 
@@ -1309,6 +1310,70 @@ static void test_trucks(void)
 	sim_destroy(&sim);
 }
 
+// The command menus (menu.h): what a selection can do, on BAR's grids.
+static void test_menu(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.bases = 1;
+	Sim sim;
+	sim_init(&sim, c);
+	Units *u = &sim.factions[0].units;
+	UnitHandle engineers[2], factory = NO_UNIT;
+	int ne = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] == UNIT_ENGINEER && ne < 2) engineers[ne++] = units_handle(u, i);
+		if (u->type[i] == UNIT_FACTORY) factory = units_handle(u, i);
+	}
+	// Builders: categories on the tabs, the open one's structures as items.
+	SelectionSummary s = menu_summarize(u, engineers, 2);
+	CHECK(s.total == 2 && s.builders && menu_build_open(&s));
+	BuildMenu b = menu_build(&s, 0);
+	CHECK(b.builders && b.tab[0].active && b.tab[0].enabled && !b.tab[1].enabled); // combat: nothing yet
+	CHECK(b.item[0].shown && b.item[0].type == UNIT_EXTRACTOR && b.item[1].type == UNIT_GENERATOR && !b.item[2].shown);
+	b = menu_build(&s, 3);
+	CHECK(b.tab[3].active && b.item[0].type == UNIT_FACTORY);
+	// A factory: pages, and what's queued.
+	Command q = {.faction = {0}, .kind = COMMAND_PRODUCE, .count = 1, .units = &factory, .unit_type = UNIT_TANK, .amount = 3};
+	sim_step(&sim, &q, 1);
+	s = menu_summarize(u, &factory, 1);
+	CHECK(s.factories && !s.builders);
+	b = menu_build(&s, 0);
+	CHECK(!b.builders && b.item[0].type == UNIT_RAIDER && b.item[1].type == UNIT_TANK && b.item[1].queued == 3);
+	CHECK(b.tab[0].shown && b.tab[1].shown && !b.tab[2].shown);
+	b = menu_build(&s, 1);
+	CHECK(b.item[0].type == UNIT_METAL_TRUCK && b.item[1].type == UNIT_ENERGY_TRUCK);
+	// Its orders: repeat (off) and clear; no move for a structure.
+	MenuContext alone = {.economy = true};
+	OrdersMenu o = menu_orders(&s, &alone);
+	CHECK(o.slot[0].order == MENU_ORDER_REPEAT && o.slot[0].toggle && !o.slot[0].active && o.slot[1].order == MENU_ORDER_CLEAR);
+	CHECK(!o.slot[6].shown);
+	// Builders with the factory: the builders' grid.
+	UnitHandle both[3] = {engineers[0], engineers[1], factory};
+	s = menu_summarize(u, both, 3);
+	CHECK(menu_build(&s, 0).builders);
+	// Orders for mobile units: move, fight, stop, entrench; send needs a world,
+	// give and take a team, take someone away.
+	s = menu_summarize(u, engineers, 2);
+	o = menu_orders(&s, &alone);
+	CHECK(o.slot[5].order == MENU_ORDER_STOP && o.slot[6].order == MENU_ORDER_MOVE && o.slot[7].order == MENU_ORDER_FIGHT);
+	CHECK(!o.slot[8].shown && !o.slot[10].shown && !o.slot[11].shown && !o.slot[12].shown); // engineers don't dig in
+	MenuContext team = {.economy = true, .team = true, .world = true};
+	o = menu_orders(&s, &team);
+	CHECK(o.slot[10].order == MENU_ORDER_SEND && o.slot[11].enabled && o.slot[12].shown && !o.slot[12].enabled);
+	team.takeable = true;
+	CHECK(menu_orders(&s, &team).slot[12].enabled);
+	// Nothing selected: give (resources) and take, with a team.
+	SelectionSummary none = {0};
+	o = menu_orders(&none, &team);
+	CHECK(!o.slot[5].shown && o.slot[11].shown && o.slot[11].order == MENU_ORDER_GIVE);
+	// Keys.
+	CHECK(menu_build_slot_of_key('Q') == 0 && menu_build_slot_of_key('F') == 7 && menu_build_slot_of_key('Z') == 8
+	      && menu_build_slot_of_key('V') == 11 && menu_build_slot_of_key('M') == -1);
+	CHECK(MENU_ORDER_KEYS[MENU_ORDER_STOP] == 'S' && MENU_ORDER_KEYS[MENU_ORDER_CLEAR] == 0);
+	sim_destroy(&sim);
+}
+
 // Players: every unit has an owner and only the owner's orders move it;
 // giving, factory output and sends name who units go to; each player
 // starts a base of their own; ownership survives a snapshot.
@@ -1450,6 +1515,7 @@ static const Test tests[] = {
 	{"economies", test_economies},
 	{"take", test_take},
 	{"trucks", test_trucks},
+	{"menu", test_menu},
 };
 
 // tests            run all, in order

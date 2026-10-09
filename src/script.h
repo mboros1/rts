@@ -36,6 +36,8 @@
 //   at 55  output plant to 1          # factories: what they make goes to player 1
 //   at 56  give blue.0 metal 300 to 1 # resources (metal or energy), as much as
 //                                     #   blue.0 has and player 1 has room for
+//   at 58  show crew tab 2            # clips draw the controls as if its player had
+//                                     #   selected the group (tab: the build grid's); show none
 //   at 57  take blue.1                # blue.1 takes every unit of away teammates
 //                                     #   (a script's player is away while its bot is on)
 //   at 60  send army to gamma for 2   # they arrive belonging to player 2
@@ -70,6 +72,7 @@ typedef enum : uint8_t {
 	ACTION_EXPECT,
 	ACTION_SHARE,           // resources from a player to a teammate
 	ACTION_TAKE,            // a player takes away teammates' units
+	ACTION_SHOW,            // clips: draw the controls as if this group were selected
 } ActionKind;
 
 typedef enum : uint8_t {
@@ -156,6 +159,8 @@ typedef struct {
 	ptrdiff_t *group_len;
 	FactionId *group_side;
 	PlayerSlot *group_player;      // who selected it: the group's orders are theirs
+	int32_t show_group;            // clips draw the controls as if it were selected; -1: none
+	int32_t show_tab;              // ... with this build tab open
 	// Queued builds per group, issued one at a time as the group goes idle.
 	const ScriptAction ***queued;
 	int32_t *queued_head, *queued_len;

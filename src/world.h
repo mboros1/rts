@@ -21,6 +21,10 @@
 
 enum { WORLD_MAX_LINKS = 32 };
 
+// A zone's saved state's format (rts-server --state); a world's live
+// directory records it, so `rts world` can tell a world an older build made.
+enum { ZONE_STATE_VERSION = 8 };
+
 typedef struct {
 	char name[ZONE_NAME];
 	float x, y;                 // on the strategic map, 0..1, y down

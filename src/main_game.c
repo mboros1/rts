@@ -40,6 +40,7 @@
 #include "remote.c"
 #include "world.c"
 #include "map.c"
+#include "menu.c"
 #include "controls.c"
 #include "client.c"
 #include "clip.c"
@@ -310,7 +311,7 @@ int main(int argc, char **argv)
 		                    &g.frame, selected, 0);
 		controls_draw_world(&g.controls, &g.sim, &g.view);
 		EndMode3D();
-		controls_draw_screen(&g.controls, &g.sim);
+		controls_draw_screen(&g.controls, &g.sim, GetScreenWidth(), GetScreenHeight(), true);
 		if (g.overlay) draw_overlay(&g);
 		draw_toast(&g);
 		EndDrawing();
