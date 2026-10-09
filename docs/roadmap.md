@@ -737,11 +737,9 @@ as BAR's (from a screenshot of it).
   storage, a factory's queue and progress, construction.
 - **The orders grid** (beside them, five wide): repeat (a toggle, with BAR's
   green or red bar) and clear queue for factories; stop, move, fight,
-  entrench or mobilize; send, give, take. Each order has its own key (M F S
-  B Y T H K), which works while the build grid isn't open; with it open,
-  the grid letters are the build grid's and orders are clicks. Move and
-  fight wait for a click (shift: more); right-click is still fight and
-  ctrl+right-click move.
+  entrench or mobilize; send, give, take. Each order has its own key, live
+  whatever's selected (see the keymap below). Move and fight wait for a
+  click (shift: more); right-click is still fight and ctrl+right-click move.
 - **Resources** top centre (have, storage, income and spending), **your
   team** bottom right (names, you, who's away), and boxes marked UNDER
   CONSTRUCTION where the minimap, control groups and idle builders go.
@@ -756,10 +754,25 @@ as BAR's (from a screenshot of it).
 - **`make play`** refuses, with a message, a world an older build made
   (`rts world` stamps the formats it was made with) rather than failing in
   each zone.
-- **Not yet**: nobody has used it by hand. The text is small in a
-  960 x 540 clip (as in a window that size). The orders' keys are idle
-  while builders or factories are selected; whether that's right is for the
-  playtest.
+- **The playtest** (the user, by hand): it plays well, but the order keys
+  didn't work and clashed: the camera panned on WASD (the grid's W A S D,
+  and S was stop), Esc both cancelled a prompt and left for the map, the
+  sandbox's B and C were entrench and a tab, and the order keys went idle
+  whenever a builder was selected (a drag around the base nearly always
+  catches one). Now:
+  - **A keymap** (`keymap.c`, `config/keys.json`): a JSON object of action
+    names to key names, over the defaults; a file with an unknown action or
+    key, a fixed key (digits, Enter) or a key bound twice is refused whole,
+    and the defaults stand. `--keys PATH` for another file. `test_keymap`
+    checks the file names every action as the defaults do.
+  - **The defaults**: the build grid on QWER ASDF and ZXCV (live while
+    builders or factories are selected); orders, always live: move M, fight
+    G, stop Space, entrench B, repeat Y, clear queue J, send T, give H, take
+    K; the camera on the arrows (and middle-drag); Tab the map; Esc cancels
+    what's in progress, and only with nothing to cancel leaves for the map;
+    F1 the overlay; the sandbox's pause, bot and clip on P, F2 and F3.
+- **Not yet**: the text is small in a 960 x 540 clip (as in a window that
+  size). No screen to rebind keys yet: edit the file.
 
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client

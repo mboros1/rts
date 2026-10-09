@@ -11,9 +11,10 @@
 // it gets no features of its own. Controls are controls.h, shared with the
 // client; the keys below are the sandbox's own debugging aids.
 //
-//   WASD / arrows, middle-drag   pan          wheel        zoom
-//   B  toggle your side's bot    space  pause    F1  overlay
-//   C  clip the last 10 seconds, as you saw them, to the clipboard
+// By default (config/keys.json; keymap.h):
+//   arrows, middle-drag   pan          wheel        zoom
+//   F2  toggle your side's bot    P  pause    F1  overlay
+//   F3  clip the last 10 seconds, as you saw them, to the clipboard
 //
 // Every admitted command, yours and the bots', is recorded; on exit the run
 // is written to build/last.replay for `rts-headless verify`.
@@ -34,6 +35,7 @@
 #include "wire.c"
 #include "scene.c"
 #include "render.c"
+#include "keymap.c"
 #include "view.c"
 #include "net.c"
 #include "coord.c"
@@ -68,6 +70,7 @@ typedef struct {
 	ptrdiff_t queued_count;
 
 	Controls controls;      // you are faction 0
+	Keymap keys;
 
 	bool paused;
 	bool overlay;
@@ -93,10 +96,10 @@ static void start_clip(Game *g);
 
 static void handle_input(Game *g)
 {
-	if (IsKeyPressed(KEY_SPACE)) g->paused = !g->paused;
-	if (IsKeyPressed(KEY_F1)) g->overlay = !g->overlay;
-	if (IsKeyPressed(KEY_B)) g->bots[0].enabled = !g->bots[0].enabled;
-	if (IsKeyPressed(KEY_C)) start_clip(g);
+	if (IsKeyPressed(g->keys.key[BIND_SANDBOX_PAUSE])) g->paused = !g->paused;
+	if (IsKeyPressed(g->keys.key[BIND_OVERLAY])) g->overlay = !g->overlay;
+	if (IsKeyPressed(g->keys.key[BIND_SANDBOX_BOT])) g->bots[0].enabled = !g->bots[0].enabled;
+	if (IsKeyPressed(g->keys.key[BIND_SANDBOX_CLIP])) start_clip(g);
 	Order orders[16];
 	ptrdiff_t n = controls_input(&g->controls, &g->sim, &g->view, &g->commands, orders, countof(orders));
 	for (ptrdiff_t k = 0; k < n && g->queued_count < MAX_COMMANDS_PER_TICK; k++)
@@ -275,6 +278,8 @@ int main(int argc, char **argv)
 	g.replay = arena_create("replay", (ptrdiff_t)4 << 30);
 	replay_begin(&g.writer, &g.replay, config);
 	controls_init(&g.controls, (FactionId){0}, &g.program, config.max_units);
+	g.keys = keymap_load("config/keys.json", false, &g.program);
+	g.controls.keys = &g.keys;
 	g.overlay = true;
 
 	SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
@@ -290,7 +295,7 @@ int main(int argc, char **argv)
 	double accumulator = 0.0;
 	while (!WindowShouldClose()) {
 		arena_reset(&g.frame);
-		view_update(&g.view, &g.sim.terrain);
+		view_update(&g.view, &g.sim.terrain, &g.keys);
 		handle_input(&g);
 		poll_clip(&g);
 

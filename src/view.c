@@ -2,14 +2,14 @@
 
 #include <math.h>
 
-void view_update(View *v, const Terrain *t)
+void view_update(View *v, const Terrain *t, const Keymap *keys)
 {
 	float dt = GetFrameTime();
 	float pan = v->distance * 1.2f * dt;
-	if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) v->focus.z -= pan;
-	if (IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN)) v->focus.z += pan;
-	if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) v->focus.x -= pan;
-	if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) v->focus.x += pan;
+	if (IsKeyDown(keys->key[BIND_CAMERA_UP])) v->focus.z -= pan;
+	if (IsKeyDown(keys->key[BIND_CAMERA_DOWN])) v->focus.z += pan;
+	if (IsKeyDown(keys->key[BIND_CAMERA_LEFT])) v->focus.x -= pan;
+	if (IsKeyDown(keys->key[BIND_CAMERA_RIGHT])) v->focus.x += pan;
 	if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) {
 		Vector2 d = GetMouseDelta();
 		float k = v->distance / (float)GetScreenHeight();

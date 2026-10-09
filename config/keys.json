@@ -1,0 +1,27 @@
+{
+	"move": "M",
+	"fight": "G",
+	"stop": "Space",
+	"entrench": "B",
+	"repeat": "Y",
+	"clear_queue": "J",
+	"send": "T",
+	"give": "H",
+	"take": "K",
+
+	"build_1": "Q", "build_2": "W", "build_3": "E", "build_4": "R",
+	"build_5": "A", "build_6": "S", "build_7": "D", "build_8": "F",
+	"tab_1": "Z", "tab_2": "X", "tab_3": "C", "tab_4": "V",
+
+	"camera_up": "Up",
+	"camera_down": "Down",
+	"camera_left": "Left",
+	"camera_right": "Right",
+	"map": "Tab",
+	"cancel": "Escape",
+	"overlay": "F1",
+
+	"sandbox_pause": "P",
+	"sandbox_bot": "F2",
+	"sandbox_clip": "F3"
+}

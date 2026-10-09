@@ -4,6 +4,26 @@
 
 #include "render.h"
 
+// The keymap's codes are raylib's.
+static_assert((int)KEYCODE_SPACE == (int)KEY_SPACE && (int)KEYCODE_A == (int)KEY_A && (int)KEYCODE_0 == (int)KEY_ZERO
+              && (int)KEYCODE_ESCAPE == (int)KEY_ESCAPE && (int)KEYCODE_ENTER == (int)KEY_ENTER && (int)KEYCODE_TAB == (int)KEY_TAB
+              && (int)KEYCODE_BACKSPACE == (int)KEY_BACKSPACE && (int)KEYCODE_RIGHT == (int)KEY_RIGHT
+              && (int)KEYCODE_LEFT == (int)KEY_LEFT && (int)KEYCODE_DOWN == (int)KEY_DOWN && (int)KEYCODE_UP == (int)KEY_UP
+              && (int)KEYCODE_F1 == (int)KEY_F1 && (int)KEYCODE_F1 + 11 == (int)KEY_F12,
+              "keymap.h's key codes are raylib's");
+
+// Each order's action in the keymap.
+static const KeyBinding order_action[MENU_ORDER_COUNT] = {
+	[MENU_ORDER_MOVE] = BIND_MOVE, [MENU_ORDER_FIGHT] = BIND_FIGHT, [MENU_ORDER_STOP] = BIND_STOP,
+	[MENU_ORDER_ENTRENCH] = BIND_ENTRENCH, [MENU_ORDER_REPEAT] = BIND_REPEAT, [MENU_ORDER_CLEAR] = BIND_CLEAR_QUEUE,
+	[MENU_ORDER_SEND] = BIND_SEND, [MENU_ORDER_GIVE] = BIND_GIVE, [MENU_ORDER_TAKE] = BIND_TAKE,
+};
+
+static int key_of(const Controls *c, KeyBinding a) { return c->keys ? c->keys->key[a] : keymap_default().key[a]; }
+static bool action_pressed(const Controls *c, KeyBinding a) { return IsKeyPressed(key_of(c, a)); }
+static const char *action_key(const Controls *c, KeyBinding a) { return keymap_key_name(key_of(c, a)); }
+static KeyBinding build_action(int slot) { return (KeyBinding)(slot < BUILD_ITEMS ? BIND_BUILD_1 + slot : BIND_TAB_1 + slot - BUILD_ITEMS); }
+
 void controls_init(Controls *c, FactionId me, Arena *a, ptrdiff_t max_units)
 {
 	*c = (Controls){.me = me, .selection = PUSH(a, UnitHandle, max_units), .placing = -1, .aiming = -1,
@@ -244,7 +264,7 @@ static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *fra
 {
 	const SendTargets *z = &c->targets;
 	if (c->sending) {
-		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->sending = false;
+		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->sending = false;
 		for (int k = 0; k < z->count && k < 9; k++) {
 			if (!IsKeyPressed(KEY_ONE + k) || k == z->here) continue;
 			c->sending = false;
@@ -256,8 +276,8 @@ static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *fra
 	}
 	if (c->send_for >= 0) {
 		int p = player_key(c);
-		bool self = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_T);
-		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->send_for = -1;
+		bool self = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || action_pressed(c, BIND_SEND);
+		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->send_for = -1;
 		else if (p >= 0 || self) {
 			PlayerSlot to = p >= 0 ? (PlayerSlot){(uint8_t)p} : c->player;
 			order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = c->send_for, .to = to});
@@ -267,7 +287,7 @@ static bool send_input(Controls *c, const Sim *sim, const View *view, Arena *fra
 	}
 	if (c->landing_for >= 0) {
 		V2 at;
-		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->landing_for = -1;
+		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->landing_for = -1;
 		else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && pick_ground(view, &sim->terrain, GetMousePosition(), &at)) {
 			at = sim_strip_point(&sim->terrain, c->me, at);
 			order(c, frame, out, cap, n, (Order){.kind = COMMAND_SEND, .amount = c->landing_for, .target = at, .to = c->player});
@@ -283,7 +303,7 @@ static bool give_input(Controls *c, const Sim *sim, Arena *frame, Order *out, pt
 {
 	if (!c->giving) return false;
 	int p = player_key(c);
-	if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+	if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
 		c->giving = 0;
 	} else if (p >= 0 && c->giving == 4) {
 		const Economy *e = &sim->factions[c->me.v].economy[c->player.v];
@@ -297,7 +317,10 @@ static bool give_input(Controls *c, const Sim *sim, Arena *frame, Order *out, pt
 	return true;
 }
 
-static bool key_pressed(char letter) { return IsKeyPressed(KEY_A + (letter - 'A')); }
+bool controls_busy(const Controls *c)
+{
+	return c->placing >= 0 || c->aiming >= 0 || c->sending || c->landing_for >= 0 || c->send_for >= 0 || c->giving;
+}
 
 ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *frame, Order *out, ptrdiff_t cap)
 {
@@ -314,7 +337,7 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 	if (send_input(c, sim, view, frame, out, cap, &n) || give_input(c, sim, frame, out, cap, &n)) return n;
 	if (c->aiming >= 0) {
 		V2 at;
-		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->aiming = -1;
+		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->aiming = -1;
 		else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !over_panels(&L, mouse)
 		         && pick_ground(view, &sim->terrain, mouse, &at)) {
 			order(c, frame, out, cap, &n, (Order){.kind = (CommandKind)c->aiming, .target = at});
@@ -325,7 +348,7 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 	if (c->placing >= 0) {
 		// A click that places or cancels a structure isn't a selection.
 		V2 at;
-		if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->placing = -1;
+		if (action_pressed(c, BIND_CANCEL) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) c->placing = -1;
 		else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !over_panels(&L, mouse)
 		         && pick_ground(view, &sim->terrain, mouse, &at)) {
 			UnitType type = (UnitType)c->placing;
@@ -335,18 +358,13 @@ ptrdiff_t controls_input(Controls *c, const Sim *sim, const View *view, Arena *f
 		if (c->placing >= 0) return n;
 	}
 
-	// Keys: the grid letters to the build grid while it's open; the orders' own keys otherwise.
-	if (menu_build_open(&s)) {
-		for (int k = 0; k < BUILD_ITEMS + BUILD_TABS; k++) {
-			char key = k < BUILD_ITEMS ? BUILD_ITEM_KEYS[k] : BUILD_TAB_KEYS[k - BUILD_ITEMS];
-			if (key_pressed(key)) press_build(c, &s, &build, k, shift, frame, out, cap, &n);
-		}
-	} else {
-		for (int k = 0; k < ORDER_SLOTS; k++) {
-			char key = MENU_ORDER_KEYS[orders.slot[k].order];
-			if (orders.slot[k].shown && key && key_pressed(key)) press_order(c, sim, &s, &orders.slot[k], shift, frame, out, cap, &n);
-		}
-	}
+	// Keys: the build grid's while it's open; the orders' always (they never share a key: keymap.h).
+	if (menu_build_open(&s))
+		for (int k = 0; k < BUILD_ITEMS + BUILD_TABS; k++)
+			if (action_pressed(c, build_action(k))) press_build(c, &s, &build, k, shift, frame, out, cap, &n);
+	for (int k = 0; k < ORDER_SLOTS; k++)
+		if (orders.slot[k].shown && action_pressed(c, order_action[orders.slot[k].order]))
+			press_order(c, sim, &s, &orders.slot[k], shift, frame, out, cap, &n);
 
 	// Clicks on the panels: buttons, and the selection's tiles.
 	if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over_panels(&L, mouse)) {
@@ -443,7 +461,7 @@ static void button_frame(Rectangle r, const MenuButton *b, bool hover, float s)
 	DrawRectangleLinesEx(r, fmaxf(1.0f, s), PANEL_EDGE);
 }
 
-static void draw_build_item(Rectangle r, const MenuButton *b, char key, bool keys_live, bool hover, float s)
+static void draw_build_item(Rectangle r, const MenuButton *b, const char *key, bool keys_live, bool hover, float s)
 {
 	if (!b->shown) {
 		DrawRectangleRec(r, (Color){22, 24, 28, 255});
@@ -456,11 +474,11 @@ static void draw_build_item(Rectangle r, const MenuButton *b, char key, bool key
 	const char *m = TextFormat("%.0f", def->metal_cost), *e = TextFormat("%.0f", def->energy_cost);
 	text(m, r.x + r.width - (float)MeasureText(m, (int)(14.0f * s)) - 6.0f * s, r.y + r.height - 36.0f * s, 14.0f * s, METAL);
 	text(e, r.x + r.width - (float)MeasureText(e, (int)(14.0f * s)) - 6.0f * s, r.y + r.height - 19.0f * s, 14.0f * s, ENERGY);
-	text(TextFormat("%c", key), r.x + 6.0f * s, r.y + r.height - 19.0f * s, 14.0f * s, keys_live ? TEXT : TEXT_DIM);
+	text(key, r.x + 6.0f * s, r.y + r.height - 19.0f * s, 14.0f * s, keys_live ? TEXT : TEXT_DIM);
 	if (b->queued) text(TextFormat("%d", b->queued), r.x + r.width - 26.0f * s, r.y + 6.0f * s, 16.0f * s, ON);
 }
 
-static void draw_text_button(Rectangle r, const MenuButton *b, char key, bool keys_live, bool hover, float s)
+static void draw_text_button(Rectangle r, const MenuButton *b, const char *key, bool keys_live, bool hover, float s)
 {
 	if (!b->shown) {
 		DrawRectangleRec(r, (Color){22, 24, 28, 255});
@@ -471,7 +489,11 @@ static void draw_text_button(Rectangle r, const MenuButton *b, char key, bool ke
 	float size = 14.0f * s;
 	const char *label = b->label ? b->label : "";
 	text(label, r.x + (r.width - (float)MeasureText(label, (int)size)) * 0.5f, r.y + (r.height - size) * 0.5f, size, color);
-	if (key) text(TextFormat("%c", key), r.x + r.width - 12.0f * s, r.y + 3.0f * s, 11.0f * s, keys_live ? ENERGY : TEXT_DIM);
+	if (key && key[0]) {
+		float key_size = 11.0f * s;
+		text(key, r.x + r.width - (float)MeasureText(key, (int)key_size) - 4.0f * s, r.y + 3.0f * s, key_size,
+		     keys_live ? ENERGY : TEXT_DIM);
+	}
 	if (b->toggle) DrawRectangle((int)(r.x + 10.0f * s), (int)(r.y + r.height - 5.0f * s), (int)(r.width - 20.0f * s),
 		                         (int)fmaxf(2.0f, 2.0f * s), b->active ? ON : OFF);
 }
@@ -629,14 +651,15 @@ void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, bool 
 
 	panel(L.build, s);
 	for (int k = 0; k < BUILD_ITEMS; k++)
-		draw_build_item(L.item[k], &build.item[k], BUILD_ITEM_KEYS[k], build_keys, CheckCollisionPointRec(mouse, L.item[k]), s);
+		draw_build_item(L.item[k], &build.item[k], action_key(c, build_action(k)), build_keys, CheckCollisionPointRec(mouse, L.item[k]), s);
 	for (int k = 0; k < BUILD_TABS; k++)
-		draw_text_button(L.tab[k], &build.tab[k], BUILD_TAB_KEYS[k], build_keys, CheckCollisionPointRec(mouse, L.tab[k]), s);
+		draw_text_button(L.tab[k], &build.tab[k], action_key(c, build_action(BUILD_ITEMS + k)), build_keys,
+		                 CheckCollisionPointRec(mouse, L.tab[k]), s);
 	draw_info(c, sim, &L, &sum, mouse, live);
 
 	panel(L.orders, s);
 	for (int k = 0; k < ORDER_SLOTS; k++)
-		draw_text_button(L.order[k], &orders.slot[k], MENU_ORDER_KEYS[orders.slot[k].order], !build_keys,
+		draw_text_button(L.order[k], &orders.slot[k], orders.slot[k].shown ? action_key(c, order_action[orders.slot[k].order]) : "", true,
 		                 CheckCollisionPointRec(mouse, L.order[k]), s);
 	under_construction(L.groups, "groups", s);
 	under_construction(L.idle, "idle builders", s);

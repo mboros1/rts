@@ -2,24 +2,19 @@
 // no raylib, no input; controls.c draws them, binds their keys and clicks,
 // and turns a press into an order.
 //
-//   build grid (bottom left, above the info pane): two rows of items on
-//   QWER and ASDF, and a row of tabs on ZXCV
+//   build grid (bottom left, above the info pane): two rows of items and a
+//   row of tabs (on QWER, ASDF and ZXCV by default: keymap.h)
 //     builders:  the tabs are categories (economy, combat, utility, build);
 //                the items, the open category's structures
 //     factories: the tabs are pages (army, logistics); the items, the units
 //                on the open page
-//   orders grid (beside them): five wide, each order on its own key, which
-//   works while the build grid isn't open (no builders or factories
-//   selected); every button is a click too
+//   orders grid (beside them): five wide, each order on its own key
+//   (keymap.h); every button is a click too
 #pragma once
 
 #include "sim.h"
 
 enum { BUILD_ITEMS = 8, BUILD_TABS = 4, ORDER_COLS = 5, ORDER_ROWS = 3, ORDER_SLOTS = ORDER_COLS * ORDER_ROWS };
-
-// The build grid's keys: items, row by row from the top left; then tabs.
-static const char BUILD_ITEM_KEYS[BUILD_ITEMS + 1] = "QWERASDF";
-static const char BUILD_TAB_KEYS[BUILD_TABS + 1] = "ZXCV";
 
 typedef enum : uint8_t {
 	MENU_ORDER_NONE,
@@ -34,12 +29,6 @@ typedef enum : uint8_t {
 	MENU_ORDER_TAKE,        // away teammates' units here
 	MENU_ORDER_COUNT,
 } MenuOrder;
-
-// Each order's key ('\0': click only).
-static const char MENU_ORDER_KEYS[MENU_ORDER_COUNT] = {
-	[MENU_ORDER_MOVE] = 'M', [MENU_ORDER_FIGHT] = 'F', [MENU_ORDER_STOP] = 'S', [MENU_ORDER_ENTRENCH] = 'B',
-	[MENU_ORDER_REPEAT] = 'Y', [MENU_ORDER_SEND] = 'T', [MENU_ORDER_GIVE] = 'H', [MENU_ORDER_TAKE] = 'K',
-};
 
 typedef struct {
 	bool shown;             // empty slots draw as blanks
@@ -85,15 +74,5 @@ typedef struct {
 BuildMenu menu_build(const SelectionSummary *s, int tab);
 OrdersMenu menu_orders(const SelectionSummary *s, const MenuContext *ctx);
 
-// The build grid is open (and has the grid letters) for builders or factories.
+// The build grid is open (and its keys live) for builders or factories.
 static inline bool menu_build_open(const SelectionSummary *s) { return s->builders || s->factories; }
-
-// The build grid's slot for a key: items 0..7, tabs 8..11; -1 if none.
-static inline int menu_build_slot_of_key(char key)
-{
-	for (int k = 0; k < BUILD_ITEMS; k++)
-		if (BUILD_ITEM_KEYS[k] == key) return k;
-	for (int k = 0; k < BUILD_TABS; k++)
-		if (BUILD_TAB_KEYS[k] == key) return BUILD_ITEMS + k;
-	return -1;
-}

@@ -11,6 +11,7 @@
 #include "script.c"
 #include "wire.c"
 #include "menu.c"
+#include "keymap.c"
 #include "coord.c"
 #include "world.c"
 
@@ -1367,11 +1368,57 @@ static void test_menu(void)
 	SelectionSummary none = {0};
 	o = menu_orders(&none, &team);
 	CHECK(!o.slot[5].shown && o.slot[11].shown && o.slot[11].order == MENU_ORDER_GIVE);
-	// Keys.
-	CHECK(menu_build_slot_of_key('Q') == 0 && menu_build_slot_of_key('F') == 7 && menu_build_slot_of_key('Z') == 8
-	      && menu_build_slot_of_key('V') == 11 && menu_build_slot_of_key('M') == -1);
-	CHECK(MENU_ORDER_KEYS[MENU_ORDER_STOP] == 'S' && MENU_ORDER_KEYS[MENU_ORDER_CLEAR] == 0);
 	sim_destroy(&sim);
+}
+
+// Keymaps: the defaults have no key twice and match config/keys.json; a file
+// rebinds what it names; anything malformed, unknown, fixed or bound twice is
+// refused whole.
+static void test_keymap(void)
+{
+	Keymap d = keymap_default();
+	bool named = true, distinct = true; // one check each: CHECK in a loop is costly for gcc's analyzer
+	for (int a = 0; a < BIND_COUNT; a++) {
+		const char *name = keymap_action_name((KeyBinding)a);
+		named = named && d.key[a] > 0 && name[0] && keymap_action_of((Str){name, (ptrdiff_t)strlen(name)}) == a;
+		for (int b = a + 1; b < BIND_COUNT; b++) distinct = distinct && d.key[a] != d.key[b];
+	}
+	CHECK(named && distinct);
+	Arena a = arena_create("keymap", 1 << 20);
+	Str text = {"", 0};
+	bool read = platform_read_file(&a, "config/keys.json", &text);
+	CHECK(read);
+	Keymap file = keymap_default();
+	for (int k = 0; k < BIND_COUNT; k++) file.key[k] = 0;
+	char err[256] = "";
+	bool ok = read && keymap_parse(&file, text, err, sizeof err);
+	if (!ok) fprintf(stderr, "config/keys.json: %s\n", err);
+	CHECK(ok && !memcmp(&file, &d, sizeof d));                 // names every action, as the defaults
+	Keymap km = keymap_default();
+	CHECK(keymap_parse(&km, S("{\"stop\": \"X\", \"tab_2\": \"F4\"}"), err, sizeof err));
+	CHECK(km.key[BIND_STOP] == 'X' && km.key[BIND_TAB_2] == KEYCODE_F1 + 3 && km.key[BIND_MOVE] == 'M');
+	Keymap before = km;
+	const char *refused[] = {
+		"{\"stop\": \"Q\"}",               // Q is build_1's
+		"{\"jump\": \"J\"}",               // no such action
+		"{\"stop\": \"Hyper\"}",           // no such key
+		"{\"stop\": \"5\"}",               // digits choose zones and players
+		"{\"stop\": \"X\",}",              // a trailing comma
+		"{\"stop\": \"X\"} x",
+		"[\"stop\"]",
+	};
+	// Through a volatile: gcc's analyzer would otherwise explore the parser
+	// once per literal (45 s of make check).
+	const char *volatile refused_one[countof(refused)];
+	for (int k = 0; k < (int)countof(refused); k++) refused_one[k] = refused[k];
+	bool all_refused = true;
+	for (int k = 0; k < (int)countof(refused); k++)
+		all_refused = all_refused && !keymap_parse(&km, (Str){refused_one[k], (ptrdiff_t)strlen(refused_one[k])}, err, sizeof err)
+		           && !memcmp(&km, &before, sizeof km);          // refused whole
+	CHECK(all_refused);
+	CHECK(!strcmp(keymap_key_name(KEYCODE_SPACE), "Space") && !strcmp(keymap_key_name('Q'), "Q")
+	      && !strcmp(keymap_key_name(KEYCODE_F1 + 11), "F12") && keymap_key_of(S("F13")) < 0);
+	arena_destroy(&a);
 }
 
 // Players: every unit has an owner and only the owner's orders move it;
@@ -1516,6 +1563,7 @@ static const Test tests[] = {
 	{"take", test_take},
 	{"trucks", test_trucks},
 	{"menu", test_menu},
+	{"keymap", test_keymap},
 };
 
 // tests            run all, in order

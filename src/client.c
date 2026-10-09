@@ -11,6 +11,7 @@
 //       [--switch-to NAME --switch-at N] [--quit-after N]   (N: ticks received)
 //       [--journey STEP,STEP,...]          scripted: map:SECONDS or ZONE:SECONDS
 //       [--bot] [--doctrine SPEC]          the bot plays your side, as a player (bot.h)
+//       [--keys PATH]                      a keymap (keymap.h); else config/keys.json if there is one
 //
 // With a coordinator and no --zone, the window opens on the strategic map
 // (map.h): click a zone to launch into it; Tab, or Esc when not placing a
@@ -62,6 +63,7 @@ typedef struct {
 	int64_t switch_at, quit_after;
 	bool bot;
 	const char *doctrine;          // --doctrine, for --bot
+	const char *keys;              // --keys: a keymap file (else config/keys.json, if there is one)
 	char journey[16][ZONE_NAME];   // "map" or a zone name, each for journey_s seconds
 	double journey_s[16];
 	int journey_len;
@@ -112,6 +114,7 @@ typedef struct {
 	bool renderer_ready;
 	View view;
 	Controls controls;
+	Keymap keys;
 	bool overlay;
 } Client;
 
@@ -301,6 +304,7 @@ static void client_welcome(Client *c, ByteReader *r)
 	else mirror_init(&c->mirror, &c->world, config.max_units, config.max_projectiles);
 	controls_init(&c->controls, (FactionId){faction < FACTION_COUNT ? faction : 0}, &c->world, config.max_units);
 	c->controls.player = c->opt.slot;
+	c->controls.keys = &c->keys;
 	c->controls.team_count = faction < FACTION_COUNT ? config.players[faction] : 1;
 	c->bot = bot_create_player((FactionId){faction < FACTION_COUNT ? faction : 0}, c->opt.slot, config.seed ^ 0x5eedu);
 	char why[160];
@@ -506,7 +510,9 @@ static void client_overlay(const Client *c, bool connected)
 	y += line;
 	DrawText(TextFormat("commands sent %lld", (long long)c->commands_sent), 12, y, 16, LIGHTGRAY);
 	y += line;
-	DrawText("Tab or Esc: strategic map | F1: this overlay", 12, y, 14, GRAY);
+	DrawText(TextFormat("%s or %s: strategic map | %s: this overlay", keymap_key_name(c->keys.key[BIND_MAP]),
+	                    keymap_key_name(c->keys.key[BIND_CANCEL]), keymap_key_name(c->keys.key[BIND_OVERLAY])),
+	         12, y, 14, GRAY);
 	if (!connected) {
 		const char *msg = "connection lost: reconnecting...";
 		int w = MeasureText(msg, 30);
@@ -520,7 +526,10 @@ static void client_banner(const Client *c, bool connected)
 {
 	const char *side = c->opt.faction == 0 ? "blue" : c->opt.faction == 1 ? "red" : "spectator";
 	const char *zone = c->dir.zone_count ? c->dir.zones[c->zone_at].name : TextFormat("%s:%d", c->opt.host, c->opt.port);
-	const char *text = TextFormat("zone %s   %s   %s", zone, side, c->opt.coord ? "Tab: strategic map   F1: details" : "F1: details");
+	const char *map = keymap_key_name(c->keys.key[BIND_MAP]), *details = keymap_key_name(c->keys.key[BIND_OVERLAY]);
+	const char *text = TextFormat("zone %s   %s   %s", zone, side,
+	                              c->opt.coord ? TextFormat("%s: strategic map   %s: details", map, details)
+	                                           : TextFormat("%s: details", details));
 	DrawRectangle(5, 5, MeasureText(text, 20) + 20, 32, (Color){0, 0, 0, 150});
 	DrawText(text, 15, 11, 20, RAYWHITE);
 	if (!connected) {
@@ -609,6 +618,7 @@ static int client_main(int argc, char **argv)
 		else if (!strcmp(a, "--switch-at")) c.opt.switch_at = atoll(v);
 		else if (!strcmp(a, "--quit-after")) c.opt.quit_after = atoll(v);
 		else if (!strcmp(a, "--doctrine")) c.opt.doctrine = v;
+		else if (!strcmp(a, "--keys")) c.opt.keys = v;
 		else if (!strcmp(a, "--journey")) {
 			static char steps[512];
 			snprintf(steps, sizeof steps, "%s", v);
@@ -626,6 +636,7 @@ static int client_main(int argc, char **argv)
 		i += used;
 	}
 	c.out = arena_create("client out", (ptrdiff_t)16 << 20);
+	c.keys = keymap_load(c.opt.keys ? c.opt.keys : "config/keys.json", c.opt.keys != nullptr, &c.out);
 	c.program = arena_create("client program", (ptrdiff_t)1 << 30);
 	c.world = arena_create("client world", (ptrdiff_t)2 << 30);
 	c.frame = arena_create("client frame", (ptrdiff_t)256 << 20);
@@ -757,7 +768,7 @@ static int client_main(int argc, char **argv)
 			map_draw(&c.dir, c.opt.faction < FACTION_COUNT ? c.opt.faction : -1, hover, w, h);
 			if (hover >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && c.dir.zones[hover].up)
 				client_launch(&c, c.dir.zones[hover].name, now);
-			if (IsKeyPressed(KEY_ESCAPE)) {
+			if (IsKeyPressed(c.keys.key[BIND_CANCEL])) { // on the map, cancel quits
 				EndDrawing();
 				break;
 			}
@@ -771,9 +782,9 @@ static int client_main(int argc, char **argv)
 			c.view = (View){.focus = home, .distance = c.player ? 220.0f : 420.0f};
 			c.renderer_ready = true;
 		}
-		bool was_placing = c.controls.placing >= 0;
+		bool was_busy = controls_busy(&c.controls); // then cancel cancels that, not the zone
 		if (c.renderer_ready && c.ready) {
-			view_update(&c.view, &c.terrain);
+			view_update(&c.view, &c.terrain, &c.keys);
 			Scene scene = c.player ? remote_scene(&c.remote, c.base, &c.frame)
 			                       : scene_from_mirror(&c.mirror, &c.terrain, c.base, &c.frame);
 			if (c.player) {
@@ -796,13 +807,14 @@ static int client_main(int argc, char **argv)
 			EndMode3D();
 			if (c.player) controls_draw_screen(&c.controls, &c.remote.sim, GetScreenWidth(), GetScreenHeight(), true);
 		}
-		if (IsKeyPressed(KEY_F1)) c.overlay = !c.overlay;
+		if (IsKeyPressed(c.keys.key[BIND_OVERLAY])) c.overlay = !c.overlay;
 		if (c.overlay) client_overlay(&c, c.conn.open);
 		else client_banner(&c, c.conn.open);
 		EndDrawing();
-		// To the map: Tab, or Esc unless it just cancelled a placement.
-		if (c.opt.coord && (IsKeyPressed(KEY_TAB) || (IsKeyPressed(KEY_ESCAPE) && !was_placing))) client_to_map(&c, now);
-		else if (!c.opt.coord && IsKeyPressed(KEY_ESCAPE) && !was_placing) break;
+		// To the map: map, or cancel when there's nothing in progress to cancel.
+		bool cancel = IsKeyPressed(c.keys.key[BIND_CANCEL]) && !was_busy;
+		if (c.opt.coord && (IsKeyPressed(c.keys.key[BIND_MAP]) || cancel)) client_to_map(&c, now);
+		else if (!c.opt.coord && cancel) break;
 	}
 
 	conn_close(&c.conn, "client quit");
