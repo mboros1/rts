@@ -715,6 +715,9 @@ Done. Storage is room; trucks carry it, split by resource like BAR.
   -> 25,000), and become vaults at the front. Demo 19 (19-truck-logistics):
   a team world where bots ship a few loaded trucks. The other demos
   re-render byte for byte. arm64 and x86-64 agree.
+- **Soaks**: 3 minutes of `make soak` pass; 10 minutes of `worlds/teams.world`
+  pass (14 zone kills, 5 coordinator kills, 11 player sessions, 1322 units
+  across with none lost; centre changed hands three times).
 - **Formats**: replay v14, wire v11, zone state v8.
 
 If spike 3 runs long, split it: first the faction split on the server only
