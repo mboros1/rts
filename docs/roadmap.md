@@ -619,6 +619,10 @@ Done. A player nobody is playing has their bot play them.
   two, all bots; blue.0's player logs in at 2 minutes, takes blue.1's 23
   units onto its own 27 and sends them at red). The script demos re-render
   byte for byte. arm64 and x86-64 agree.
+- **Soaks**: 3 minutes of `make soak` pass; 10 minutes of `worlds/teams.world`
+  pass: 14 zone kills, 5 coordinator kills, 11 player sessions (each zone
+  handed away players to their bots 9 times), 1519 units across with none
+  lost, every replay segment chained; centre changed hands three times.
 - **Formats**: replay v12, wire v9, zone state v6; the directory carries who's
   online.
 - **Not yet**: K and the away marks have only been tried headlessly. Taking
