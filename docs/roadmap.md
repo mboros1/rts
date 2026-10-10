@@ -1037,8 +1037,14 @@ restart).
   a third of its strength; a howitzer loses its range); the send button
   saying when T2 will stay behind (unpaired sends drop it silently); bots
   that contest held zones (fronts freeze after the land grab: the hour
-  soak, spike 20's world) and move T2 forward; and models that read at
-  play zoom (above).
+  soak, spike 20's world) and move T2 forward; models that read at play
+  zoom (above); and zone size and metal as context settings. A zone is 512
+  units across (about 180 tank widths, half an 8v8 BAR map's width, a
+  quarter of its area) with at most 32 metal spots, 2 a player in an 8v8
+  where BAR gives several each: the 8v8 limit (spike 15). A context's size
+  (up to about 1024) and spot count, so a home or a big front can be 8v8
+  scale and an outpost stay small; past 64 spots the spot sets (`Faction.spots`,
+  the bots' masks, 64-bit) need a wider type. Measured with `make bench-teams`.
 - A balance spike: energy is plentiful everywhere and metal scarce (spike
   16b: fronts float full energy, metal seldom overflows), so shipping energy
   means little. With it, weapons costing energy per shot, from the firing
