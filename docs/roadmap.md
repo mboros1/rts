@@ -58,6 +58,7 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 18c | Winning | A game ends | Destroying a side's headquarters ends the game |
 | 19 | Zone contexts | Zones differ | Each zone has its economy's rules and its environment (what each income source gives), set like doctrines per world and zone; the standard context is the sim as it was |
 | 20 | T2 | A second tier | Any builder puts up an advanced factory; it makes heavy tanks, howitzers and advanced engineers, which deepen extractors; T2 can't pioneer |
+| 21 | Zone size and metal | 8v8 has room | A zone's map is part of its context: size (256 to 2048 across) and metal spots (8 to 256); presets standard, large, huge |
 
 Then the UI spikes: the strategic map as the logistics console with pings
 and chat, minimap, control groups and idle builders, and a team playtest.
@@ -986,6 +987,42 @@ Done. A second tier.
   spike).
 - **Formats**: replay v18, wire v15, zone state v12 (unit types renumbered).
 
+## Spike 21 results (2026-10-10)
+
+Done. A zone's map is part of its context, up to four times as wide.
+
+- **The map** (context.h): `map PRESET [size=N spots=N]`, presets standard
+  (512 across, 24 spots: the zone there always was), large (1024, 96) and
+  huge (2048, 256); sizes 256 to 2048 in steps of 64, spots 8 to 256. Set
+  by world files (`map in north huge`) and scripts; F1 shows it.
+- **What scales**: the terrain, the spots (spread over the map, mirrored,
+  four by the bases), the bases (an eighth of the way in), the bots' reach
+  for "near home". Ranges, speeds and sight don't: a bigger zone is more
+  ground.
+- **Under it**: spot sets are 256 bits (`SpotSet`; the wire carries only
+  the words a zone uses); positions quantize over the zone's width (1/128
+  unit at 512, as before; 1/32 at 2048); the terrain draws in chunks of
+  128 cells (a raylib mesh's 16-bit indices stop at 65535 vertices: even
+  1024 would have crashed the client); the far clip plane follows the
+  size.
+- **The bench** (`rts-headless bench-teams 18000 8 MAP`, 10 minutes, 8v8):
+
+  | map | step mean / worst | peak units | extractors a player | at 10 minutes |
+  |---|---|---|---|---|
+  | standard | 0.14 / 0.29 ms | 493 | 1.5 | red wiped out (492 v 1) |
+  | large | 0.28 / 1.02 ms | 702 | 5.9 | a war (279 v 382) |
+  | huge | 0.70 / 1.80 ms | 1882 | 15.8 | both growing (942 v 938) |
+
+  The sim at 2048 uses about 2% of a tick's budget. The client draws a
+  huge zone with 3000 tanks at 59 fps.
+- **Evidence**: `test_map` (presets and refusals, the standard map
+  unchanged, a huge one's terrain, bases and spots, quantization over it,
+  spot sets past 64); the context test. Demo 26: an 8v8 of bots on a huge
+  zone, 4 minutes: 57 and 62 extractors. Script demos still hold.
+- **Not yet**: at a whole huge zone's zoom units are specks (models,
+  Later); no world uses large or huge zones yet (a world file's choice).
+- **Formats**: replay v19, wire v16, zone state v13.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.
@@ -1032,19 +1069,14 @@ restart).
   keeps them multipliers). With the units that use them: wind, tidal,
   solar, geothermal generators. A campaign of planets (Earth, the Moon,
   Mars, the belt, Titan) is the kind of world this is for.
-- A polish and balance spike (next), rolling up what T2 left open: exact
+- A polish and balance spike (next; split as 21b, unit specs and T2
+  polish, and 21c, bots that contest), rolling up what T2 left open: exact
   unit specs; T2 entrenching (a heavy tank digs in as the generic turret,
   a third of its strength; a howitzer loses its range); the send button
   saying when T2 will stay behind (unpaired sends drop it silently); bots
   that contest held zones (fronts freeze after the land grab: the hour
-  soak, spike 20's world) and move T2 forward; models that read at play
-  zoom (above); and zone size and metal as context settings. A zone is 512
-  units across (about 180 tank widths, half an 8v8 BAR map's width, a
-  quarter of its area) with at most 32 metal spots, 2 a player in an 8v8
-  where BAR gives several each: the 8v8 limit (spike 15). A context's size
-  (up to about 1024) and spot count, so a home or a big front can be 8v8
-  scale and an outpost stay small; past 64 spots the spot sets (`Faction.spots`,
-  the bots' masks, 64-bit) need a wider type. Measured with `make bench-teams`.
+  soak, spike 20's world) and move T2 forward; and models that read at
+  play zoom (above). (Zone size and metal: spike 21.)
 - A balance spike: energy is plentiful everywhere and metal scarce (spike
   16b: fronts float full energy, metal seldom overflows), so shipping energy
   means little. With it, weapons costing energy per shot, from the firing
