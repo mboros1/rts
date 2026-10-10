@@ -952,6 +952,12 @@ static int client_main(int argc, char **argv)
 			EndMode3D();
 			if (c.player) controls_draw_screen(&c.controls, &c.remote.sim, c.in.width, c.in.height, &c.in);
 		}
+		if (!c.on_map) {
+			// The game's end: the coordinator's word, or (a zone on its own) our side's.
+			int winner = directory_winner(&c.dir), where = c.dir.ended_in;
+			if (winner < 0 && c.player) winner = c.remote.sim.factions[c.opt.faction].winner;
+			map_draw_result(winner, c.dir.ended ? c.dir.zones[where].name : "", c.in.width, c.in.height);
+		}
 		if (c.in.pressed[c.keys.key[BIND_OVERLAY]]) c.overlay = !c.overlay;
 		if (c.overlay) client_overlay(&c, c.conn.open);
 		else client_banner(&c, c.conn.open);

@@ -420,6 +420,8 @@ typedef struct {
 	uint64_t spots;            // metal spots it extracts from (an effect)
 	uint8_t away;              // players (bit per slot) nobody is playing: their bots are; set by COMMAND_AI_SLOTS
 	int64_t respawn_at[MAX_PLAYERS]; // home zone: the tick each player's lost commander reappears; -1: none
+	bool fallen;               // its headquarters was destroyed here: the game is lost
+	int8_t winner;             // -1 while the game goes on; then who won (COMMAND_GAME_OVER): frozen
 	static_assert(MAX_PLAYERS <= 8, "away is a byte: widen it with the slots");
 	EnemyView view;            // built from `seen` each tick, in scratch
 	Departure *departures;     // left through transporters this tick (in scratch)
@@ -453,6 +455,7 @@ typedef enum : uint8_t {
 	COMMAND_TAKE,       // the player takes every unit of every away teammate here (BAR's /take)
 	COMMAND_SET_REPEAT, // these factories repeat (flags COMMAND_REPEAT) or don't, queue as it is
 	COMMAND_WARP,       // these commanders warp home (flags COMMAND_FREE: at no cost, a logged-out player's)
+	COMMAND_GAME_OVER,  // the zone's say: the game is over, side `amount` won; nothing happens here after
 	COMMAND_KIND_COUNT,
 } CommandKind;
 
@@ -584,6 +587,18 @@ bool faction_read(Faction *f, ByteReader *r);
 // config; it checks everything, and on false the sim must be discarded.
 void sim_save(const Sim *sim, ByteBuf *b);
 bool sim_load(Sim *sim, ByteReader *r);
+
+// The game's end, as a zone sees it: a side whose headquarters fell here
+// has lost. Then whoever runs the zone (a script, the server, on its own or
+// on the coordinator's word) says so to both sides with COMMAND_GAME_OVER,
+// and from then on nothing moves, fires or builds; ticks still pass.
+// sim_winner_due: the side that has just won here and isn't told yet, or -1.
+int sim_winner_due(const Sim *sim);
+static inline bool sim_over(const Sim *sim) { return sim->factions[0].winner >= 0 || sim->factions[1].winner >= 0; }
+static inline Command game_over_command(FactionId f, int winner)
+{
+	return (Command){.faction = f, .kind = COMMAND_GAME_OVER, .amount = winner};
+}
 
 // Dense index of a live unit, or -1 if the handle is stale.
 ptrdiff_t units_find(const Units *u, UnitHandle h);

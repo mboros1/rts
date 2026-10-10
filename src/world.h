@@ -11,6 +11,8 @@
 //   players blue 3                   a side's players (1..8; default 1), every zone
 //   doctrine red turtle              how a side's bots play (bot.h), every zone
 //   doctrine blue in middle raider   ... or one zone (after its zone line)
+//   setup west at 0 spawn red tank 9 at 72,256   a script line (script.h) a zone
+//                                    starts with: fixtures, what's where at the start
 //
 // A world file only sets up a match. Everything after that is the game's.
 #pragma once
@@ -23,7 +25,7 @@ enum { WORLD_MAX_LINKS = 32 };
 
 // A zone's saved state's format (rts-server --state); a world's live
 // directory records it, so `rts world` can tell a world an older build made.
-enum { ZONE_STATE_VERSION = 9 };
+enum { ZONE_STATE_VERSION = 10 };
 
 typedef struct {
 	char name[ZONE_NAME];
@@ -40,6 +42,7 @@ typedef struct {
 	uint8_t players[FACTION_COUNT];                        // slots per side
 	char doctrine[FACTION_COUNT][192];                     // every zone ("": the default)
 	char doctrine_in[COORD_MAX_ZONES][FACTION_COUNT][192]; // one zone, over that
+	char setup[COORD_MAX_ZONES][1024];                     // script lines a zone starts with (`setup ZONE ...`)
 } World;
 
 // The doctrine a side's bots play in zone z ("": the default).
@@ -76,6 +79,7 @@ typedef struct {
 	uint8_t short_metal[FACTION_COUNT];  // bit per player: under half the base storage's metal
 	uint8_t short_energy[FACTION_COUNT]; // ... or energy
 	Intel intel[FACTION_COUNT];          // each side's, of the other
+	uint8_t fallen;                      // bit per faction: its headquarters fell here (it lost)
 } ZoneStatus;
 
 typedef struct {
@@ -109,7 +113,12 @@ typedef struct {
 	uint8_t players[FACTION_COUNT];
 	char player[FACTION_COUNT][MAX_PLAYERS][ZONE_NAME];
 	uint8_t online[FACTION_COUNT];  // bit per slot: logged in now (anywhere in the world)
+	uint8_t ended;                  // 0: the game goes on; else 1 + the side that won, and every zone stops
+	uint8_t ended_in;               // the zone the losing headquarters fell in (when ended)
 } Directory;
+
+// Who won, or -1 while the game goes on.
+static inline int directory_winner(const Directory *d) { return d->ended ? d->ended - 1 : -1; }
 
 // A side's view of a directory (fog of war on the map): its own presence,
 // its own transits, its own players, and its intel; nothing of the enemy's

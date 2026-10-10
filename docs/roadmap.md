@@ -57,12 +57,11 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 18b | Bots with commanders | Bots open and play as players now do | The commander-only opening; bots keep their commanders useful and alive, and warp home |
 | 18c | Winning | A game ends | Destroying a side's headquarters ends the game |
 
-Then the UI spikes: the command grid and selection panel, the strategic map
-as the logistics console with pings and chat, minimap, control groups and
-overlays, and a team playtest. Through spikes 13-16 a soak runs in the
-background on each spike's commit (3 minutes of `make soak` when saving or
-the coordinator changes, 10 of `make world-soak`), and the hour-long soak
-runs once, at the end of the series.
+Then the UI spikes: the strategic map as the logistics console with pings
+and chat, minimap, control groups and idle builders, and a team playtest.
+A soak runs in the background on each spike's commit (3 minutes of
+`make soak` when saving or the coordinator changes, 10 of `make world-soak`),
+and the hour-long soak runs once, at the end of a series.
 
 ## Spike 1 results (2026-10-07)
 
@@ -886,6 +885,37 @@ Done. Bots open and expand as players now must.
   (three players under 300 each) with metal at 0, and sent no crews.
 - **Later**: the economy's constants become a context per zone (Later).
 
+## Spike 18c results (2026-10-09)
+
+Done. A game ends.
+
+- **The fall**: a side whose headquarters is destroyed has lost
+  (`Faction.fallen`, kept in saves and snapshots).
+- **The end, in a zone**: whoever runs it says the game is over to both
+  sides (`COMMAND_GAME_OVER`): a script or a lone zone at once, a world's
+  zone when its own headquarters falls or on the coordinator's word. From
+  then nothing moves, fires, builds or arrives; shells in the air are gone
+  and units stand still, so every copy of the zone shows the same picture.
+  Ticks still pass and players can still look around.
+- **The end, in a world**: the zone reports the fall in its status; the
+  coordinator logs `ended WINNER ZONE` (first word stands, kept through
+  compaction), stops delivering transfers (what was on its way stays logged,
+  undelivered), and puts the result in the directory, which every zone and
+  client reads. A new game is `rts world --new`.
+- **Seen**: "Red wins" over the map and every zone view, in the client and
+  in clips (from the directory, or the sim in a script); `rts world
+  --status` prints `game over: red won (blue's headquarters fell in west)`.
+- **Bots**: an army that sees the enemy headquarters goes for it.
+- **World files** take `setup ZONE LINE`: a script line a zone starts with,
+  for fixtures (what's where at the start).
+- **Evidence**: `test_game_over` (fallen, the freeze, a late word ignored,
+  the snapshot), the ledger and directory tests; the world smoke test ends
+  a world (a red army set up at blue's headquarters: the coordinator logs it
+  once, all three zones stop, the map says so; 2 s more for that stage);
+  world-soak accepts a game that ends. Demo 23: a red army takes blue's
+  headquarters, west freezes, every view says red won.
+- **Formats**: replay v16, wire v13, zone state v10.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.
@@ -920,6 +950,8 @@ restart).
 
 ## Later
 
+- T2: a second tier of units from a T2 factory. Unpaired sends (pioneering)
+  stay first-tier only (`unpaired_can_send`, spike 18b).
 - An economy context, before the balance spike: the economy's constants
   (incomes, home income, base storage, truck and vault room, costs) as a
   context a zone is given, as doctrines are, so zones can differ (a rich

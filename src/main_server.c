@@ -430,6 +430,11 @@ static void on_deliver(Server *s, ByteReader *r, double now)
 			if (s->applied[k] == id) send_id(s, COORD_DELIVERED, id, now);
 		return;
 	}
+	if (sim_over(&s->sim)) {
+		// The game is over here: nobody comes in (the coordinator stops offering).
+		send_id(s, COORD_HOLD, id, now);
+		return;
+	}
 	if (leg.why == LEAVE_DIED) {
 		// A commander lost elsewhere: the headquarters here brings it back, in time.
 		if (s->queued_count == MAX_COMMANDS || s->confirm_count == (int)countof(s->confirm)) {
@@ -544,6 +549,7 @@ static void coord_service(Server *s, double now)
 			st.transporters[f] = (uint8_t)(transporters < 255 ? transporters : 255);
 			st.short_metal[f] = side_short_of(&s->sim, f, false);
 			st.short_energy[f] = side_short_of(&s->sim, f, true);
+			st.fallen |= (uint8_t)(s->sim.factions[f].fallen << f);
 			st.intel[f] = (Intel){.contact = s->contact[f], .seen_age = age_of(s, s->contact_tick[f]),
 			                      .transporters = s->transporters_seen[f],
 			                      .transporter_age = age_of(s, s->transporter_tick[f])};
@@ -850,6 +856,11 @@ static void step(Server *s, double now)
 	update_presence(s);
 	update_bot_worlds(s);
 	ptrdiff_t n = s->queued_count;
+	// The game ended somewhere (our own headquarters falling ends it here at
+	// once, in script_tick): this zone stops too.
+	int winner = s->have_dir ? directory_winner(&s->dir) : -1;
+	for (int f = 0; winner >= 0 && !sim_over(&s->sim) && f < FACTION_COUNT && n < MAX_COMMANDS; f++)
+		s->queued[n++] = game_over_command((FactionId){(uint32_t)f}, winner);
 	n += script_tick(&s->run, &s->sim, &s->tick, s->queued + n, MAX_COMMANDS - n);
 	// Every send, whoever ordered it, goes the way the world allows, or not at all.
 	ptrdiff_t kept = 0;
@@ -867,7 +878,13 @@ static void step(Server *s, double now)
 	n = kept;
 	Tick tick = s->sim.tick;
 	double t0 = platform_seconds();
+	bool was_over = sim_over(&s->sim);
 	sim_step(&s->sim, s->queued, n);
+	if (sim_over(&s->sim) && !was_over) {
+		int won = s->sim.factions[0].winner;
+		printf("server %s: the game is over at tick %lld: %s won\n", s->zone_name, (long long)tick.v, won ? "red" : "blue");
+		fflush(stdout);
+	}
 	note_sightings(s);
 	double ms = 1e3 * (platform_seconds() - t0);
 	s->step_ms_avg = s->step_ms_avg == 0.0 ? ms : s->step_ms_avg * 0.95 + ms * 0.05;

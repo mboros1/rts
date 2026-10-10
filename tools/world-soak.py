@@ -17,7 +17,9 @@ At the end the world stops cleanly, and it checks:
   - every process stayed within its memory after warming up;
   - nothing died on its own, no player saw a faction hash mismatch;
   - both sides expanded beyond their home zones, units crossed, and the
-    coordinator compacted its log (on runs long enough to need it).
+    coordinator compacted its log (on runs long enough to need it); unless
+    the game ended (a headquarters fell): that's a fine way for a world to
+    finish, and after it the world stands still, so only the rest is checked.
 """
 
 import argparse
@@ -278,12 +280,15 @@ def main():
     say(f"held beyond home: blue {sorted(held_beyond_home['blue'])}, red {sorted(held_beyond_home['red'])}; "
         f"{crossed} units crossed")
     say(f"the front moved {changes} times: " + "; ".join(f"{z} {' > '.join(t)}" for z, t in sorted(timeline.items())))
+    ended = re.search(r"coord: (\w+)'s headquarters fell in (\S+): (\w+) wins", out)
+    if ended:
+        say(f"the game ended: {ended[3]} won ({ended[1]}'s headquarters fell in {ended[2]})")
     for side, held in held_beyond_home.items():
-        if not held:
+        if not held and not ended:
             failures.append(f"{side} never got beyond its home zone")
-    if changes < a.min_changes:
+    if changes < a.min_changes and not ended:
         failures.append(f"the front moved {changes} times, fewer than {a.min_changes}")
-    if crossed < 10 * a.minutes:
+    if crossed < 10 * a.minutes and not ended:
         failures.append(f"only {crossed} units crossed in {a.minutes} minutes")
     compactions = out.count("compacted")
     say(f"the coordinator compacted its log {compactions} times")

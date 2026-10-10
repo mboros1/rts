@@ -52,9 +52,12 @@
 //                                     #   and finished counts: raiders tanks artillery
 //                                     #   engineers scouts sappers metal-trucks energy-trucks extractors
 //                                     #   generators factories transporters turrets metal-vaults energy-vaults
-//                                     #   departed arrived
+//                                     #   departed arrived won (1 once the game's over and it won)
 //   at 600 expect blue.1 tanks >= 5   # a player's: units and finished counts
 //   at 600 expect column alive >= 15  # group field: alive
+//
+// A side whose headquarters falls loses: the script says the game is over
+// (COMMAND_GAME_OVER), and nothing happens in the zone after that.
 //
 // Selections are queries resolved at their tick: SIDE (a player's units
 // only), TYPE (raider, tank, artillery, any), optionally within R of X,Z, optionally the nearest max N.
@@ -92,6 +95,7 @@ typedef enum : uint8_t {
 	FIELD_COUNT,      // finished units of `type`
 	FIELD_DEPARTED,
 	FIELD_ARRIVED,
+	FIELD_WON,        // 1 once the game is over and this side won
 } ExpectField;
 
 typedef enum : uint8_t { OP_LT, OP_LE, OP_GT, OP_GE, OP_EQ, OP_NE } ExpectOp;

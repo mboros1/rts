@@ -480,6 +480,7 @@ int clip_run(const ClipRequest *req)
 		} else {
 			draw_economies(&sim, rh);
 		}
+		if (sim_over(&sim)) map_draw_result(sim.factions[0].winner, "", rw, rh);
 		if (title[0]) draw_title_card(title, about, req->label, (sim.tick.v - from) / speed, rw, rh);
 		if (sample) samples[out.taken] = now;
 		out_end(&out, sample, TextFormat("t%lld  %td v %td  shells %td", (long long)now.tick,
@@ -734,6 +735,9 @@ static void playback_draw(Playback *p, Renderer *renderer, const Scene *scene, C
 	BeginMode3D(cam);
 	renderer_draw_scene(renderer, scene, alpha, frame, nullptr, -1);
 	EndMode3D();
+	int winner = directory_winner(&p->dir);
+	if (winner < 0 && p->player) winner = p->remote.sim.factions[p->faction].winner;
+	map_draw_result(winner, p->dir.ended ? p->dir.zones[p->dir.ended_in].name : "", w, h);
 	if (heading) draw_heading(heading, w);
 	// The panel is laid out for 600 px and scales down to fit a half frame.
 	float k = f_min(1.0f, (float)w / (float)(600 * s));

@@ -70,9 +70,11 @@ static void send_to(Coord *c, Peer *p, uint8_t kind, const ByteBuf *b, double no
 }
 
 // Offer every pending transfer to its zone, if the zone is up and the
-// transfer is due: new, held, or not confirmed in time.
+// transfer is due: new, held, or not confirmed in time. Not once the game
+// is over: what was on its way stays where the end found it.
 static void deliver(Coord *c, double now)
 {
+	if (c->ledger.ended) return;
 	for (int32_t k = 0; k < c->ledger.transfer_count; k++) {
 		Transfer *t = &c->ledger.transfers[k];
 		if (t->delivered || now < t->retry_at) continue;
@@ -106,6 +108,11 @@ static void directory(const Coord *c, Directory *d, double now)
 		}
 	}
 	memcpy(d->links, c->world.links, sizeof d->links);
+	for (int k = 0; k < c->zone_count && c->ledger.ended; k++)
+		if (!strcmp(c->zones[k].name, c->ledger.ended_in)) {
+			d->ended = c->ledger.ended;
+			d->ended_in = (uint8_t)k;
+		}
 	for (int f = 0; f < FACTION_COUNT; f++) d->players[f] = c->world.zone_count ? c->world.players[f] : 1;
 	memcpy(d->player, c->ledger.player, sizeof d->player);
 	for (int f = 0; f < FACTION_COUNT; f++)
@@ -209,6 +216,12 @@ static void on_frame(Coord *c, int pi, Frame *f, double now)
 		if (!from || !get_zone_status(&r, &st)) break;
 		from->status = st;
 		from->reported = true;
+		for (int lost = 0; lost < FACTION_COUNT; lost++)
+			if (st.fallen >> lost & 1 && !c->ledger.ended) {
+				ledger_end(&c->ledger, (uint8_t)(1 - lost), from->name);
+				printf("coord: %s's headquarters fell in %s: %s wins\n", lost ? "red" : "blue", from->name,
+				       lost ? "blue" : "red");
+			}
 		break;
 	}
 	case COORD_JOIN: {

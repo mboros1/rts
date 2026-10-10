@@ -134,7 +134,7 @@ check-zones: $(CHECK)/rts $(CHECK)/rts-server $(CHECK)/rts-coord
 # The game through `rts world`: start, a player's journey across the map and
 # two zones, stop and continue, save and load, the journey's clip.
 check-world: $(CHECK)/rts $(CHECK)/rts-server $(CHECK)/rts-coord
-	@$(S) "world: journey, stop/continue, save/load" tools/world-smoke $(CHECK) $(CHECK)/world > $(CHECK)/world.log 2>&1 \
+	@$(S) "world: journey, stop/continue, save/load, the end" tools/world-smoke $(CHECK) $(CHECK)/world > $(CHECK)/world.log 2>&1 \
 		|| { cat $(CHECK)/world.log; exit 1; }
 
 check-server: $(CHECK)/rts-server

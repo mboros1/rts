@@ -350,7 +350,7 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		if (!(a = new_action(p, tick, ACTION_EXPECT, text))) return bad(p, "too many actions", nullptr);
 		static const char *fields[] = {"units", "lost", "fired", "shells", "spawned", "alive",
 		                               "metal", "energy", "metal_income", "energy_income",
-		                               "", "departed", "arrived"};
+		                               "", "departed", "arrived", "won"};
 		static const char *counts[UNIT_TYPE_COUNT] = {
 			[UNIT_RAIDER] = "raiders", [UNIT_TANK] = "tanks", [UNIT_ARTILLERY] = "artillery", [UNIT_SIEGE] = "sieges",
 			[UNIT_ENGINEER] = "engineers", [UNIT_SAPPER] = "sappers", [UNIT_SCOUT] = "scouts", [UNIT_COMMANDER] = "commanders",
@@ -763,6 +763,7 @@ static void run_expect(ScriptRun *r, const ScriptAction *a, const Sim *sim)
 			break;
 		case FIELD_DEPARTED: actual = (double)f->stats.units_departed; break;
 		case FIELD_ARRIVED: actual = (double)f->stats.units_arrived; break;
+		case FIELD_WON: actual = f->winner == (int8_t)a->side.v; break;
 		case FIELD_ALIVE: break;
 		}
 	}
@@ -797,6 +798,10 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 		out[n++] = (Command){.faction = {(uint32_t)k}, .kind = COMMAND_AI_SLOTS, .amount = away};
 		r->away_sent[k] = away;
 	}
+	// A headquarters fell: the game is over, for both sides at once.
+	int winner = sim_winner_due(sim);
+	for (int k = 0; winner >= 0 && k < FACTION_COUNT && n < cap; k++)
+		out[n++] = game_over_command((FactionId){(uint32_t)k}, winner);
 	// Actions behind the current tick (a run that started late) are skipped.
 	while (r->next < s->action_count && s->actions[r->next].tick < sim->tick.v) r->next++;
 	for (; r->next < s->action_count && s->actions[r->next].tick == sim->tick.v; r->next++) {

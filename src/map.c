@@ -195,4 +195,19 @@ void map_draw(const Directory *d, int viewer, int hover, int w, int h)
 		const char *note = "(no world file: zones shown without links)";
 		DrawText(note, (w - MeasureText(note, hs)) / 2, (int)(100.0f * u), hs, MAP_DIM);
 	}
+	map_draw_result(directory_winner(d), d->ended ? d->zones[d->ended_in].name : "", w, h);
+}
+
+void map_draw_result(int winner, const char *where, int w, int h)
+{
+	if (winner < 0) return;
+	float u = unit(w, h);
+	int big = (int)(72.0f * u), small = (int)(24.0f * u), band = big + small + (int)(60.0f * u);
+	int y = (h - band) / 2;
+	DrawRectangle(0, y, w, band, (Color){0, 0, 0, 170});
+	const char *title = winner == 0 ? "Blue wins" : "Red wins";
+	DrawText(title, (w - MeasureText(title, big)) / 2, y + (int)(20.0f * u), big, side_color(winner));
+	const char *why = where[0] ? TextFormat("%s's headquarters fell in %s: the game is over", winner == 0 ? "red" : "blue", where)
+	                           : TextFormat("%s's headquarters fell: the game is over", winner == 0 ? "red" : "blue");
+	DrawText(why, (w - MeasureText(why, small)) / 2, y + big + (int)(32.0f * u), small, MAP_TEXT);
 }

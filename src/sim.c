@@ -459,6 +459,11 @@ static void contest_spots(Sim *sim)
 static void interaction_phase(Sim *sim)
 {
 	arena_reset(&sim->interaction);
+	if (sim_over(sim)) {
+		// Nothing between the sides any more: no shells land, nobody sees anew.
+		for (int t = 0; t < FACTION_COUNT; t++) sim->effects[t] = (FactionEffects){.spots = sim->factions[t].spots};
+		return;
+	}
 	contest_spots(sim);
 	for (int t = 0; t < FACTION_COUNT; t++) {
 		// Shells fired at t last tick arrive now, in firing order.
@@ -1628,6 +1633,7 @@ static void remove_dead(Faction *f, const Sim *sim)
 	for (ptrdiff_t i = u->count - 1; i >= 0; i--) {
 		if (u->hp[i] > 0.0f) continue;
 		if (u->type[i] == UNIT_COMMANDER) commander_home(f, sim, i, LEAVE_DIED);
+		if (u->type[i] == UNIT_HEADQUARTERS) f->fallen = true;
 		units_kill(u, i);
 		f->stats.units_lost++;
 	}
@@ -1764,6 +1770,17 @@ static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const 
 	arena_reset(&f->scratch);
 	f->departures = PUSH(&f->scratch, Departure, MAX_DEPARTURES);
 	f->departure_count = 0;
+	for (ptrdiff_t k = 0; k < count; k++)
+		if (commands[k].faction.v == f->id.v && commands[k].kind == COMMAND_GAME_OVER && commands[k].amount >= 0
+		    && commands[k].amount < FACTION_COUNT && f->winner < 0) {
+			// The game is over: everything stops where it is, shells in the
+			// air gone, so every copy of the zone shows the same still picture.
+			f->winner = (int8_t)commands[k].amount;
+			f->incoming.count = 0;
+			f->outbox_count = 0;
+			for (ptrdiff_t i = 0; i < f->units.count; i++) f->units.vx[i] = f->units.vz[i] = 0.0f;
+		}
+	if (f->winner >= 0) return; // as it stands, for good
 	apply_effects(f, fx, sim->tick);
 	build_view(f, &sim->terrain, sim->tick);
 	for (ptrdiff_t k = 0; k < count; k++)
@@ -1843,6 +1860,7 @@ void sim_init(Sim *sim, SimConfig config)
 		f->scratch = arena_create(scratch_names[k], (ptrdiff_t)64 << 20);
 
 		f->away = (uint8_t)((1u << config.players[k]) - 1); // until someone plays them
+		f->winner = -1;
 		for (int pl = 0; pl < MAX_PLAYERS; pl++) f->respawn_at[pl] = -1;
 		for (int pl = 0; pl < MAX_PLAYERS; pl++)
 			f->economy[pl] = (Economy){START_METAL, START_ENERGY, BASE_METAL_CAP, BASE_ENERGY_CAP, .rate = 1.0f};
@@ -1889,6 +1907,13 @@ void sim_destroy(Sim *sim)
 	for (int k = 0; k < FACTION_COUNT; k++) arena_destroy(&sim->factions[k].scratch);
 	arena_destroy(&sim->interaction);
 	arena_destroy(&sim->zone);
+}
+
+int sim_winner_due(const Sim *sim)
+{
+	for (int k = 0; k < FACTION_COUNT; k++)
+		if (sim->factions[k].fallen && sim->factions[k].winner < 0) return (int)faction_enemy((FactionId){(uint32_t)k}).v;
+	return -1;
 }
 
 void sim_step(Sim *sim, const Command *commands, ptrdiff_t count)
@@ -2009,6 +2034,8 @@ Hash faction_hash(const Faction *f)
 	h = hash_u64(h, f->spots);
 	h = hash_u32(h, f->away);
 	for (int p = 0; p < MAX_PLAYERS; p++) h = hash_u64(h, (uint64_t)f->respawn_at[p]);
+	h = hash_u32(h, f->fallen);
+	h = hash_u32(h, (uint32_t)(f->winner + 1));
 	return hash_perception(h, &f->seen);
 }
 
@@ -2106,6 +2133,8 @@ void faction_write(const Faction *f, ByteBuf *b)
 	put64(b, f->spots);
 	put8(b, f->away);
 	for (int pl = 0; pl < MAX_PLAYERS; pl++) put64(b, (uint64_t)f->respawn_at[pl]);
+	put8(b, f->fallen);
+	put8(b, (uint8_t)(f->winner + 1));
 	const Perception *seen = &f->seen;
 	uint32_t live = 0;
 	for (ptrdiff_t s = 0; s < seen->cap; s++) live += seen->live[s];
@@ -2254,6 +2283,10 @@ bool faction_read(Faction *f, ByteReader *r)
 		f->respawn_at[pl] = (int64_t)get64(r);
 		if (f->respawn_at[pl] < -1) return false;
 	}
+	uint8_t fallen = get8(r), winner = get8(r);
+	if (fallen > 1 || winner > FACTION_COUNT) return false;
+	f->fallen = fallen;
+	f->winner = (int8_t)(winner - 1);
 	Perception *seen = &f->seen;
 	memset(seen->live, 0, (size_t)seen->cap);
 	uint32_t live = get32(r);

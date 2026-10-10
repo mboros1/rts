@@ -620,14 +620,24 @@ static void bot_think_side(Bot *bot, const Sim *sim, Arena *arena, Command *out,
 		if (f->view.count == 0 && !(bot->doctrine.hunt && w->seen_age[w->here] < HUNT_RECENT)) return;
 	}
 
+	// Their headquarters, if we see it: that's the game. Everyone goes for it.
+	bool hq = false;
+	V2 hq_at = {0};
+	for (ptrdiff_t k = 0; k < f->view.count && !hq; k++)
+		if (f->seen.type[f->view.handle[k].index] == UNIT_HEADQUARTERS) {
+			hq = true;
+			hq_at = v2(f->view.px[k], f->view.pz[k]);
+		}
+
 	UnitHandle *group = nullptr;
 	ptrdiff_t in_group = 0;
 	for (ptrdiff_t i = 0; i <= u->count; i++) {
 		bool flush = in_group > 0 && (i == u->count || in_group == bot->group_size);
 		if (flush) {
 			if (*count == cap) return;
-			V2 target = v2(enemy->base.x + rng_range(&bot->rng, -40.0f, 40.0f),
-			               enemy->base.z + rng_range(&bot->rng, -120.0f, 120.0f));
+			V2 target = hq ? v2(hq_at.x + rng_range(&bot->rng, -6.0f, 6.0f), hq_at.z + rng_range(&bot->rng, -6.0f, 6.0f))
+			               : v2(enemy->base.x + rng_range(&bot->rng, -40.0f, 40.0f),
+			                    enemy->base.z + rng_range(&bot->rng, -120.0f, 120.0f));
 			out[(*count)++] = (Command){.faction = bot->faction, .kind = COMMAND_ATTACK_MOVE,
 			                             .target = target, .count = in_group, .units = group};
 			in_group = 0;

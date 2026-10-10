@@ -217,6 +217,12 @@ bool ledger_replay(Ledger *l, Str text, int32_t *bad_line)
 			long faction = strtol(fac, nullptr, 10), slot = strtol(slot_s, nullptr, 10);
 			if (faction < 0 || faction >= FACTION_COUNT || slot < 0 || slot >= MAX_PLAYERS) return false;
 			snprintf(l->player[faction][slot], ZONE_NAME, "%s", id_s);
+		} else if (!strcmp(verb, "ended")) {
+			// ended WINNER ZONE: id_s is the winner here.
+			char *zone = strtok_r(nullptr, " ", &save);
+			if (!zone || strlen(zone) >= ZONE_NAME || id >= FACTION_COUNT || l->ended) return false;
+			l->ended = (uint8_t)(id + 1);
+			snprintf(l->ended_in, ZONE_NAME, "%s", zone);
 		} else if (!strcmp(verb, "delivered")) {
 			Transfer *t = ledger_find(l, id);
 			if (!t) return false;
@@ -269,6 +275,17 @@ uint8_t ledger_join(Ledger *l, uint8_t faction, const char *name, int slots)
 	return SIDE_FULL;
 }
 
+void ledger_end(Ledger *l, uint8_t winner, const char *zone)
+{
+	ASSERT(winner < FACTION_COUNT && strlen(zone) < ZONE_NAME);
+	if (l->ended) return;
+	char line[64];
+	snprintf(line, sizeof line, "ended %u %s", winner, zone);
+	log_line(l, line);
+	l->ended = (uint8_t)(winner + 1);
+	snprintf(l->ended_in, ZONE_NAME, "%s", zone);
+}
+
 static void format_transfer(char *line, size_t size, const Transfer *t, uint64_t seq)
 {
 	char list[384];
@@ -296,6 +313,10 @@ bool ledger_compact(Ledger *l, const char *path, Arena *scratch)
 			snprintf(line, sizeof line, "player %s %d %d\n", l->player[f][k], f, k);
 			put_bytes(&b, line, (ptrdiff_t)strlen(line));
 		}
+	if (l->ended) {
+		snprintf(line, sizeof line, "ended %d %s\n", l->ended - 1, l->ended_in);
+		put_bytes(&b, line, (ptrdiff_t)strlen(line));
+	}
 	int32_t kept = 0;
 	for (int32_t k = 0; k < l->transfer_count; k++) {
 		const Transfer *t = &l->transfers[k];

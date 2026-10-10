@@ -14,7 +14,10 @@
 #     she logs out;
 #   - stopping saves every zone and the world continues where it was;
 #   - a save can be loaded back;
-#   - a clip of the journey renders, map and zones.
+#   - a clip of the journey renders, map and zones;
+#   - a headquarters falling ends the game: the coordinator logs it once,
+#     every zone stops, and the map says who won (a world whose setup puts a
+#     red army beside blue's headquarters).
 set -eu
 bin=$1; out=$2
 rm -rf "$out"; mkdir -p "$out"
@@ -90,4 +93,19 @@ $world --stop > /dev/null || fail "cannot stop at the end"
 
 "$bin/rts" clip --netlog "$out/journey.netlog" --sheet "$out/journey.png" --frames 4 --size 640x360 \
 	> "$out/clip.txt" 2>&1 || fail "the journey's clip didn't render: $(tail -2 "$out/clip.txt")"
+# The end: red's army starts at blue's headquarters; red's bot does the rest.
+{ cat "$out/three.world"; echo "setup west at 0 spawn red tank 40 at 72,256 radius 6"; } > "$out/end.world"
+world="$bin/rts world --dir $out/end"
+$world --new "$out/end.world" --headless --speed 15 > "$out/end-start.txt" || fail "cannot start the ending world"
+for i in $(seq 100); do $world --status | grep -q '^game over' && break; sleep 0.1; done
+$world --status > "$out/end-status.txt"
+grep -q '^game over: red won (blue.s headquarters fell in west)$' "$out/end-status.txt" \
+	|| fail "no end on the map: $(tail -2 "$out/end-status.txt")"
+for i in $(seq 30); do [ "$(grep -l 'the game is over' "$out"/end/live/*.out | wc -l)" -eq 3 ] && break; sleep 0.1; done
+for z in west middle east; do
+	grep -q "server $z: the game is over at tick [0-9]*: red won" "$out/end/live/$z.out" || fail "$z didn't stop"
+done
+[ "$(grep -c '^ended' "$out/end/live/coord.log")" = 1 ] || fail "the end wasn't logged once"
+$world --stop > /dev/null || fail "cannot stop the ending world"
+
 echo "world-smoke: ok (west at ${before}s, resumed at ${after}s, save/load ${later}s -> ${loaded}s)"

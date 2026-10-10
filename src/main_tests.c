@@ -688,6 +688,9 @@ static void test_ledger(void)
 	ledger_delivered(l, t0->id);
 	ledger_delivered(l, t0->id);                    // again: no second line
 	CHECK(ledger_pending(l) == 1);
+	ledger_end(l, 1, "beta");
+	ledger_end(l, 0, "alpha");                      // the first word stands: no line
+	CHECK(l->ended == 2 && !strcmp(l->ended_in, "beta"));
 	fclose(log);
 
 	// A fresh ledger from the log alone has the same transfers, legs and all.
@@ -704,7 +707,7 @@ static void test_ledger(void)
 	CHECK(ledger_depart(again, "alpha", 2, "beta", 0, &open, raiders, &(Cargo){0}) == nullptr); // remembered across a restart
 	int lines = 0;
 	for (ptrdiff_t i = 0; i < text.len; i++) lines += text.ptr[i] == '\n';
-	CHECK(lines == 3);
+	CHECK(lines == 4 && again->ended == 2 && !strcmp(again->ended_in, "beta"));
 
 	// Compacted: the pending transfer, the ids and departure numbers; nothing else.
 	CHECK(ledger_compact(again, path, &a));
@@ -713,6 +716,7 @@ static void test_ledger(void)
 	Ledger *compact = PUSH(&a, Ledger, 1);
 	CHECK(ledger_replay(compact, text, &bad));
 	CHECK(compact->transfer_count == 1 && ledger_pending(compact) == 1 && compact->next_id == 2);
+	CHECK(compact->ended == 2 && !strcmp(compact->ended_in, "beta"));
 	const Transfer *c1 = ledger_find(compact, 1);
 	CHECK(c1 && c1->leg.unpaired && c1->counts[UNIT_RAIDER] == 4);
 	CHECK(ledger_depart(compact, "alpha", 2, "beta", 0, &open, raiders, &(Cargo){0}) == nullptr); // still a repeat
@@ -723,7 +727,8 @@ static void test_ledger(void)
 	const char *broken[] = {"transfer 9 a b 7 paired 1 0 0,0 tank:1\n", "delivered 42\n",
 	                        "transfer 1 a b 0 paired 1 0 0,0 nonsense:3\n", "explode 1\n", "transfer 1 a b 0 paired\n",
 	                        "transfer 1 a b 0 sideways 1 0 0,0 tank:1\n", "transfer 1 a b 0 unpaired 1 3 0,0 tank:1\n",
-	                        "transfer 1 a b 0 paired 1 0 nowhere tank:1\n", "draw 1 0 z tank:5\n"};
+	                        "transfer 1 a b 0 paired 1 0 nowhere tank:1\n", "draw 1 0 z tank:5\n", "ended 2 west\n",
+	                        "ended 1\n", "ended 1 west\nended 0 east\n"};
 	for (int k = 0; k < (int)countof(broken); k++) {
 		Ledger *x = PUSH(&a, Ledger, 1);
 		CHECK(!ledger_replay(x, (Str){broken[k], (ptrdiff_t)strlen(broken[k])}, &bad));
@@ -752,11 +757,16 @@ static void test_fog(void)
 		                         .intel = {{.contact = k == 1, .seen_age = 40, .transporters = 1, .transporter_age = 90},
 		                                   {.seen_age = INTEL_NEVER, .transporter_age = INTEL_NEVER}}};
 	}
+	d.ended = 2; // red won; blue's headquarters fell in east
+	d.ended_in = 1;
+	d.zones[1].status.fallen = 1;
 	ByteBuf b = bytebuf_make(&a, 4096);
 	put_directory(&b, &d);
 	ByteReader r = byte_reader(b.data, b.len);
 	Directory back;
 	CHECK(get_directory(&r, &back) && r.pos == r.len);
+	CHECK(directory_winner(&back) == 1 && back.ended_in == 1 && back.zones[1].status.fallen == 1);
+	CHECK(directory_winner(&(Directory){0}) == -1);
 	CHECK(back.zones[1].status.intel[0].contact && back.zones[1].status.intel[0].transporter_age == 90);
 	CHECK(back.zones[0].status.intel[1].seen_age == INTEL_NEVER);
 
@@ -1527,6 +1537,56 @@ static void test_commanders(void)
 	sim_destroy(&sim);
 }
 
+// The game's end: a headquarters destroyed marks its side fallen; told the
+// game is over, a zone freezes for good (ticks pass, nothing changes), and
+// a client joining then gets the result with the rest.
+static void test_game_over(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.commanders = true;
+	c.bases = 3;
+	Sim sim;
+	sim_init(&sim, c);
+	CHECK(sim_winner_due(&sim) == -1 && !sim_over(&sim));
+	Units *blue = &sim.factions[0].units, *red = &sim.factions[1].units;
+	UnitHandle boss = NO_UNIT;
+	for (ptrdiff_t i = 0; i < red->count; i++)
+		if (red->type[i] == UNIT_COMMANDER) boss = units_handle(red, i);
+	for (ptrdiff_t i = 0; i < blue->count; i++)
+		if (blue->type[i] == UNIT_HEADQUARTERS) blue->hp[i] = 0.0f;
+	sim_step(&sim, nullptr, 0);
+	CHECK(sim.factions[0].fallen && !sim.factions[1].fallen && sim_winner_due(&sim) == 1 && !sim_over(&sim));
+	Command over[2] = {game_over_command((FactionId){0}, 1), game_over_command((FactionId){1}, 1)};
+	sim_step(&sim, over, 2);
+	CHECK(sim_over(&sim) && sim.factions[0].winner == 1 && sim.factions[1].winner == 1 && sim_winner_due(&sim) == -1);
+	// Frozen: an order changes nothing, nor does time, but ticks go on.
+	ptrdiff_t b = units_find(red, boss);
+	float x = red->px[b], e = sim.factions[1].economy[0].energy;
+	Hash before = faction_hash(&sim.factions[1]);
+	Command move = {.faction = {1}, .player = {0}, .kind = COMMAND_MOVE, .target = v2(x - 50.0f, red->pz[b]), .count = 1, .units = &boss};
+	int64_t tick = sim.tick.v;
+	sim_step(&sim, &move, 1);
+	for (int t = 0; t < 60; t++) sim_step(&sim, nullptr, 0);
+	CHECK(red->px[units_find(red, boss)] == x && sim.factions[1].economy[0].energy == e && sim.tick.v == tick + 61);
+	CHECK(faction_hash(&sim.factions[1]).v == before.v);
+	// A later word changes nothing.
+	Command other = game_over_command((FactionId){0}, 0);
+	sim_step(&sim, &other, 1);
+	CHECK(sim.factions[0].winner == 1);
+	// The result survives a faction snapshot.
+	Arena a = arena_create("game over", 64 << 20);
+	ByteBuf buf = bytebuf_make(&a, 32 << 20);
+	faction_write(&sim.factions[0], &buf);
+	Sim late;
+	sim_init(&late, c);
+	ByteReader r = byte_reader(buf.data, buf.len);
+	CHECK(faction_read(&late.factions[0], &r) && late.factions[0].fallen && late.factions[0].winner == 1);
+	sim_destroy(&late);
+	arena_destroy(&a);
+	sim_destroy(&sim);
+}
+
 // Players: every unit has an owner and only the owner's orders move it;
 // giving, factory output and sends name who units go to; each player
 // starts a base of their own; ownership survives a snapshot.
@@ -1671,6 +1731,7 @@ static const Test tests[] = {
 	{"menu", test_menu},
 	{"keymap", test_keymap},
 	{"commanders", test_commanders},
+	{"game-over", test_game_over},
 };
 
 // tests            run all, in order

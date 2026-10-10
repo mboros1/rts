@@ -11,11 +11,14 @@
 //   delivered ID                            DST took them in
 //   player NAME FACTION SLOT                NAME plays slot SLOT of FACTION,
 //                                           in every zone, from now on
+//   ended WINNER ZONE                       the game is over: WINNER's side won,
+//                                           the other's headquarters fell in ZONE
 //   next ID / seq ZONE N                    after compaction: the next transfer
 //                                           id, and ZONE's highest departure number
 //
 // The log is compacted at startup and every COMPACT_EVERY lines: rewritten
-// (atomically) as next, seq and player lines plus the transfers still pending.
+// (atomically) as next, seq, player and ended lines plus the transfers still
+// pending. Once the game has ended nothing more is delivered.
 //
 // A transfer is pending until delivered; while DST is down, has no
 // transporter for a paired transfer, or has no room where they'd land, it
@@ -99,6 +102,8 @@ typedef struct {
 	// Who plays each slot: a name, or "" while nobody has taken it. A name
 	// keeps its slot for good (no accounts: a name is all there is).
 	char player[FACTION_COUNT][MAX_PLAYERS][ZONE_NAME];
+	uint8_t ended;          // 0: the game goes on; else 1 + the side that won
+	char ended_in[ZONE_NAME];
 	FILE *log;              // nullptr: changes aren't recorded (tests)
 	int32_t lines;          // appended since the last compaction
 } Ledger;
@@ -114,6 +119,10 @@ void ledger_delivered(Ledger *l, uint64_t id);
 // NAME's slot on a side with `slots` players: theirs from before, else the
 // first free one (logged), else SIDE_FULL.
 uint8_t ledger_join(Ledger *l, uint8_t faction, const char *name, int slots);
+
+// The game is over: `winner` won, the other's headquarters fell in `zone`.
+// The first word stands; later ones change nothing.
+void ledger_end(Ledger *l, uint8_t winner, const char *zone);
 
 Transfer *ledger_find(Ledger *l, uint64_t id);
 

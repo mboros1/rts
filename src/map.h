@@ -11,5 +11,9 @@
 // hover: the zone under the mouse, or -1.
 void map_draw(const Directory *d, int viewer, int hover, int w, int h);
 
+// The game's end over whatever is drawn: who won (-1: nothing to draw) and
+// the zone the losing headquarters fell in ("" if unknown). map_draw draws it.
+void map_draw_result(int winner, const char *where, int w, int h);
+
 // The zone at pixel (x, y) on a map drawn at w x h, or -1.
 int map_pick(const Directory *d, float x, float y, int w, int h);

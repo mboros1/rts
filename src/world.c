@@ -96,9 +96,17 @@ bool world_parse(World *w, Str text, const char *path, char *err, ptrdiff_t err_
 			for (int k = first; k < n; k++) snprintf(spec + strlen(spec), sizeof spec - strlen(spec), "%s%s", k > first ? " " : "", tok[k]);
 			char *to = zone < 0 ? w->doctrine[side] : w->doctrine_in[zone][side];
 			snprintf(to, sizeof w->doctrine[side], "%s", spec);
+		} else if (!strcmp(tok[0], "setup") && n >= 3) {
+			// setup ZONE LINE: a script line the zone starts with (a fixture:
+			// what's there at the start; checked when the zone reads its script).
+			int zone = world_zone(w, tok[1]);
+			if (zone < 0) return world_bad(err, err_len, path, line_no, "setup ZONE LINE: a zone named before this line");
+			char *to = w->setup[zone];
+			for (int k = 2; k < n; k++) snprintf(to + strlen(to), sizeof w->setup[zone] - strlen(to), "%s%s", tok[k], k + 1 < n ? " " : "\n");
+			if (strlen(to) + 1 >= sizeof w->setup[zone]) return world_bad(err, err_len, path, line_no, "too much setup for one zone");
 		} else {
 			return world_bad(err, err_len, path, line_no,
-			                 "expected: port N | zone NAME X Y [home SIDE] | link A B | players SIDE N | doctrine ...");
+			                 "expected: port N | zone NAME X Y [home SIDE] | link A B | players SIDE N | doctrine ... | setup ZONE ...");
 		}
 	}
 	if (w->zone_count == 0) return world_bad(err, err_len, path, line_no, "no zones");
@@ -126,6 +134,7 @@ void put_zone_status(ByteBuf *b, const ZoneStatus *s)
 		put8(b, s->intel[f].transporters);
 		put32(b, s->intel[f].transporter_age);
 	}
+	put8(b, s->fallen);
 }
 
 bool get_zone_status(ByteReader *r, ZoneStatus *s)
@@ -144,7 +153,8 @@ bool get_zone_status(ByteReader *r, ZoneStatus *s)
 		if (contact > 1) return false;
 		s->intel[f].contact = contact;
 	}
-	return !r->bad && s->tick >= 0;
+	s->fallen = get8(r);
+	return !r->bad && s->tick >= 0 && s->fallen < 1u << FACTION_COUNT;
 }
 
 void put_directory(ByteBuf *b, const Directory *d)
@@ -182,6 +192,8 @@ void put_directory(ByteBuf *b, const Directory *d)
 			if (d->player[f][k][0]) put_name(b, d->player[f][k]);
 		}
 	}
+	put8(b, d->ended);
+	put8(b, d->ended_in);
 }
 
 bool get_directory(ByteReader *r, Directory *d)
@@ -233,6 +245,9 @@ bool get_directory(ByteReader *r, Directory *d)
 			if (named > 1 || (named && !get_name(r, d->player[f][k]))) return false;
 		}
 	}
+	d->ended = get8(r);
+	d->ended_in = get8(r);
+	if (d->ended > FACTION_COUNT || (d->ended && d->ended_in >= n)) return false;
 	return !r->bad;
 }
 
@@ -276,6 +291,9 @@ void directory_print(const Directory *d, FILE *out)
 			        d->player[f][k][0] && !(d->online[f] >> k & 1) ? " (away)" : "");
 	}
 	fprintf(out, "\n");
+	if (d->ended)
+		fprintf(out, "game over: %s won (%s's headquarters fell in %s)\n", d->ended == 1 ? "blue" : "red",
+		        d->ended == 1 ? "red" : "blue", d->zones[d->ended_in].name);
 }
 
 void bot_world_build(BotWorld *w, const Directory *d, int here, uint8_t f)
