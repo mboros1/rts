@@ -209,6 +209,25 @@ static void warp_away_commander(Server *s, int f, int p)
 	}
 }
 
+// A player back: their bot's standing orders end. Factories it left
+// repeating finish what's queued and stop, rather than making the bot's
+// one-offs (builders, scouts, trucks) for good while the player is busy
+// elsewhere in the world.
+static void end_bot_repeats(Server *s, int f, int p)
+{
+	const Units *u = &s->sim.factions[f].units;
+	int32_t n = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) n += unit_is_factory(u->type[i]) && u->owner[i].v == p && u->repeat[i];
+	if (n == 0 || s->queued_count == MAX_COMMANDS) return;
+	UnitHandle *h = PUSH(&s->tick, UnitHandle, n);
+	int32_t k = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (unit_is_factory(u->type[i]) && u->owner[i].v == p && u->repeat[i]) h[k++] = units_handle(u, i);
+	s->queued[s->queued_count++] = (Command){.faction = {(uint32_t)f}, .player = {(uint8_t)p}, .kind = COMMAND_SET_REPEAT,
+	                                         .count = k, .units = h};
+	printf("server %s: %s.%d's factories stop repeating (%d)\n", s->zone_name, f ? "red" : "blue", p, k);
+}
+
 static void update_presence(Server *s)
 {
 	int64_t now = s->sim.tick.v;
@@ -232,6 +251,7 @@ static void update_presence(Server *s)
 				printf("server %s: %s.%d %s\n", s->zone_name, f ? "red" : "blue", p,
 				       gone ? (s->bot_allowed[f][p] ? "is away: its bot plays" : "is away") : "is back");
 			if (gone && !was && s->sim.config.commanders) warp_away_commander(s, f, p);
+			if (!gone && was && s->bot_allowed[f][p] && s->run.presence_set) end_bot_repeats(s, f, p);
 			s->run.bots[f][p].enabled = gone && s->bot_allowed[f][p];
 		}
 		s->run.away[f] = away;

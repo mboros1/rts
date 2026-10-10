@@ -1022,6 +1022,18 @@ Done. A zone's map is part of its context, up to four times as wide.
 - **Not yet**: at a whole huge zone's zoom units are specks (models,
   Later); no world uses large or huge zones yet (a world file's choice).
 - **Formats**: replay v19, wire v16, zone state v13.
+- **Found by the large-map world soak, fixed**: red never left home (two
+  runs). Its crews were ready for an hour of game time but for builders:
+  on a big zone engineers are always walking to the next job, so 2 or 3
+  were idle where a crew takes 4. A crew ready but for builders now takes
+  working ones (idle first; one engineer stays home). And a player coming
+  back (logged in anywhere: the zone's bot stops playing them everywhere)
+  left factories repeating the bot's queues, trucks included: 144 metal
+  trucks at red's home. Now their factories stop repeating when they're
+  back. Both soaks then passed (large: red held centre and north;
+  standard: red reached centre, north and south, 905 units crossed). Left
+  for 21c: soak sessions' bots play the default doctrine, not the zone's
+  (doctrines aren't sent to clients).
 
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client

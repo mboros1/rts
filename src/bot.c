@@ -424,6 +424,19 @@ static int32_t pick_idle(const Bot *bot, const Units *u, UnitType type, int32_t 
 	return at;
 }
 
+// Up to n of the bot's builders of a type that are building (not idle,
+// not leaving), appended to h: a crew ready but for builders takes them from
+// their work.
+static int32_t pick_working(const Bot *bot, const Units *u, UnitType type, int32_t n, UnitHandle *h, int32_t at)
+{
+	for (ptrdiff_t i = 0; i < u->count && n > 0; i++) {
+		if (!mine(bot, u, i) || u->type[i] != type || u->order[i] != ORDER_BUILD) continue;
+		h[at++] = units_handle(u, i);
+		n--;
+	}
+	return at;
+}
+
 static void bot_send(const Bot *bot, Arena *arena, Command *out, ptrdiff_t *count, ptrdiff_t cap, int zone, UnitHandle *h, int32_t n)
 {
 	(void)arena;
@@ -443,7 +456,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	const Economy *e = &me->economy[bot->player.v];
 	int here = w->here;
 	bool sending = false;
-	int32_t idle_army = 0, idle_builders = 0, idle_crew = 0, idle_raiders = 0, scouts = 0, turrets = 0;
+	int32_t idle_army = 0, idle_builders = 0, idle_crew = 0, working_crew = 0, idle_raiders = 0, scouts = 0, turrets = 0;
 	int32_t transporters = 0, factories = 0, idle_metal_trucks = 0, idle_energy_trucks = 0;
 	int32_t vaults = 0;
 	ptrdiff_t free_scout = -1;
@@ -454,6 +467,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		idle_army += idle && unit_is_combat(u->type[i]);
 		idle_builders += idle && unit_is_builder(u->type[i]);
 		idle_crew += idle && u->type[i] == d->crew_builder;
+		working_crew += u->type[i] == d->crew_builder && u->order[i] == ORDER_BUILD;
 		idle_raiders += idle && u->type[i] == UNIT_RAIDER;
 		scouts += u->type[i] == UNIT_SCOUT;
 		turrets += u->type[i] == UNIT_TURRET && u->seeded[i];
@@ -514,7 +528,10 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	// at least).
 	int32_t crew = d->crew_builders + d->crew_escort + 2;
 	float crew_energy = UNPAIRED_ENERGY + UNPAIRED_ENERGY_PER * (float)crew;
-	int32_t spare_builders = idle_crew - (d->crew_builder == UNIT_ENGINEER ? 1 : 0); // an engineer stays home
+	// Builders for it: idle ones, and when there are too few of those, ones
+	// at work (on a big zone there's always more to build, and the walk to
+	// it is long, so few are ever idle); one engineer stays home.
+	int32_t spare_builders = idle_crew + working_crew - (d->crew_builder == UNIT_ENGINEER ? 1 : 0);
 	bool trucks = idle_metal_trucks > 0 && idle_energy_trucks > 0;
 	if (spare_builders >= d->crew_builders && trucks && e->energy >= crew_energy
 	    && e->metal >= unit_defs[UNIT_TRANSPORTER].metal_cost * sim->config.context.cost) {
@@ -527,6 +544,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		if (target >= 0) {
 			UnitHandle *h = PUSH(arena, UnitHandle, crew);
 			int32_t n = pick_idle(bot, u, d->crew_builder, d->crew_builders, h, 0);
+			n = pick_working(bot, u, d->crew_builder, d->crew_builders - n, h, n);
 			n = pick_idle(bot, u, UNIT_RAIDER, d->crew_escort, h, n);
 			n = pick_idle(bot, u, UNIT_METAL_TRUCK, 1, h, n);
 			n = pick_idle(bot, u, UNIT_ENERGY_TRUCK, 1, h, n);
