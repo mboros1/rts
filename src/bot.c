@@ -308,7 +308,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		if (k < 0) continue;
 		taken |= (uint64_t)1 << k;
 		if (deepening) deep |= (uint64_t)1 << k;
-		if (u->type[i] == UNIT_EXTRACTOR && u->progress[i] >= 1.0f) shallow |= (uint64_t)1 << k;
+		if (u->type[i] == UNIT_EXTRACTOR && u->progress[i] >= 1.0f && mine(bot, u, i)) shallow |= (uint64_t)1 << k; // ours only
 	}
 	// In a world, a zone with no transporter of ours yet: the builders are
 	// for that (bot_strategy), before anything else; except at home before

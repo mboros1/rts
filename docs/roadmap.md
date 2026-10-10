@@ -959,7 +959,7 @@ Done. A second tier.
   howitzers (artillery reaching 105, heavier shells, no blind spot) and
   advanced engineers (two and a half times an engineer's build power). Only
   an advanced engineer builds an advanced extractor: on a metal spot, over
-  our extractor there, which it replaces when done (8 metal a second to 3;
+  its own player's extractor there (never a teammate's), which it replaces when done (8 metal a second to 3;
   the old one is taken down, not lost). Each type has a tier
   (`unit_tier`); a factory makes only its tier (`factory_makes`), a builder
   builds what its tier allows (`builder_builds`, which also keeps
@@ -1020,11 +1020,25 @@ restart).
 
 ## Later
 
+- Models: units as text files of shapes (boxes, cylinders, cones, wedges)
+  with colour roles (body, team colour, trim, glow), built into meshes at
+  load; `rts model NAME --sheet`, a multi-angle sheet drawn by the game's
+  renderer, with a row at play zoom beside the units it must be told apart
+  from (T2 reads as T1 today). Effects (muzzle flash, smoke, tracks) are the
+  renderer's, from points a model marks. Richer assets later: Blender driven
+  by script, exporting glTF, checked on the same sheet.
 - Sources that vary: wind (BAR's minimum and maximum), tides; a zone's
   yield of a source as a range the zone's seed varies over time (spike 19
   keeps them multipliers). With the units that use them: wind, tidal,
   solar, geothermal generators. A campaign of planets (Earth, the Moon,
   Mars, the belt, Titan) is the kind of world this is for.
+- A polish and balance spike (next), rolling up what T2 left open: exact
+  unit specs; T2 entrenching (a heavy tank digs in as the generic turret,
+  a third of its strength; a howitzer loses its range); the send button
+  saying when T2 will stay behind (unpaired sends drop it silently); bots
+  that contest held zones (fronts freeze after the land grab: the hour
+  soak, spike 20's world) and move T2 forward; and models that read at
+  play zoom (above).
 - A balance spike: energy is plentiful everywhere and metal scarce (spike
   16b: fronts float full energy, metal seldom overflows), so shipping energy
   means little. With it, weapons costing energy per shot, from the firing

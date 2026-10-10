@@ -1345,6 +1345,19 @@ typedef struct {
 	float work;
 } Job;
 
+// No one else's extractor on the spot at `at`: a player deepens only their
+// own (deepening replaces it, and its income would change hands).
+static bool own_spot(const Faction *f, const Sim *sim, PlayerSlot owner, V2 at)
+{
+	const Units *u = &f->units;
+	int32_t k = spot_at(&sim->spots, at);
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->type[i] == UNIT_EXTRACTOR && !player_eq(u->owner[i], owner) && k >= 0
+		    && spot_at(&sim->spots, v2(u->px[i], u->pz[i])) == k)
+			return false;
+	return true;
+}
+
 // An engineer at its site starts the structure, or helps with one already
 // started there. Returns the structure's dense index, or -1.
 static ptrdiff_t engineer_site(Faction *f, const Sim *sim, ptrdiff_t e)
@@ -1367,7 +1380,8 @@ static ptrdiff_t engineer_site(Faction *f, const Sim *sim, ptrdiff_t e)
 			return i;
 		}
 	}
-	if (u->count == u->cap || !placement_ok(sim, f->id, type, site)) {
+	if (u->count == u->cap || !placement_ok(sim, f->id, type, site)
+	    || (type == UNIT_ADVANCED_EXTRACTOR && !own_spot(f, sim, u->owner[e], site))) {
 		u->order[e] = ORDER_IDLE; // nothing to do here: report back idle
 		return -1;
 	}
@@ -1699,22 +1713,22 @@ static void remove_dead(Faction *f, const Sim *sim)
 	}
 }
 
-// An advanced extractor done replaces our extractor on its spot: that one
-// is taken down (not lost: it's the same mine, deeper).
+// An advanced extractor done replaces its owner's extractor on its spot:
+// that one is taken down (not lost: it's the same mine, deeper).
 static void replace_extractors(Faction *f, const Sim *sim)
 {
 	Units *u = &f->units;
-	uint64_t deep = 0;
+	uint64_t deep[MAX_PLAYERS] = {0}, any = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
-		if (u->type[i] != UNIT_ADVANCED_EXTRACTOR || u->progress[i] < 1.0f) continue;
+		if (u->type[i] != UNIT_ADVANCED_EXTRACTOR || u->progress[i] < 1.0f || u->owner[i].v >= MAX_PLAYERS) continue;
 		int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
-		if (k >= 0) deep |= (uint64_t)1 << k;
+		if (k >= 0) deep[u->owner[i].v] |= (uint64_t)1 << k, any |= (uint64_t)1 << k;
 	}
-	if (!deep) return;
+	if (!any) return;
 	for (ptrdiff_t i = u->count - 1; i >= 0; i--) {
-		if (u->type[i] != UNIT_EXTRACTOR) continue;
+		if (u->type[i] != UNIT_EXTRACTOR || u->owner[i].v >= MAX_PLAYERS) continue;
 		int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
-		if (k >= 0 && (deep >> k & 1)) units_kill(u, i);
+		if (k >= 0 && (deep[u->owner[i].v] >> k & 1)) units_kill(u, i);
 	}
 }
 

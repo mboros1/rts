@@ -1723,6 +1723,23 @@ static void test_t2(void)
 	CHECK(heavy == 1 && deep == 1 && shallow == 0);
 	CHECK(f->economy[0].metal_income > before + 4.0f);
 	CHECK(f->stats.units_lost == 0); // replaced, not lost
+	// A teammate's extractor isn't ours to deepen: the order comes to nothing.
+	sim.config.players[0] = 2;
+	V2 other = sim.spots.at[1];
+	Command theirs[] = {
+		{.faction = {0}, .player = {1}, .kind = COMMAND_SPAWN, .unit_type = UNIT_EXTRACTOR, .amount = 1, .target = other},
+	};
+	sim_step(&sim, theirs, 1);
+	Command take = {.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_ADVANCED_EXTRACTOR, .target = other, .count = 1, .units = &adv};
+	sim_step(&sim, &take, 1);
+	for (int t = 0; t < 1500; t++) sim_step(&sim, nullptr, 0);
+	int theirs_left = 0, deep_there = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		bool there = spot_at(&sim.spots, v2(u->px[i], u->pz[i])) == 1;
+		theirs_left += there && u->type[i] == UNIT_EXTRACTOR && u->owner[i].v == 1;
+		deep_there += there && u->type[i] == UNIT_ADVANCED_EXTRACTOR;
+	}
+	CHECK(theirs_left == 1 && deep_there == 0);
 	// No pioneering in T2.
 	CHECK(unpaired_can_send(UNIT_RAIDER) && unpaired_can_send(UNIT_ENGINEER));
 	CHECK(!unpaired_can_send(UNIT_HEAVY_TANK) && !unpaired_can_send(UNIT_HOWITZER) && !unpaired_can_send(UNIT_ADVANCED_ENGINEER));
