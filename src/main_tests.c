@@ -1342,9 +1342,11 @@ static void test_menu(void)
 	CHECK(s.total == 2 && s.builders && menu_build_open(&s));
 	BuildMenu b = menu_build(&s, 0);
 	CHECK(b.builders && b.tab[0].active && b.tab[0].enabled && !b.tab[1].enabled); // combat: nothing yet
-	CHECK(b.item[0].shown && b.item[0].type == UNIT_EXTRACTOR && b.item[1].type == UNIT_GENERATOR && !b.item[2].shown);
+	CHECK(b.item[0].shown && b.item[0].type == UNIT_EXTRACTOR && b.item[1].type == UNIT_GENERATOR && !b.item[3].shown);
+	// T2's: shown, but only an advanced engineer builds the advanced extractor.
+	CHECK(b.item[2].type == UNIT_ADVANCED_EXTRACTOR && !b.item[2].enabled && b.item[0].enabled);
 	b = menu_build(&s, 3);
-	CHECK(b.tab[3].active && b.item[0].type == UNIT_FACTORY);
+	CHECK(b.tab[3].active && b.item[0].type == UNIT_FACTORY && b.item[1].type == UNIT_ADVANCED_FACTORY && b.item[1].enabled);
 	// A factory: pages, and what's queued.
 	Command q = {.faction = {0}, .kind = COMMAND_PRODUCE, .count = 1, .units = &factory, .unit_type = UNIT_TANK, .amount = 3};
 	sim_step(&sim, &q, 1);
@@ -1654,6 +1656,79 @@ static void test_context(void)
 	arena_destroy(&ar);
 }
 
+// T2: any builder puts up an advanced factory, which makes only T2 (and a
+// factory only T1); only an advanced engineer builds an advanced extractor,
+// over our extractor, which it replaces when done, earning more; T2 can't
+// pioneer (unpaired sends).
+static void test_t2(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.bases = 1;
+	Sim sim;
+	sim_init(&sim, c);
+	Faction *f = &sim.factions[0];
+	Units *u = &f->units;
+	f->economy[0].metal = f->economy[0].metal_cap = 1e6f; // not what this is about
+	f->economy[0].energy = f->economy[0].energy_cap = 1e7f;
+	V2 spot = sim.spots.at[0];
+	Command setup[] = {
+		{.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_EXTRACTOR, .amount = 1, .target = spot},
+		{.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_ADVANCED_ENGINEER, .amount = 1, .target = v2_add(spot, v2(5.0f, 0.0f))},
+		{.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_ADVANCED_FACTORY, .amount = 1, .target = v2(90.0f, 330.0f)},
+	};
+	sim_step(&sim, setup, countof(setup));
+	sim_step(&sim, nullptr, 0);
+	UnitHandle eng = NO_UNIT, adv = NO_UNIT, plant = NO_UNIT, t1 = NO_UNIT;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] == UNIT_ENGINEER && unit_handle_eq(eng, NO_UNIT)) eng = units_handle(u, i);
+		if (u->type[i] == UNIT_ADVANCED_ENGINEER) adv = units_handle(u, i);
+		if (u->type[i] == UNIT_ADVANCED_FACTORY) plant = units_handle(u, i);
+		if (u->type[i] == UNIT_FACTORY) t1 = units_handle(u, i);
+	}
+	CHECK(units_find(u, adv) >= 0 && units_find(u, plant) >= 0 && units_find(u, t1) >= 0);
+	CHECK(builder_builds(UNIT_ENGINEER, UNIT_ADVANCED_FACTORY) && builder_builds(UNIT_COMMANDER, UNIT_ADVANCED_FACTORY));
+	CHECK(!builder_builds(UNIT_ENGINEER, UNIT_ADVANCED_EXTRACTOR) && builder_builds(UNIT_ADVANCED_ENGINEER, UNIT_ADVANCED_EXTRACTOR));
+	CHECK(!builder_builds(UNIT_ENGINEER, UNIT_HEADQUARTERS) && !builder_builds(UNIT_ENGINEER, UNIT_TURRET));
+	CHECK(placement_ok(&sim, (FactionId){0}, UNIT_ADVANCED_EXTRACTOR, spot) && !placement_ok(&sim, (FactionId){0}, UNIT_EXTRACTOR, spot));
+
+	// An engineer can't take the order; the advanced engineer can.
+	Command no = {.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_ADVANCED_EXTRACTOR, .target = spot, .count = 1, .units = &eng};
+	sim_step(&sim, &no, 1);
+	CHECK(u->order[units_find(u, eng)] == ORDER_IDLE);
+	// Factories: each its own tier.
+	Command wrong[] = {
+		{.faction = {0}, .kind = COMMAND_PRODUCE, .unit_type = UNIT_HEAVY_TANK, .amount = 1, .count = 1, .units = &t1},
+		{.faction = {0}, .kind = COMMAND_PRODUCE, .unit_type = UNIT_RAIDER, .amount = 1, .count = 1, .units = &plant},
+	};
+	sim_step(&sim, wrong, 2);
+	CHECK(u->queue_len[units_find(u, t1)] == 0 && u->queue_len[units_find(u, plant)] == 0);
+	Command right[] = {
+		{.faction = {0}, .kind = COMMAND_PRODUCE, .unit_type = UNIT_HEAVY_TANK, .amount = 1, .count = 1, .units = &plant},
+		{.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_ADVANCED_EXTRACTOR, .target = spot, .count = 1, .units = &adv},
+	};
+	sim_step(&sim, right, 2);
+	CHECK(u->queue_len[units_find(u, plant)] == 1);
+	float before = 0.0f;
+	for (int t = 0; t < 3000; t++) {
+		sim_step(&sim, nullptr, 0);
+		if (t == 5) before = f->economy[0].metal_income;
+	}
+	int heavy = 0, deep = 0, shallow = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		heavy += u->type[i] == UNIT_HEAVY_TANK;
+		deep += u->type[i] == UNIT_ADVANCED_EXTRACTOR && u->progress[i] >= 1.0f;
+		shallow += u->type[i] == UNIT_EXTRACTOR;
+	}
+	CHECK(heavy == 1 && deep == 1 && shallow == 0);
+	CHECK(f->economy[0].metal_income > before + 4.0f);
+	CHECK(f->stats.units_lost == 0); // replaced, not lost
+	// No pioneering in T2.
+	CHECK(unpaired_can_send(UNIT_RAIDER) && unpaired_can_send(UNIT_ENGINEER));
+	CHECK(!unpaired_can_send(UNIT_HEAVY_TANK) && !unpaired_can_send(UNIT_HOWITZER) && !unpaired_can_send(UNIT_ADVANCED_ENGINEER));
+	sim_destroy(&sim);
+}
+
 // Players: every unit has an owner and only the owner's orders move it;
 // giving, factory output and sends name who units go to; each player
 // starts a base of their own; ownership survives a snapshot.
@@ -1800,6 +1875,7 @@ static const Test tests[] = {
 	{"commanders", test_commanders},
 	{"game-over", test_game_over},
 	{"context", test_context},
+	{"t2", test_t2},
 };
 
 // tests            run all, in order

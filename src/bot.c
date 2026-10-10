@@ -3,17 +3,17 @@
 // ---------------------------------------------------------------- doctrines
 
 static const Doctrine presets[] = {
-	{.name = "balanced", .mix = {2, 1, 1, 0}, .army_cap = 300, .garrison = 10, .send_min = 12, .assault_army = 40,
+	{.name = "balanced", .mix = {2, 1, 1, 0, 1, 1}, .army_cap = 300, .garrison = 10, .send_min = 12, .assault_army = 40,
 	 .crew_builder = UNIT_ENGINEER, .crew_builders = 4, .crew_escort = 4, .scouts = 2, .transporters = 1, .hunt = true},
-	{.name = "rush", .mix = {4, 1, 0, 0}, .army_cap = 180, .garrison = 5, .send_min = 8, .assault_army = 20,
+	{.name = "rush", .mix = {4, 1, 0, 0, 2, 0}, .army_cap = 180, .garrison = 5, .send_min = 8, .assault_army = 20,
 	 .crew_builder = UNIT_SAPPER, .crew_builders = 2, .crew_escort = 6, .scouts = 1, .transporters = 1, .hunt = true},
-	{.name = "turtle", .mix = {0, 2, 2, 1}, .army_cap = 400, .garrison = 40, .send_min = 30, .assault_army = 150,
+	{.name = "turtle", .mix = {0, 2, 2, 1, 1, 2}, .army_cap = 400, .garrison = 40, .send_min = 30, .assault_army = 150,
 	 .crew_builder = UNIT_ENGINEER, .crew_builders = 4, .crew_escort = 4, .scouts = 2, .transporters = 1,
 	 .entrench = true},
-	{.name = "raider", .mix = {5, 0, 0, 0}, .army_cap = 250, .garrison = 10, .send_min = 10, .assault_army = 30,
+	{.name = "raider", .mix = {5, 0, 0, 0, 1, 0}, .army_cap = 250, .garrison = 10, .send_min = 10, .assault_army = 30,
 	 .crew_builder = UNIT_SAPPER, .crew_builders = 2, .crew_escort = 6, .scouts = 3, .transporters = 3, .raids = true,
 	 .hunt = true},
-	{.name = "siege", .mix = {0, 2, 1, 2}, .army_cap = 300, .garrison = 15, .send_min = 20, .assault_army = 80,
+	{.name = "siege", .mix = {0, 2, 1, 2, 1, 2}, .army_cap = 300, .garrison = 15, .send_min = 20, .assault_army = 80,
 	 .crew_builder = UNIT_SAPPER, .crew_builders = 4, .crew_escort = 4, .scouts = 2, .transporters = 1, .hunt = true},
 };
 
@@ -76,9 +76,11 @@ bool doctrine_parse(Doctrine *d, const char *spec, char *err, size_t err_len)
 		}
 		if (!done) return bad_doctrine(err, err_len, "no such field", key);
 	}
-	int32_t round = 0;
-	for (int i = 0; i < COMBAT_TYPE_COUNT; i++) round += d->mix[i];
-	if (round == 0 || round > 5) return bad_doctrine(err, err_len, "the factory cycle is 1 to 5 units a round", spec);
+	// A cycle per tier: T1's from factories, T2's from advanced ones.
+	int32_t round[3] = {0};
+	for (int i = 0; i < COMBAT_TYPE_COUNT; i++) round[unit_tier((UnitType)i)] += d->mix[i];
+	if (round[1] == 0 || round[1] > 5 || round[2] > 5)
+		return bad_doctrine(err, err_len, "the factory cycle is 1 to 5 T1 units a round, and 0 to 5 T2", spec);
 	if (d->transporters < 1 || d->crew_builders < 1 || d->crew_builders + d->crew_escort > UNPAIRED_BATCH - 2)
 		return bad_doctrine(err, err_len, "transporters and crew builders at least 1, builders and escort at most 8", spec);
 	return true;
@@ -191,11 +193,13 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	const Economy *e = &plan;
 	const Doctrine *d = &bot->doctrine;
 	int engineers = 0, factories = 0, army = 0, scouts = 0, sappers = 0, metal_trucks = 0, energy_trucks = 0;
-	int generators = 0, extractors = 0;
+	int generators = 0, extractors = 0, advanced_factories = 0, advanced_engineers = 0, t2_army = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (!mine(bot, u, i)) continue;
 		generators += u->type[i] == UNIT_GENERATOR;
-		extractors += u->type[i] == UNIT_EXTRACTOR;
+		extractors += unit_is_extractor(u->type[i]);
+		advanced_factories += u->type[i] == UNIT_ADVANCED_FACTORY;
+		advanced_engineers += u->type[i] == UNIT_ADVANCED_ENGINEER;
 		metal_trucks += u->type[i] == UNIT_METAL_TRUCK && u->order[i] != ORDER_SEND;
 		energy_trucks += u->type[i] == UNIT_ENERGY_TRUCK && u->order[i] != ORDER_SEND;
 		engineers += u->type[i] == UNIT_ENGINEER;
@@ -203,6 +207,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		scouts += u->type[i] == UNIT_SCOUT;
 		factories += u->type[i] == UNIT_FACTORY;
 		army += unit_is_combat(u->type[i]);
+		t2_army += unit_is_combat(u->type[i]) && unit_tier(u->type[i]) == 2;
 	}
 	int want_engineers = 3 + (int)(e->metal_income / 6.0f);
 	if (want_engineers > 8) want_engineers = 8;
@@ -217,6 +222,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	bool opening = e->metal_income < 12.0f && free_metal;
 	int32_t amount[UNIT_TYPE_COUNT] = {0};
 	amount[UNIT_ENGINEER] = engineers < want_engineers;
+	amount[UNIT_ADVANCED_ENGINEER] = advanced_engineers < 2; // from an advanced factory, if there is one
 	amount[UNIT_SCOUT] = bot->world && scouts < d->scouts;
 	amount[UNIT_SAPPER] = bot->world && d->crew_builder == UNIT_SAPPER && sappers < d->crew_builders;
 	// A resource's base storage nearly full: trucks of it, to ship loads to
@@ -228,22 +234,36 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	// its army away would otherwise make one forever.
 	int32_t everywhere = 0;
 	for (int z = 0; bot->world && z < bot->world->count; z++) everywhere += bot->world->mine[z];
+	// With an advanced factory, the army is T2's (if the doctrine has a T2
+	// cycle): T1 factories go on making builders, scouts and trucks.
+	int army_tier = advanced_factories > 0 ? 2 : 1;
+	bool any_t2 = false;
+	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) any_t2 = any_t2 || (unit_tier((UnitType)k) == 2 && d->mix[k] > 0);
+	if (!any_t2) army_tier = 1;
 	if (!opening && army < d->army_cap && everywhere < 4 * d->army_cap)
-		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) amount[k] = d->mix[k];
+		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) amount[k] = unit_tier((UnitType)k) == army_tier ? d->mix[k] : 0;
+	// T2 has a share of its own (up to half the cap here): an army of T1
+	// already here, or a big one elsewhere, doesn't stop the upgrade; what's
+	// sent forward is made again (home pumps out the surplus).
+	if (army_tier == 2 && t2_army < d->army_cap / 2)
+		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) amount[k] = unit_tier((UnitType)k) == 2 ? d->mix[k] : 0;
 	uint32_t want = 0;
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) want |= (uint32_t)(amount[k] > 0) << k;
 	bool trucks_asked = false; // trucks from one factory only: each would make one
 	uint32_t truck_types = 1u << UNIT_METAL_TRUCK | 1u << UNIT_ENERGY_TRUCK;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
-		if (!mine(bot, u, i) || u->type[i] != UNIT_FACTORY || u->progress[i] < 1.0f) continue;
+		if (!mine(bot, u, i) || !unit_is_factory(u->type[i]) || u->progress[i] < 1.0f) continue;
+		// What this factory can make: its tier's.
+		uint32_t makes = 0;
+		for (int k = 0; k < UNIT_TYPE_COUNT; k++) makes |= (uint32_t)factory_makes(u->type[i], (UnitType)k) << k;
 		// A factory making units for a teammate makes them an army: what we
 		// need ourselves comes from our other factories.
 		bool for_us = player_eq(u->output[i], bot->player);
 		uint32_t army_types = 0;
 		for (int k = 0; k < COMBAT_TYPE_COUNT; k++) army_types |= (uint32_t)(d->mix[k] > 0) << k;
-		bool trucks_here = for_us && !trucks_asked && (want & truck_types);
+		bool trucks_here = for_us && !trucks_asked && (want & truck_types & makes);
 		trucks_asked = trucks_asked || trucks_here;
-		uint32_t wanted = for_us ? (trucks_here ? want : want & ~truck_types) : army_types;
+		uint32_t wanted = (for_us ? (trucks_here ? want : want & ~truck_types) : army_types) & makes;
 		uint32_t has = 0;
 		for (int q = 0; q < u->queue_len[i]; q++) has |= 1u << (u->queue[i] >> (8 * q) & 0xff);
 		if (has == wanted) continue; // already making what we want
@@ -253,8 +273,9 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		c.amount = 0; // clear, then queue the cycle
 		emit(out, count, cap, c);
 		// Builders and eyes first, then the army.
-		const UnitType order[] = {UNIT_ENGINEER, UNIT_SAPPER, UNIT_SCOUT, UNIT_METAL_TRUCK, UNIT_ENERGY_TRUCK, UNIT_RAIDER,
-		                          UNIT_TANK, UNIT_ARTILLERY, UNIT_SIEGE};
+		const UnitType order[] = {UNIT_ENGINEER, UNIT_ADVANCED_ENGINEER, UNIT_SAPPER, UNIT_SCOUT, UNIT_METAL_TRUCK,
+		                          UNIT_ENERGY_TRUCK, UNIT_RAIDER, UNIT_TANK, UNIT_ARTILLERY, UNIT_SIEGE, UNIT_HEAVY_TANK,
+		                          UNIT_HOWITZER};
 		for (int k = 0; k < (int)countof(order); k++) {
 			int32_t n = for_us ? amount[order[k]] : unit_is_combat(order[k]) ? d->mix[order[k]] : 0;
 			if (!(wanted >> order[k] & 1)) n = 0;
@@ -267,18 +288,27 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 
 	// Spots we hold or stand on or are walking to, and sites we're walking to:
 	// teammates' too, so two players never race for one.
-	uint64_t taken = me->spots;
+	// Likewise spots being deepened (an advanced extractor there or on its
+	// way), and those with a finished extractor of ours that could be.
+	uint64_t taken = me->spots, deep = 0, shallow = 0;
 	Promised promised = {0};
+	bool advanced_factory_coming = false;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		V2 at = v2(u->px[i], u->pz[i]);
-		if (u->type[i] == UNIT_ENGINEER && u->order[i] == ORDER_BUILD) {
+		bool deepening = u->type[i] == UNIT_ADVANCED_EXTRACTOR;
+		if (unit_is_builder(u->type[i]) && u->order[i] == ORDER_BUILD) {
 			at = v2(u->tx[i], u->tz[i]);
 			promise(&promised, u->build_type[i], at);
-		} else if (u->type[i] != UNIT_EXTRACTOR) {
+			deepening = u->build_type[i] == UNIT_ADVANCED_EXTRACTOR;
+			advanced_factory_coming = advanced_factory_coming || u->build_type[i] == UNIT_ADVANCED_FACTORY;
+		} else if (!unit_is_extractor(u->type[i])) {
 			continue;
 		}
 		int32_t k = spot_at(&sim->spots, at);
-		if (k >= 0) taken |= (uint64_t)1 << k;
+		if (k < 0) continue;
+		taken |= (uint64_t)1 << k;
+		if (deepening) deep |= (uint64_t)1 << k;
+		if (u->type[i] == UNIT_EXTRACTOR && u->progress[i] >= 1.0f) shallow |= (uint64_t)1 << k;
 	}
 	// In a world, a zone with no transporter of ours yet: the builders are
 	// for that (bot_strategy), before anything else; except at home before
@@ -290,11 +320,36 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	if (bot->world && !own_transporter(bot, u, false) && !factory_first && !power_first) return;
 	int want_factories = 1 + (int)(e->metal_income / 10.0f);
 	if (want_factories > 4) want_factories = 4;
+	// T2: at home, once its economy is established (factories, and the metal
+	// to run them), one advanced factory.
+	bool t2 = (!bot->world || bot->world->home[bot->world->here]) && factories >= 3 && e->metal_income >= 20.0f
+	       && advanced_factories == 0 && !advanced_factory_coming;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		// Engineers, and the commander: it builds the start (and never leaves, here or anywhere: 18b).
-		bool builds = u->type[i] == UNIT_ENGINEER || u->type[i] == UNIT_COMMANDER;
+		bool builds = unit_is_builder(u->type[i]) && u->type[i] != UNIT_SAPPER;
 		if (!mine(bot, u, i) || !builds || u->order[i] != ORDER_IDLE) continue;
 		V2 p = v2(u->px[i], u->pz[i]);
+		if (u->type[i] == UNIT_ADVANCED_ENGINEER) {
+			// Deepen the nearest of our extractors not deepened yet.
+			int32_t best_k = -1;
+			float best_d = 1e30f;
+			for (int32_t k = 0; k < sim->spots.count; k++) {
+				if (!(shallow >> k & 1) || (deep >> k & 1)) continue;
+				float d2 = v2_len2(v2_sub(sim->spots.at[k], p));
+				if (d2 < best_d && placement_ok(sim, f, UNIT_ADVANCED_EXTRACTOR, sim->spots.at[k])) {
+					best_d = d2;
+					best_k = k;
+				}
+			}
+			if (best_k >= 0 && e->energy > 1000.0f) {
+				deep |= (uint64_t)1 << best_k;
+				UnitHandle *h = PUSH(arena, UnitHandle, 1);
+				*h = units_handle(u, i);
+				emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_BUILD, .target = sim->spots.at[best_k],
+				                                .count = 1, .units = h, .unit_type = UNIT_ADVANCED_EXTRACTOR});
+				continue;
+			}
+		}
 		// The nearest free metal spot, and whether it's within reach of home.
 		int32_t spot = -1;
 		float best = 1e30f;
@@ -316,6 +371,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		// then more factories or power, and far metal last.
 		UnitType type;
 		if (power_short || power_first) type = UNIT_GENERATOR;
+		else if (t2 && e->metal > 400.0f) type = UNIT_ADVANCED_FACTORY, t2 = false;
 		else if (rich) type = UNIT_FACTORY;
 		else if (near) type = UNIT_EXTRACTOR;
 		else if (factories < want_factories && e->metal > 250.0f) type = UNIT_FACTORY;

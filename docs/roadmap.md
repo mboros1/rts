@@ -57,6 +57,7 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 18b | Bots with commanders | Bots open and play as players now do | The commander-only opening; bots keep their commanders useful and alive, and warp home |
 | 18c | Winning | A game ends | Destroying a side's headquarters ends the game |
 | 19 | Zone contexts | Zones differ | Each zone has its economy's rules and its environment (what each income source gives), set like doctrines per world and zone; the standard context is the sim as it was |
+| 20 | T2 | A second tier | Any builder puts up an advanced factory; it makes heavy tanks, howitzers and advanced engineers, which deepen extractors; T2 can't pioneer |
 
 Then the UI spikes: the strategic map as the logistics console with pings
 and chat, minimap, control groups and idle builders, and a team playtest.
@@ -949,6 +950,42 @@ Done. Each zone has a context: its economy's rules and its environment.
   24: north rich and abundant beside south lean (costs x2) and barren (x0.3),
   at the same moments: 203 blue army units north against 24 south.
 
+## Spike 20 results (2026-10-09)
+
+Done. A second tier.
+
+- **The units**: an advanced factory (any builder puts one up: 1200 metal,
+  9000 energy) makes heavy tanks (four tanks' armour, more punch, slow),
+  howitzers (artillery reaching 105, heavier shells, no blind spot) and
+  advanced engineers (two and a half times an engineer's build power). Only
+  an advanced engineer builds an advanced extractor: on a metal spot, over
+  our extractor there, which it replaces when done (8 metal a second to 3;
+  the old one is taken down, not lost). Each type has a tier
+  (`unit_tier`); a factory makes only its tier (`factory_makes`), a builder
+  builds what its tier allows (`builder_builds`, which also keeps
+  headquarters, turrets and vaults out of build orders).
+- **T2 can't pioneer**: unpaired sends take the first tier only; T2 goes
+  where a transporter is.
+- **Bots**: at home, once the economy is established (three factories, 20
+  metal a second), one advanced factory; it keeps two advanced engineers,
+  which deepen our extractors; then the army is T2's (the doctrine's T2
+  cycle: every preset has one), with a share of its own (half the cap
+  here) so a home already full of T1 still upgrades, and what's sent
+  forward is made again.
+- **Controls**: the build grid has the advanced factory (Build) and the
+  advanced extractor (Economy, greyed for T1 builders); an advanced
+  factory's grid has its own Army page.
+- **Evidence**: `test_t2` (who builds and makes what, the deepening and its
+  income, nothing lost, no T2 pioneering); the menu test. Demo 25: a bot on
+  a generous economy grows into T2 (an advanced factory by 3 minutes; by 6,
+  15 extractors deep, 8 heavy tanks, 7 howitzers). In the team world at 20x
+  for 21 minutes, both homes went T2 (all 24 extractors deep, 38 heavy
+  tanks and 36 howitzers at blue's) and red's T2 crossed to centre through
+  its transporter (paired sends only). Blue's stayed home: its fronts
+  counted as full, the stagnation the hour soak showed (for the balance
+  spike).
+- **Formats**: replay v18, wire v15, zone state v12 (unit types renumbered).
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.
@@ -983,8 +1020,6 @@ restart).
 
 ## Later
 
-- T2: a second tier of units from a T2 factory. Unpaired sends (pioneering)
-  stay first-tier only (`unpaired_can_send`, spike 18b).
 - Sources that vary: wind (BAR's minimum and maximum), tides; a zone's
   yield of a source as a range the zone's seed varies over time (spike 19
   keeps them multipliers). With the units that use them: wind, tidal,

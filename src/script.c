@@ -354,6 +354,8 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 		                               "", "departed", "arrived", "won"};
 		static const char *counts[UNIT_TYPE_COUNT] = {
 			[UNIT_RAIDER] = "raiders", [UNIT_TANK] = "tanks", [UNIT_ARTILLERY] = "artillery", [UNIT_SIEGE] = "sieges",
+			[UNIT_HEAVY_TANK] = "heavy-tanks", [UNIT_HOWITZER] = "howitzers", [UNIT_ADVANCED_ENGINEER] = "advanced-engineers",
+			[UNIT_ADVANCED_EXTRACTOR] = "advanced-extractors", [UNIT_ADVANCED_FACTORY] = "advanced-factories",
 			[UNIT_ENGINEER] = "engineers", [UNIT_SAPPER] = "sappers", [UNIT_SCOUT] = "scouts", [UNIT_COMMANDER] = "commanders",
 			[UNIT_METAL_TRUCK] = "metal-trucks", [UNIT_ENERGY_TRUCK] = "energy-trucks",
 			[UNIT_EXTRACTOR] = "extractors", [UNIT_GENERATOR] = "generators",

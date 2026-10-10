@@ -11,12 +11,12 @@ SelectionSummary menu_summarize(const Units *u, const UnitHandle *selection, ptr
 		s.total++;
 		bool done = u->progress[d] >= 1.0f;
 		s.builders = s.builders || unit_is_builder(t);
-		s.factories = s.factories || (t == UNIT_FACTORY && done);
+		s.factories = s.factories || (unit_is_factory(t) && done);
 		s.mobile = s.mobile || !unit_is_structure(t);
 		s.digs_in = s.digs_in || unit_digs_in(t);
 		s.dug_in = s.dug_in || u->seeded[d];
 		s.warp_ready = s.warp_ready || (t == UNIT_COMMANDER && u->recharge[d] == 0 && u->order[d] != ORDER_WARP);
-		if (t == UNIT_FACTORY && done) {
+		if (unit_is_factory(t) && done) {
 			s.repeating = s.repeating || u->repeat[d];
 			for (int q = 0; q < u->queue_len[d]; q++) s.queued[u->queue[d] >> (8 * q) & 0xff]++;
 		}
@@ -28,10 +28,10 @@ SelectionSummary menu_summarize(const Units *u, const UnitHandle *selection, ptr
 // (turrets come from entrenching). UNIT_TYPE_COUNT: an empty slot.
 static const char *const build_tabs[BUILD_TABS] = {"Economy", "Combat", "Utility", "Build"};
 static const UnitType build_items[BUILD_TABS][BUILD_ITEMS] = {
-	{UNIT_EXTRACTOR, UNIT_GENERATOR, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
+	{UNIT_EXTRACTOR, UNIT_GENERATOR, UNIT_ADVANCED_EXTRACTOR, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
 	{UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
 	{UNIT_TRANSPORTER, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
-	{UNIT_FACTORY, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
+	{UNIT_FACTORY, UNIT_ADVANCED_FACTORY, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
 };
 
 // What factories make, by page.
@@ -43,12 +43,23 @@ static const UnitType factory_items[BUILD_TABS][BUILD_ITEMS] = {
 	{UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
 };
 
+// What an advanced factory makes.
+static const char *const advanced_tabs[BUILD_TABS] = {"Army", nullptr, nullptr, nullptr};
+static const UnitType advanced_items[BUILD_TABS][BUILD_ITEMS] = {
+	{UNIT_HEAVY_TANK, UNIT_HOWITZER, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_ADVANCED_ENGINEER, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
+	{UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
+	{UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
+	{UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
+};
+
 BuildMenu menu_build(const SelectionSummary *s, int tab)
 {
 	BuildMenu m = {.builders = s->builders};
 	if (!menu_build_open(s)) return m;
-	const char *const *tabs = s->builders ? build_tabs : factory_tabs;
-	const UnitType(*items)[BUILD_ITEMS] = s->builders ? build_items : factory_items;
+	// Factories: advanced ones' menu when that's all there is selected.
+	bool advanced = !s->builders && s->count[UNIT_ADVANCED_FACTORY] > 0 && s->count[UNIT_FACTORY] == 0;
+	const char *const *tabs = s->builders ? build_tabs : advanced ? advanced_tabs : factory_tabs;
+	const UnitType(*items)[BUILD_ITEMS] = s->builders ? build_items : advanced ? advanced_items : factory_items;
 	if (tab < 0 || tab >= BUILD_TABS || !tabs[tab]) tab = 0;
 	for (int t = 0; t < BUILD_TABS; t++) {
 		if (!tabs[t]) continue;
@@ -59,7 +70,10 @@ BuildMenu menu_build(const SelectionSummary *s, int tab)
 	for (int k = 0; k < BUILD_ITEMS; k++) {
 		UnitType type = items[tab][k];
 		if (type == UNIT_TYPE_COUNT) continue;
-		m.item[k] = (MenuButton){.shown = true, .enabled = true, .type = type, .queued = s->queued[type]};
+		// A builder's item: enabled if some builder selected can build it.
+		bool can = !s->builders;
+		for (int b = 0; b < UNIT_TYPE_COUNT && !can; b++) can = s->count[b] > 0 && builder_builds((UnitType)b, type);
+		m.item[k] = (MenuButton){.shown = true, .enabled = can, .type = type, .queued = s->queued[type]};
 	}
 	return m;
 }

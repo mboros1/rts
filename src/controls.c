@@ -162,7 +162,7 @@ uint8_t *controls_selected(Controls *c, const Units *own, Arena *frame)
 // Where a structure would go for this click: extractors snap to the spot.
 static V2 placement_site(const Sim *sim, UnitType type, V2 at)
 {
-	if (type != UNIT_EXTRACTOR) return at;
+	if (!unit_is_extractor(type)) return at;
 	int32_t best = -1;
 	float best_d2 = 15.0f * 15.0f;
 	for (int32_t k = 0; k < sim->spots.count; k++) {
@@ -247,7 +247,7 @@ static void press_order(Controls *c, const Sim *sim, const SelectionSummary *s, 
 		c->landing_for = -1;
 		break;
 	case MENU_ORDER_GIVE:
-		c->giving = s->total == 0 ? 4 : shift ? 3 : s->factories && s->count[UNIT_FACTORY] == s->total ? 2 : 1;
+		c->giving = s->total == 0 ? 4 : shift ? 3 : s->factories && s->count[UNIT_FACTORY] + s->count[UNIT_ADVANCED_FACTORY] == s->total ? 2 : 1;
 		break;
 	case MENU_ORDER_TAKE:
 		if (*n < cap) out[(*n)++] = (Order){.kind = COMMAND_TAKE, .to = c->player};
@@ -569,7 +569,7 @@ static void draw_info(const Controls *c, const Sim *sim, const Layout *L, const 
 	text(def->name, x, y, 22.0f * sc, render_player_color((int)c->me.v, u->owner[d]));
 	const char *who = c->team[u->owner[d].v] && c->team[u->owner[d].v][0] ? c->team[u->owner[d].v] : "you";
 	// What it's doing: a factory with a queue is producing, whatever its order says.
-	const char *doing = u->type[d] == UNIT_FACTORY && u->queue_len[d] ? "producing" : order_name(u->order[d]);
+	const char *doing = unit_is_factory(u->type[d]) && u->queue_len[d] ? "producing" : order_name(u->order[d]);
 	text(TextFormat("%s   %s", doing, u->owner[d].v == c->player.v ? "" : who), x, y + 26.0f * sc,
 	     14.0f * sc, TEXT_DIM);
 	Rectangle hp = {x, y + 46.0f * sc, L->info.width - 20.0f * sc, 8.0f * sc};
@@ -592,7 +592,7 @@ static void draw_info(const Controls *c, const Sim *sim, const Layout *L, const 
 		text(TextFormat("storage +%.0f metal", sim->config.context.truck_metal), x, y + 96.0f * sc, 13.0f * sc, METAL);
 	if (u->type[d] == UNIT_ENERGY_TRUCK || u->type[d] == UNIT_ENERGY_VAULT)
 		text(TextFormat("storage +%.0f energy", sim->config.context.truck_energy), x, y + 96.0f * sc, 13.0f * sc, ENERGY);
-	if (u->type[d] == UNIT_FACTORY && u->progress[d] >= 1.0f) {
+	if (unit_is_factory(u->type[d]) && u->progress[d] >= 1.0f) {
 		// In order, runs of a type together: "queue: raider, 5 tank".
 		char q[160] = "queue:";
 		int used = 6;

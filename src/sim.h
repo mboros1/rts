@@ -38,15 +38,20 @@ typedef enum : uint8_t {
 	UNIT_TANK,
 	UNIT_ARTILLERY,
 	UNIT_SIEGE,         // very long range, slow, can't hit what's close: breaks lines
+	UNIT_HEAVY_TANK,    // T2: a tank's job, four times the armour
+	UNIT_HOWITZER,      // T2: artillery that reaches further and hits harder
 	UNIT_ENGINEER,      // builds structures; unarmed
+	UNIT_ADVANCED_ENGINEER, // T2: builds faster, and builds advanced extractors
 	UNIT_SAPPER,        // builds too, armoured and armed: a beachhead in seconds
 	UNIT_SCOUT,         // fast, sees far; unarmed: intel
 	UNIT_COMMANDER,     // a player's presence: builds, fights, warps home; one each
 	UNIT_METAL_TRUCK,   // metal storage that moves: more room where it is, a load when it goes
 	UNIT_ENERGY_TRUCK,  // the same, for energy
 	UNIT_EXTRACTOR,     // structures: never move
+	UNIT_ADVANCED_EXTRACTOR, // T2: on a metal spot, over our extractor there (which it replaces)
 	UNIT_GENERATOR,
 	UNIT_FACTORY,
+	UNIT_ADVANCED_FACTORY,   // T2: built by any builder; makes the T2 units
 	UNIT_TRANSPORTER,   // sends units to other zones; charges on energy
 	UNIT_TURRET,        // a static gun; also what units entrench into
 	UNIT_METAL_VAULT,   // a truck entrenched: hardened storage that doesn't move
@@ -59,7 +64,36 @@ enum { COMBAT_TYPE_COUNT = UNIT_ENGINEER };
 
 static inline bool unit_is_structure(UnitType t) { return t >= UNIT_EXTRACTOR; }
 static inline bool unit_is_combat(UnitType t) { return (int)t < (int)COMBAT_TYPE_COUNT; }
-static inline bool unit_is_builder(UnitType t) { return t == UNIT_ENGINEER || t == UNIT_SAPPER || t == UNIT_COMMANDER; }
+static inline bool unit_is_builder(UnitType t)
+{
+	return t == UNIT_ENGINEER || t == UNIT_ADVANCED_ENGINEER || t == UNIT_SAPPER || t == UNIT_COMMANDER;
+}
+static inline bool unit_is_factory(UnitType t) { return t == UNIT_FACTORY || t == UNIT_ADVANCED_FACTORY; }
+static inline bool unit_is_extractor(UnitType t) { return t == UNIT_EXTRACTOR || t == UNIT_ADVANCED_EXTRACTOR; }
+// Tiers: T1 is what a factory and the first builders make; T2 needs an
+// advanced factory (built by any builder) and its advanced engineers.
+static inline int unit_tier(UnitType t)
+{
+	return t == UNIT_HEAVY_TANK || t == UNIT_HOWITZER || t == UNIT_ADVANCED_ENGINEER || t == UNIT_ADVANCED_EXTRACTOR
+	            || t == UNIT_ADVANCED_FACTORY
+	         ? 2
+	         : 1;
+}
+// What a factory makes: units of its tier (never commanders: those aren't built).
+static inline bool factory_makes(UnitType factory, UnitType t)
+{
+	return unit_is_factory(factory) && !unit_is_structure(t) && t != UNIT_COMMANDER
+	    && unit_tier(t) == (factory == UNIT_ADVANCED_FACTORY ? 2 : 1);
+}
+// What a builder builds: structures, but not what only entrenching makes or
+// a side starts with; T2 structures only by T2 builders, except the advanced
+// factory, which is how T2 begins.
+static inline bool builder_builds(UnitType builder, UnitType t)
+{
+	if (!unit_is_builder(builder) || !unit_is_structure(t)) return false;
+	if (t == UNIT_TURRET || t == UNIT_METAL_VAULT || t == UNIT_ENERGY_VAULT || t == UNIT_HEADQUARTERS) return false;
+	return unit_tier(t) == 1 || t == UNIT_ADVANCED_FACTORY || unit_tier(builder) == 2;
+}
 // What stays with its player: never given, taken or entrenched (the headquarters is the side's).
 static inline bool unit_is_personal(UnitType t) { return t == UNIT_COMMANDER || t == UNIT_HEADQUARTERS; }
 static inline bool unit_is_truck(UnitType t) { return t == UNIT_METAL_TRUCK || t == UNIT_ENERGY_TRUCK; }
@@ -71,7 +105,7 @@ static inline bool unit_digs_in(UnitType t) { return unit_is_combat(t) || unit_i
 // solar...) are new sources.
 typedef enum : uint8_t {
 	SOURCE_NONE,
-	SOURCE_METAL,       // extractors, on metal spots
+	SOURCE_METAL,       // extractors (both tiers), on metal spots
 	SOURCE_GENERATOR,   // the plain generator
 	SOURCE_COUNT,
 } IncomeSource;
@@ -532,9 +566,9 @@ static constexpr float UNPAIRED_ENERGY = 4000.0f;
 static constexpr float UNPAIRED_ENERGY_PER = 400.0f;
 static constexpr int32_t UNPAIRED_BATCH = 10;   // a crew: builders, an escort, and a truck of each
 static constexpr float SEND_REACH = 7.0f;   // beyond the transporter's radius
-// Who can pioneer, unpaired: only the first tier, which is every unit there
-// is so far, so anything that moves.
-static inline bool unpaired_can_send(UnitType t) { return !unit_is_structure(t); }
+// Who can pioneer, unpaired: the first tier only. T2 goes where we have a
+// transporter.
+static inline bool unpaired_can_send(UnitType t) { return !unit_is_structure(t) && unit_tier(t) == 1; }
 
 // Each side lands unpaired sends in its own strip of a zone: blue the west
 // STRIP of the map's width, red the east. The rest is contested.

@@ -1,0 +1,24 @@
+title Spike 20: T2
+about Blue's bot, on a generous economy, grows into T2: an advanced factory, advanced engineers deepening its extractors (more metal from the same spot), then heavy tanks and howitzers. 6x.
+
+scenario economy
+economy standard base_metal=30 base_energy=400
+bot red off
+clip 0..10800
+speed 6
+camera 100,250 95
+
+at 5400 select blue advanced-factory as lab
+at 5400 show lab tab 0
+at 8100 select blue heavy-tank as heavies
+at 8100 show heavies
+at 9900 select blue advanced-engineer as deep
+at 9900 show deep tab 0
+
+# Observed: the advanced factory goes up about 3 minutes in; by 6 its
+# extractors are deep and heavy tanks and howitzers roll out.
+at 10800 expect blue advanced-factories >= 1
+at 10800 expect blue advanced-engineers >= 1
+at 10800 expect blue advanced-extractors >= 3
+at 10800 expect blue heavy-tanks >= 2
+at 10800 expect blue howitzers >= 2

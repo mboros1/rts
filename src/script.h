@@ -54,6 +54,8 @@
 //                                     #   and finished counts: raiders tanks artillery
 //                                     #   engineers scouts sappers metal-trucks energy-trucks extractors
 //                                     #   generators factories transporters turrets metal-vaults energy-vaults
+//                                     #   heavy-tanks howitzers advanced-engineers advanced-extractors
+//                                     #   advanced-factories commanders headquarters sieges
 //                                     #   departed arrived won (1 once the game's over and it won)
 //   at 600 expect blue.1 tanks >= 5   # a player's: units and finished counts
 //   at 600 expect column alive >= 15  # group field: alive

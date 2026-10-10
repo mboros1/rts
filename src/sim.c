@@ -32,10 +32,34 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.spread = 3.0f, .high_arc = true, .weight = 0,
 		.metal_cost = 260.0f, .energy_cost = 2200.0f, .build_time = 260.0f,
 	},
+	// T2. A tank's job with four times the armour and more punch; slow.
+	[UNIT_HEAVY_TANK] = {
+		.name = "heavy-tank", .speed = 3.8f, .accel = 8.0f, .radius = 1.4f, .sight = 34.0f,
+		.height = 2.2f, .hp = 950.0f, .range = 36.0f, .reload = 45,
+		.shell_speed = 46.0f, .damage = 120.0f, .splash = 2.0f,
+		.spread = 0.8f, .high_arc = false, .weight = 0,
+		.metal_cost = 480.0f, .energy_cost = 3200.0f, .build_time = 360.0f,
+	},
+	// T2. Artillery that reaches further and hits harder, no blind spot up
+	// close (siege still outranges it).
+	[UNIT_HOWITZER] = {
+		.name = "howitzer", .speed = 3.2f, .accel = 7.0f, .radius = 1.3f, .sight = 28.0f,
+		.height = 1.7f, .hp = 320.0f, .range = 105.0f, .reload = 120,
+		.shell_speed = 48.0f, .damage = 130.0f, .splash = 6.0f,
+		.spread = 2.5f, .high_arc = true, .weight = 0,
+		.metal_cost = 420.0f, .energy_cost = 3600.0f, .build_time = 340.0f,
+	},
 	[UNIT_ENGINEER] = {
 		.name = "engineer", .speed = 6.0f, .accel = 20.0f, .radius = 0.9f, .sight = 30.0f,
 		.height = 1.0f, .hp = 120.0f, .build_power = 10.0f,
 		.metal_cost = 60.0f, .energy_cost = 400.0f, .build_time = 70.0f,
+	},
+	// T2: builds at two and a half times an engineer's pace, and only it
+	// builds advanced extractors.
+	[UNIT_ADVANCED_ENGINEER] = {
+		.name = "advanced-engineer", .speed = 5.5f, .accel = 18.0f, .radius = 1.1f, .sight = 34.0f,
+		.height = 1.3f, .hp = 360.0f, .build_power = 25.0f,
+		.metal_cost = 220.0f, .energy_cost = 2200.0f, .build_time = 180.0f,
 	},
 	// A combat engineer: builds at twice an engineer's pace, takes a beating,
 	// shoots back a little. Small enough to go unpaired: a beachhead's crew.
@@ -74,6 +98,11 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 		.name = "extractor", .radius = 1.6f, .sight = 20.0f, .height = 1.6f, .hp = 300.0f,
 		.metal_cost = 50.0f, .energy_cost = 500.0f, .build_time = 60.0f, .metal_income = 3.0f, .source = SOURCE_METAL,
 	},
+	// T2: on a metal spot, over our extractor there, which it replaces when done.
+	[UNIT_ADVANCED_EXTRACTOR] = {
+		.name = "advanced-extractor", .radius = 1.6f, .sight = 20.0f, .height = 2.4f, .hp = 1200.0f,
+		.metal_cost = 400.0f, .energy_cost = 4500.0f, .build_time = 240.0f, .metal_income = 8.0f, .source = SOURCE_METAL,
+	},
 	[UNIT_GENERATOR] = {
 		.name = "generator", .radius = 1.8f, .sight = 16.0f, .height = 3.0f, .hp = 200.0f,
 		.metal_cost = 40.0f, .energy_cost = 0.0f, .build_time = 50.0f, .energy_income = 40.0f, .source = SOURCE_GENERATOR,
@@ -81,6 +110,11 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 	[UNIT_FACTORY] = {
 		.name = "factory", .radius = 4.0f, .sight = 30.0f, .height = 3.5f, .hp = 1500.0f,
 		.build_power = 15.0f, .metal_cost = 300.0f, .energy_cost = 1500.0f, .build_time = 300.0f,
+	},
+	// T2: any builder puts one up; it makes the T2 units.
+	[UNIT_ADVANCED_FACTORY] = {
+		.name = "advanced-factory", .radius = 4.5f, .sight = 32.0f, .height = 4.5f, .hp = 4000.0f,
+		.build_power = 25.0f, .metal_cost = 1200.0f, .energy_cost = 9000.0f, .build_time = 900.0f,
 	},
 	[UNIT_TRANSPORTER] = {
 		.name = "transporter", .radius = 5.0f, .sight = 30.0f, .height = 6.0f, .hp = 2500.0f,
@@ -457,7 +491,7 @@ static void contest_spots(Sim *sim)
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		const Units *u = &sim->factions[f].units;
 		for (ptrdiff_t i = 0; i < u->count; i++) {
-			if (u->type[i] != UNIT_EXTRACTOR || u->progress[i] < 1.0f) continue;
+			if (!unit_is_extractor(u->type[i]) || u->progress[i] < 1.0f) continue;
 			int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
 			if (k >= 0) claim[f][k] = true;
 		}
@@ -549,7 +583,8 @@ static void apply_produce(Faction *f, const Command *c)
 	Units *u = &f->units;
 	for (ptrdiff_t k = 0; k < c->count; k++) {
 		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
-		if (d < 0 || u->type[d] != UNIT_FACTORY || u->progress[d] < 1.0f) continue;
+		if (d < 0 || !unit_is_factory(u->type[d]) || u->progress[d] < 1.0f) continue;
+		if (c->amount > 0 && !factory_makes(u->type[d], c->unit_type)) continue; // not this factory's tier
 		if (c->amount == 0) {
 			u->queue[d] = 0;
 			u->queue_len[d] = 0;
@@ -832,8 +867,8 @@ static void apply_give(Faction *f, const Sim *sim, const Command *c)
 			hand_over(f, &sim->config.context, players, d, c->to);
 			// A factory's output stays where it was pointed; anything else
 			// (a unit on its way out included) is now wholly theirs.
-			if (u->type[d] != UNIT_FACTORY) u->output[d] = c->to;
-		} else if (u->type[d] == UNIT_FACTORY) {
+			if (!unit_is_factory(u->type[d])) u->output[d] = c->to;
+		} else if (unit_is_factory(u->type[d])) {
 			u->output[d] = c->to;
 		}
 	}
@@ -908,7 +943,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		Units *u = &f->units;
 		for (ptrdiff_t k = 0; k < c->count; k++) {
 			ptrdiff_t d = units_find_own(u, c->units[k], c->player);
-			if (d >= 0 && u->type[d] == UNIT_FACTORY) u->repeat[d] = (c->flags & COMMAND_REPEAT) != 0;
+			if (d >= 0 && unit_is_factory(u->type[d])) u->repeat[d] = (c->flags & COMMAND_REPEAT) != 0;
 		}
 		return;
 	}
@@ -925,7 +960,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 			if (!(f->away >> u->owner[i].v & 1) || unit_is_personal(u->type[i])) continue;
 			// A factory keeps making for whoever it was pointed at, unless
 			// that was its old owner.
-			if (u->type[i] != UNIT_FACTORY || player_eq(u->output[i], u->owner[i])) u->output[i] = c->player;
+			if (!unit_is_factory(u->type[i]) || player_eq(u->output[i], u->owner[i])) u->output[i] = c->player;
 			hand_over(f, &sim->config.context, sim->config.players[f->id.v], i, c->player);
 		}
 		return;
@@ -958,7 +993,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		if (d < 0 || unit_is_structure(u->type[d])) continue;
 		// Builders all go to the one site; others keep the group's shape.
 		bool build = c->kind == COMMAND_BUILD;
-		if (build && !unit_is_builder(u->type[d])) continue;
+		if (build && !builder_builds(u->type[d], c->unit_type)) continue;
 		V2 offset = v2_scale(v2_sub(v2(u->px[d], u->pz[d]), centre), squeeze);
 		V2 dest = build ? target : clamp_to_map(t, v2_add(target, offset), 1.0f);
 		u->order[d] = order_for_command[c->kind];
@@ -1281,14 +1316,16 @@ bool placement_ok(const Sim *sim, FactionId fid, UnitType type, V2 at)
 	float margin = def->radius + 2.0f;
 	if (at.x < margin || at.z < margin || at.x > t->size_x - margin || at.z > t->size_z - margin) return false;
 	int32_t spot = spot_at(&sim->spots, at);
-	if (type == UNIT_EXTRACTOR && spot < 0) return false;
+	if (unit_is_extractor(type) && spot < 0) return false;
 	const Units *u = &f->units;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (!unit_is_structure(u->type[i])) continue;
+		bool same_spot = unit_is_extractor(u->type[i]) && spot >= 0 && spot_at(&sim->spots, v2(u->px[i], u->pz[i])) == spot;
+		// An advanced extractor goes over our finished extractor on its spot.
+		if (type == UNIT_ADVANCED_EXTRACTOR && same_spot && u->type[i] == UNIT_EXTRACTOR && u->progress[i] >= 1.0f) continue;
 		float min_d = def->radius + unit_defs[u->type[i]].radius + 1.0f;
 		if (v2_len2(v2_sub(v2(u->px[i], u->pz[i]), at)) < min_d * min_d) return false;
-		if (type == UNIT_EXTRACTOR && u->type[i] == UNIT_EXTRACTOR && spot_at(&sim->spots, v2(u->px[i], u->pz[i])) == spot)
-			return false;
+		if (unit_is_extractor(type) && same_spot) return false;
 	}
 	const Perception *seen = &f->seen;
 	for (ptrdiff_t s = 0; s < seen->cap; s++) {
@@ -1318,7 +1355,7 @@ static ptrdiff_t engineer_site(Faction *f, const Sim *sim, ptrdiff_t e)
 	u->building[e] = NO_UNIT;
 	UnitType type = u->build_type[e];
 	V2 site = v2(u->tx[e], u->tz[e]);
-	if (type == UNIT_EXTRACTOR) {
+	if (unit_is_extractor(type)) {
 		int32_t k = spot_at(&sim->spots, site);
 		if (k >= 0) site = sim->spots.at[k];
 	}
@@ -1348,7 +1385,7 @@ static void factory_release(Faction *f, const Sim *sim, ptrdiff_t fac, UnitType 
 	Units *u = &f->units;
 	if (u->count == u->cap) return;
 	float face = u->px[fac] < sim->terrain.size_x * 0.5f ? 1.0f : -1.0f;
-	float off = unit_defs[UNIT_FACTORY].radius + unit_defs[type].radius + 1.5f;
+	float off = unit_defs[u->type[fac]].radius + unit_defs[type].radius + 1.5f;
 	V2 at = clamp_to_map(&sim->terrain, v2(u->px[fac] + off * face, u->pz[fac]), 2.0f);
 	units_spawn(u, type, u->output[fac], at.x, at.z, terrain_height(&sim->terrain, at.x, at.z));
 	f->stats.units_spawned++;
@@ -1457,9 +1494,9 @@ static void run_economy(Faction *f, const Sim *sim)
 			j.target = (int32_t)s;
 			j.type = u->type[s];
 			j.work = unit_defs[u->type[i]].build_power * SIM_DT;
-		} else if (u->type[i] == UNIT_FACTORY && u->progress[i] >= 1.0f && u->queue_len[i] > 0) {
+		} else if (unit_is_factory(u->type[i]) && u->progress[i] >= 1.0f && u->queue_len[i] > 0) {
 			j.type = queue_front(u, i);
-			j.work = unit_defs[UNIT_FACTORY].build_power * SIM_DT;
+			j.work = unit_defs[u->type[i]].build_power * SIM_DT;
 		} else {
 			continue;
 		}
@@ -1662,6 +1699,25 @@ static void remove_dead(Faction *f, const Sim *sim)
 	}
 }
 
+// An advanced extractor done replaces our extractor on its spot: that one
+// is taken down (not lost: it's the same mine, deeper).
+static void replace_extractors(Faction *f, const Sim *sim)
+{
+	Units *u = &f->units;
+	uint64_t deep = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] != UNIT_ADVANCED_EXTRACTOR || u->progress[i] < 1.0f) continue;
+		int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
+		if (k >= 0) deep |= (uint64_t)1 << k;
+	}
+	if (!deep) return;
+	for (ptrdiff_t i = u->count - 1; i >= 0; i--) {
+		if (u->type[i] != UNIT_EXTRACTOR) continue;
+		int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
+		if (k >= 0 && (deep >> k & 1)) units_kill(u, i);
+	}
+}
+
 // Warps done: at home the commander steps out beside the headquarters;
 // elsewhere it leaves for home. Either way its warp recharges.
 static void finish_warps(Faction *f, const Sim *sim)
@@ -1825,6 +1881,7 @@ static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const 
 		}
 	}
 	finish_warps(f, sim);
+	replace_extractors(f, sim);
 	fly_projectiles(f, &sim->terrain);
 	fire_weapons(f, &f->view, &sim->terrain, sim->tick);
 	remove_dead(f, sim);

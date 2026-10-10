@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 17; // 17: zone contexts
+static constexpr uint32_t REPLAY_VERSION = 18; // 18: T2 unit types
 
 // ---------------------------------------------------------------- writing
 
