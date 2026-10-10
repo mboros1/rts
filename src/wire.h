@@ -35,7 +35,7 @@
 //             u32 route, f32 metal, f32 energy, u32 n, n x (u32 slot, u32 generation)
 //   FACTION_SNAPSHOT  i64 tick, faction_write
 //   FACTION_TICK      i64 tick, u16 dilation, u8 has hash, [u64 hash],
-//             u64 spots owned,
+//             u64 x ceil(spots / 64) spots owned,
 //             u32 n, n x command: u8 player, u8 to, u8 kind, f32 x, f32 z, u8 unit type,
 //                                 i32 amount, f32 radius, u8 flags, u32 route, f32 metal, f32 energy,
 //                                 u32 m, m x handle
@@ -61,7 +61,7 @@
 #include "quant.h"
 #include "sim.h"
 
-enum { WIRE_VERSION = 15, DIGEST_EVERY = 30 };
+enum { WIRE_VERSION = 16, DIGEST_EVERY = 30 };
 static constexpr uint8_t SPECTATOR = 255;
 
 typedef enum : uint8_t {
@@ -88,6 +88,7 @@ typedef struct {
 	uint16_t *qx, *qz, *qhp;
 	int16_t *qvx, *qvz;
 	int64_t *sent;          // tick qx..qvz were sent; prediction runs from here
+	float map;              // the zone's width: the positions' scale (quant.h)
 } MirrorUnits;
 
 // Shells flying at one faction, dense, found by id.
@@ -108,14 +109,15 @@ typedef struct {
 	MirrorShells shells[FACTION_COUNT];
 } Mirror;
 
-void mirror_init(Mirror *m, Arena *a, ptrdiff_t max_units, ptrdiff_t max_shells);
+// For a zone `map` units across (its context's size).
+void mirror_init(Mirror *m, Arena *a, ptrdiff_t max_units, ptrdiff_t max_shells, float map);
 void mirror_clear(Mirror *m);
 Hash mirror_digest(const Mirror *m);
 
 // Dead-reckoned position of a unit at tick.
 static inline V2 mirror_predict(const MirrorUnits *u, ptrdiff_t slot, int64_t tick)
 {
-	return q_predict(u->qx[slot], u->qz[slot], u->qvx[slot], u->qvz[slot], (float)(tick - u->sent[slot]) * SIM_DT);
+	return q_predict(u->qx[slot], u->qz[slot], u->qvx[slot], u->qvz[slot], (float)(tick - u->sent[slot]) * SIM_DT, u->map);
 }
 
 typedef struct {

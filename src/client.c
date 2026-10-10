@@ -318,10 +318,10 @@ static void client_welcome(Client *c, ByteReader *r)
 	}
 	c->config = config;
 	memcpy(c->base, base, sizeof base);
-	terrain_generate(&c->terrain, &c->world, config.seed);
+	terrain_generate(&c->terrain, &c->world, config.seed, config.context.size);
 	c->player = faction < FACTION_COUNT;
 	if (c->player) remote_init(&c->remote, &config, (FactionId){faction}, &c->world);
-	else mirror_init(&c->mirror, &c->world, config.max_units, config.max_projectiles);
+	else mirror_init(&c->mirror, &c->world, config.max_units, config.max_projectiles, config.context.size);
 	controls_init(&c->controls, (FactionId){faction < FACTION_COUNT ? faction : 0}, &c->world, config.max_units);
 	c->controls.player = c->opt.slot;
 	c->controls.keys = &c->keys;
@@ -539,8 +539,9 @@ static void client_overlay(const Client *c, bool connected)
 	                    (double)zc->base_metal, (double)zc->base_energy, (double)zc->metal_cap, (double)zc->energy_cap,
 	                    (double)zc->cost, (double)zc->build_time), 12, y, 14, LIGHTGRAY);
 	y += line;
-	DrawText(TextFormat("zone environment: extractors x%.2f, generators x%.2f", (double)zc->yield[SOURCE_METAL],
-	                    (double)zc->yield[SOURCE_GENERATOR]), 12, y, 14, LIGHTGRAY);
+	DrawText(TextFormat("zone environment: extractors x%.2f, generators x%.2f; map %.0f across, %d metal spots",
+	                    (double)zc->yield[SOURCE_METAL], (double)zc->yield[SOURCE_GENERATOR], (double)zc->size,
+	                    c->player ? (int)c->remote.sim.spots.count : (int)zc->spots), 12, y, 14, LIGHTGRAY);
 	y += line;
 	DrawText(TextFormat("%s or %s: strategic map | %s: this overlay", keymap_key_name(c->keys.key[BIND_MAP]),
 	                    keymap_key_name(c->keys.key[BIND_CANCEL]), keymap_key_name(c->keys.key[BIND_OVERLAY])),

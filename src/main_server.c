@@ -1056,7 +1056,7 @@ int main(int argc, char **argv)
 		}
 		s.run.away[f] = s.run.away_sent[f] = s.sim.factions[f].away;
 	}
-	mirror_init(&s.mirror, &s.program, s.sim.config.max_units, s.sim.config.max_projectiles);
+	mirror_init(&s.mirror, &s.program, s.sim.config.max_units, s.sim.config.max_projectiles, s.sim.config.context.size);
 	{
 		// Bring the mirror to tick 0 so the first snapshot has the starting armies.
 		ByteBuf scratch = bytebuf_make(&s.encode, FRAME_MAX);

@@ -1,8 +1,9 @@
 // Headless runner: no window, no raylib.
 //
 //   rts-headless bench  [ticks] [units]  time the sim with bots on both sides
-//   rts-headless bench-teams [ticks] [players]  an economy game, PLAYERS a side,
-//                                         all bots: time the sim and the bots apart
+//   rts-headless bench-teams [ticks] [players] [map]  an economy game, PLAYERS a side,
+//                                         all bots, on a MAP (context.h: standard
+//                                         large huge): time the sim and the bots apart
 //   rts-headless record PATH [ticks] [units]  run bots and record a replay
 //   rts-headless verify PATH [--partial] [--hash-at T]
 //                                         replay and compare every tick's hash;
@@ -114,11 +115,11 @@ static int cmd_bench(long ticks, long units)
 // A team game from the start, everyone a bot: what a full zone costs. The
 // sim's step and the bots' thinking are timed apart (bots run in the zone's
 // tick too).
-static int cmd_bench_teams(long ticks, long players)
+static int cmd_bench_teams(long ticks, long players, const char *map)
 {
 	if (players > MAX_PLAYERS) players = MAX_PLAYERS;
-	char text[128];
-	snprintf(text, sizeof text, "scenario economy\nplayers blue %ld\nplayers red %ld\n", players, players);
+	char text[256];
+	snprintf(text, sizeof text, "scenario economy\nplayers blue %ld\nplayers red %ld\nmap %s\n", players, players, map);
 	Arena a = arena_create("bench-teams", (ptrdiff_t)64 << 20);
 	Arena tick = arena_create("bench-teams tick", (ptrdiff_t)64 << 20);
 	Script sc;
@@ -158,6 +159,11 @@ static int cmd_bench_teams(long ticks, long players)
 	       1e3 * bot_worst, 1e3 / SIM_HZ);
 	printf("peak %td units; most commands in a tick %td; final hash %016llx\n", peak_units, most_commands,
 	       (unsigned long long)sim_hash_now(&sim).v);
+	int32_t extractors[FACTION_COUNT] = {0};
+	for (int f = 0; f < FACTION_COUNT; f++)
+		for (ptrdiff_t i = 0; i < sim.factions[f].units.count; i++) extractors[f] += unit_is_extractor(sim.factions[f].units.type[i]);
+	printf("map %.0f across, %d metal spots: extractors %d v %d (%.1f a player)\n", (double)sim.terrain.size_x,
+	       (int)sim.spots.count, extractors[0], extractors[1], (double)(extractors[0] + extractors[1]) / (double)(2 * players));
 	print_summary(&sim);
 	sim_destroy(&sim);
 	return 0;
@@ -264,7 +270,7 @@ static int cmd_wire(long ticks, long units)
 	Driver d = driver_create(config.seed);
 	Arena a = arena_create("wire", (ptrdiff_t)1 << 30);
 	Mirror m;
-	mirror_init(&m, &a, config.max_units, config.max_projectiles);
+	mirror_init(&m, &a, config.max_units, config.max_projectiles, config.context.size);
 	ByteBuf buf = bytebuf_make(&a, (ptrdiff_t)64 << 20);
 	wire_encode_tick(&m, &sim, &buf, false, 1000, nullptr);
 	Command cmds[MAX_COMMANDS_PER_TICK];
@@ -398,7 +404,8 @@ int main(int argc, char **argv)
 {
 	const char *cmd = argc > 1 ? argv[1] : "";
 	if (!strcmp(cmd, "bench-teams")) return cmd_bench_teams(parse_long(argc > 2 ? argv[2] : nullptr, 18000),
-	                                                        parse_long(argc > 3 ? argv[3] : nullptr, 8));
+	                                                        parse_long(argc > 3 ? argv[3] : nullptr, 8),
+	                                                        argc > 4 ? argv[4] : "standard");
 	if (!strcmp(cmd, "bench")) return cmd_bench(parse_long(argc > 2 ? argv[2] : nullptr, 1800),
 	                                           parse_long(argc > 3 ? argv[3] : nullptr, 5000));
 	if (!strcmp(cmd, "record") && argc > 2)
@@ -419,6 +426,6 @@ int main(int argc, char **argv)
 	                                           parse_long(argc > 3 ? argv[3] : nullptr, 5000));
 	if (!strcmp(cmd, "wire")) return cmd_wire(parse_long(argc > 2 ? argv[2] : nullptr, 1800),
 	                                         parse_long(argc > 3 ? argv[3] : nullptr, 5000));
-	fprintf(stderr, "usage: %s bench [ticks] [units] | bench-teams [ticks] [players] | record PATH [ticks] [units] | verify PATH | script PATH... | wire|split [ticks] [units]\n", argv[0]);
+	fprintf(stderr, "usage: %s bench [ticks] [units] | bench-teams [ticks] [players] [map] | record PATH [ticks] [units] | verify PATH | script PATH... | wire|split [ticks] [units]\n", argv[0]);
 	return 2;
 }

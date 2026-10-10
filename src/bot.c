@@ -290,7 +290,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	// teammates' too, so two players never race for one.
 	// Likewise spots being deepened (an advanced extractor there or on its
 	// way), and those with a finished extractor of ours that could be.
-	uint64_t taken = me->spots, deep = 0, shallow = 0;
+	SpotSet taken = me->spots, deep = {0}, shallow = {0};
 	Promised promised = {0};
 	bool advanced_factory_coming = false;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
@@ -306,9 +306,9 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		}
 		int32_t k = spot_at(&sim->spots, at);
 		if (k < 0) continue;
-		taken |= (uint64_t)1 << k;
-		if (deepening) deep |= (uint64_t)1 << k;
-		if (u->type[i] == UNIT_EXTRACTOR && u->progress[i] >= 1.0f && mine(bot, u, i)) shallow |= (uint64_t)1 << k; // ours only
+		spotset_add(&taken, k);
+		if (deepening) spotset_add(&deep, k);
+		if (u->type[i] == UNIT_EXTRACTOR && u->progress[i] >= 1.0f && mine(bot, u, i)) spotset_add(&shallow, k); // ours only
 	}
 	// In a world, a zone with no transporter of ours yet: the builders are
 	// for that (bot_strategy), before anything else; except at home before
@@ -334,7 +334,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 			int32_t best_k = -1;
 			float best_d = 1e30f;
 			for (int32_t k = 0; k < sim->spots.count; k++) {
-				if (!(shallow >> k & 1) || (deep >> k & 1)) continue;
+				if (!spotset_has(&shallow, k) || spotset_has(&deep, k)) continue;
 				float d2 = v2_len2(v2_sub(sim->spots.at[k], p));
 				if (d2 < best_d && placement_ok(sim, f, UNIT_ADVANCED_EXTRACTOR, sim->spots.at[k])) {
 					best_d = d2;
@@ -342,7 +342,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 				}
 			}
 			if (best_k >= 0 && e->energy > 1000.0f) {
-				deep |= (uint64_t)1 << best_k;
+				spotset_add(&deep, best_k);
 				UnitHandle *h = PUSH(arena, UnitHandle, 1);
 				*h = units_handle(u, i);
 				emit(out, count, cap, (Command){.faction = f, .kind = COMMAND_BUILD, .target = sim->spots.at[best_k],
@@ -354,14 +354,14 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		int32_t spot = -1;
 		float best = 1e30f;
 		for (int32_t k = 0; k < sim->spots.count; k++) {
-			if (taken >> k & 1) continue;
+			if (spotset_has(&taken, k)) continue;
 			float d2 = v2_len2(v2_sub(sim->spots.at[k], p));
 			if (d2 < best && placement_ok(sim, f, UNIT_EXTRACTOR, sim->spots.at[k])) {
 				best = d2;
 				spot = k;
 			}
 		}
-		bool near = spot >= 0 && v2_len(v2_sub(sim->spots.at[spot], sim_player_base(sim, f, bot->player))) < 220.0f;
+		bool near = spot >= 0 && v2_len(v2_sub(sim->spots.at[spot], sim_player_base(sim, f, bot->player))) < 220.0f * (sim->terrain.size_x / 512.0f);
 		// Short of power, but not past a few generators an extractor: where
 		// there's little storage (no commander) energy always looks short.
 		bool power_short = e->energy < 2000.0f && e->energy_income < 1.1f * e->energy_wanted && generators < 2 * extractors + 6;
@@ -384,7 +384,7 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 		V2 site;
 		if (type == UNIT_EXTRACTOR) {
 			site = sim->spots.at[spot];
-			taken |= (uint64_t)1 << spot;
+			spotset_add(&taken, spot);
 		} else if (!site_near_base(sim, bot, type, &promised, &site)) {
 			continue;
 		}

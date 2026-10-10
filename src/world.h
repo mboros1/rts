@@ -13,6 +13,7 @@
 //   doctrine blue in middle raider   ... or one zone (after its zone line)
 //   economy lean                     a zone's rules and environment (context.h):
 //   environment in east barren       every zone, or one (home zones start `home`)
+//   map in west large                the zone's size and metal (context.h)
 //   setup west at 0 spawn red tank 9 at 72,256   a script line (script.h) a zone
 //                                    starts with: fixtures, what's where at the start
 //
@@ -27,7 +28,7 @@ enum { WORLD_MAX_LINKS = 32 };
 
 // A zone's saved state's format (rts-server --state); a world's live
 // directory records it, so `rts world` can tell a world an older build made.
-enum { ZONE_STATE_VERSION = 12 };
+enum { ZONE_STATE_VERSION = 13 };
 
 typedef struct {
 	char name[ZONE_NAME];
@@ -49,6 +50,7 @@ typedef struct {
 	// it; home zones start from the `home` economy.
 	char economy[192], economy_in[COORD_MAX_ZONES][192];
 	char environment[192], environment_in[COORD_MAX_ZONES][192];
+	char map[192], map_in[COORD_MAX_ZONES][192];
 } World;
 
 // The doctrine a side's bots play in zone z ("": the default).

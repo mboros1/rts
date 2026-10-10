@@ -23,15 +23,22 @@ typedef struct {
 	Material material;
 	Mesh unit_mesh[UNIT_TYPE_COUNT];
 	Mesh shell_mesh;
-	Model terrain;
+	// The terrain, in chunks of up to TERRAIN_CHUNK cells a side (a mesh's
+	// 16-bit indices reach 65535 vertices): a 2048 zone is 4 x 4 of them.
+	Model terrain[16];
+	int32_t terrain_chunks;
+	int32_t chunk_i[16], chunk_j[16], chunk_w[16], chunk_h[16]; // first cell and size, in cells
+	int32_t samples_x;      // the heightfield's samples a row (cells_x + 1)
 	// Render-only state, indexed by unit slot: the heading a unit last moved
 	// in, so stopped units keep facing the way they were going.
 	float *heading[FACTION_COUNT];
 	ptrdiff_t heading_cap;
-	// The terrain's lit colours, kept so fog can dim a copy and restore.
+	// The terrain's lit colours, one per height sample, kept so fog can dim a
+	// copy and restore; and a chunk's worth of colours to upload from.
 	unsigned char *terrain_colors;
 	unsigned char *fogged_colors;
-	ptrdiff_t terrain_vertices;
+	ptrdiff_t terrain_vertices;   // height samples
+	unsigned char *chunk_colors;
 } Renderer;
 
 // The RTS camera: looking down at focus from a fixed pitch, distance away.

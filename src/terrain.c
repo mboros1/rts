@@ -2,7 +2,6 @@
 
 #include "vmath.h"
 
-static constexpr float TERRAIN_SIZE = 512.0f;
 static constexpr float TERRAIN_CELL = 4.0f;
 
 // Lattice value in [0, 1) from integer coordinates: no float state involved.
@@ -30,14 +29,14 @@ static float value_noise(uint64_t seed, float x, float z, float spacing)
 	return ab + (cd - ab) * tz;
 }
 
-void terrain_generate(Terrain *t, Arena *arena, uint64_t seed)
+void terrain_generate(Terrain *t, Arena *arena, uint64_t seed, float size)
 {
 	*t = (Terrain){
-		.size_x = TERRAIN_SIZE,
-		.size_z = TERRAIN_SIZE,
+		.size_x = size,
+		.size_z = size,
 		.cell = TERRAIN_CELL,
-		.cells_x = (int32_t)(TERRAIN_SIZE / TERRAIN_CELL),
-		.cells_z = (int32_t)(TERRAIN_SIZE / TERRAIN_CELL),
+		.cells_x = (int32_t)(size / TERRAIN_CELL),
+		.cells_z = (int32_t)(size / TERRAIN_CELL),
 	};
 	int32_t sx = t->cells_x + 1, sz = t->cells_z + 1;
 	t->heights = PUSH(arena, float, (ptrdiff_t)sx * sz);

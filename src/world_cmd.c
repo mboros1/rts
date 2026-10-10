@@ -84,12 +84,13 @@ static void zone_context_lines(const World *wd, int k, const char *file, char *o
 {
 	const char *lines[][2] = {{"economy", wd->zones[k].home >= 0 ? "home" : ""}, {"economy", wd->economy},
 	                          {"economy", wd->economy_in[k]}, {"environment", wd->environment},
-	                          {"environment", wd->environment_in[k]}};
+	                          {"environment", wd->environment_in[k]}, {"map", wd->map}, {"map", wd->map_in[k]}};
 	ZoneContext zc = zone_context_default();
 	for (int l = 0; l < (int)countof(lines); l++) {
 		if (!lines[l][1][0]) continue;
 		char why[160];
-		if (!context_parse(&zc, l < 3 ? CONTEXT_ECONOMY : CONTEXT_ENVIRONMENT, lines[l][1], why, sizeof why))
+		ContextPart part = l < 3 ? CONTEXT_ECONOMY : l < 5 ? CONTEXT_ENVIRONMENT : CONTEXT_MAP;
+		if (!context_parse(&zc, part, lines[l][1], why, sizeof why))
 			fatal("%s: %s %s (zone %s): %s", file, lines[l][0], lines[l][1], wd->zones[k].name, why);
 		if (out) snprintf(out + strlen(out), out_len - strlen(out), "%s %s\n", lines[l][0], lines[l][1]);
 	}
@@ -301,7 +302,7 @@ int world_main(int argc, char **argv)
 				                         world_doctrine(&check, k, 1)[0] ? "\n" : "", "");
 				zone_context_lines(&check, k, new_file, script + strlen(script), sizeof script - strlen(script));
 				snprintf(script + strlen(script), sizeof script - strlen(script), "%s", check.setup[k]);
-				static_assert(sizeof script > sizeof check.setup[0] + 7 * 192 + 128, "room for the zone script");
+				static_assert(sizeof script > sizeof check.setup[0] + 9 * 192 + 128, "room for the zone script");
 				if (!platform_write_file(live_path(&w, fmt("%s.script", check.zones[k].name)), script, (ptrdiff_t)strlen(script)))
 					fatal("cannot write the zone scripts");
 			}

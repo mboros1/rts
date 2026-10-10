@@ -358,9 +358,9 @@ static void test_wire(void)
 	Bot bots[FACTION_COUNT];
 	for (int k = 0; k < FACTION_COUNT; k++) bots[k] = bot_create((FactionId){(uint32_t)k}, 11);
 	Mirror server, early, late;
-	mirror_init(&server, &a, config.max_units, config.max_projectiles);
-	mirror_init(&early, &a, config.max_units, config.max_projectiles);
-	mirror_init(&late, &a, config.max_units, config.max_projectiles);
+	mirror_init(&server, &a, config.max_units, config.max_projectiles, config.context.size);
+	mirror_init(&early, &a, config.max_units, config.max_projectiles, config.context.size);
+	mirror_init(&late, &a, config.max_units, config.max_projectiles, config.context.size);
 
 	ByteBuf buf = bytebuf_make(&a, 8 << 20);
 	ApplyInfo info;
@@ -580,7 +580,7 @@ static void test_economy(void)
 		ptrdiff_t n = 0;
 		for (int k = 0; k < FACTION_COUNT; k++) bot_think(&bots[k], &server, &tick, cmds, &n, countof(cmds));
 		sim_step(&server, cmds, n);
-		uint64_t owned[FACTION_COUNT];
+		SpotSet owned[FACTION_COUNT];
 		for (int k = 0; k < FACTION_COUNT; k++) {
 			const Faction *f = &server.factions[k];
 			for (int p = 0; p < MAX_PLAYERS; p++) {
@@ -591,10 +591,10 @@ static void test_economy(void)
 			owned[k] = f->spots;
 			// Every owned spot has this faction's finished extractor on it.
 			for (int32_t sp = 0; sp < server.spots.count; sp++) {
-				if (!(f->spots >> sp & 1)) continue;
+				if (!spotset_has(&f->spots, sp)) continue;
 				bool found = false;
 				for (ptrdiff_t i = 0; i < f->units.count && !found; i++)
-					found = f->units.type[i] == UNIT_EXTRACTOR && f->units.progress[i] >= 1.0f
+					found = unit_is_extractor(f->units.type[i]) && f->units.progress[i] >= 1.0f
 					     && spot_at(&server.spots, v2(f->units.px[i], f->units.pz[i])) == sp;
 				earned = earned && found;
 			}
@@ -607,7 +607,7 @@ static void test_economy(void)
 			if (ok) faction_tick(&clients[k], fid, &ft.effects, ft.commands, ft.command_count);
 			split = split && ok && faction_hash(&clients[k].factions[k]).v == ft.hash.v;
 		}
-		exclusive = exclusive && (owned[0] & owned[1]) == 0;
+		for (int w = 0; w < MAX_SPOTS / 64; w++) exclusive = exclusive && (owned[0].w[w] & owned[1].w[w]) == 0;
 	}
 	CHECK(bounded);
 	CHECK(exclusive);
@@ -1656,6 +1656,53 @@ static void test_context(void)
 	arena_destroy(&ar);
 }
 
+// A zone's map: its size and metal spots, from the context. The standard
+// map is the one there always was; a huge one is four times as wide, its
+// spots inside it, mirrored, apart, its bases an eighth of the way in, and
+// positions still quantize finely enough over it.
+static void test_map(void)
+{
+	ZoneContext c = zone_context_default();
+	char err[200];
+	CHECK(c.size == 512.0f && c.spots == 24.0f);
+	CHECK(context_parse(&c, CONTEXT_MAP, "huge", err, sizeof err) && c.size == 2048.0f && c.spots == 256.0f);
+	CHECK(context_parse(&c, CONTEXT_MAP, "size=1536 spots=160", err, sizeof err) && c.size == 1536.0f);
+	const char *bad[] = {"size=100", "size=4096", "size=1000", "spots=4", "spots=300", "spots=9.5", "acres=2", "vast"};
+	for (int k = 0; k < (int)countof(bad); k++) CHECK(!context_parse(&c, CONTEXT_MAP, bad[k], err, sizeof err));
+	CHECK(context_parse(&c, CONTEXT_ECONOMY, "lean", err, sizeof err) && c.size == 1536.0f); // the economy leaves the map be
+
+	SimConfig cfg = sim_config_default();
+	cfg.economy = true;
+	Sim small, big;
+	sim_init(&small, cfg);
+	CHECK(small.terrain.size_x == 512.0f && small.spots.count == 24 && small.factions[0].base.x == 64.0f);
+	cfg.context.size = 2048.0f;
+	cfg.context.spots = 256.0f;
+	sim_init(&big, cfg);
+	CHECK(big.terrain.size_x == 2048.0f && big.terrain.cells_x == 512 && big.factions[0].base.x == 256.0f);
+	CHECK(big.spots.count > 200 && big.spots.count <= 256 && big.spots.count % 2 == 0);
+	bool inside = true, mirrored = true;
+	for (int32_t k = 0; k < big.spots.count; k++) {
+		V2 p = big.spots.at[k];
+		inside = inside && p.x > 0.0f && p.x < 2048.0f && p.z > 0.0f && p.z < 2048.0f;
+		mirrored = mirrored && spot_at(&big.spots, v2(2048.0f - p.x, p.z)) >= 0;
+	}
+	CHECK(inside && mirrored);
+	// 1/32 unit over 2048.
+	float worst = 0.0f;
+	for (float x = 0.0f; x < 2048.0f; x += 7.31f) {
+		float d = dq_pos(q_pos(x, 2048.0f), 2048.0f) - x;
+		worst = f_max(worst, d < 0.0f ? -d : d);
+	}
+	CHECK(worst <= 1.0f / 64.0f + 1e-4f);
+	// More than 64 spots: sets reach them all.
+	SpotSet set = {0};
+	spotset_add(&set, 200);
+	CHECK(spotset_has(&set, 200) && !spotset_has(&set, 8) && spotset_any(&set) && spotset_words(256) == 4 && spotset_words(24) == 1);
+	sim_destroy(&small);
+	sim_destroy(&big);
+}
+
 // T2: any builder puts up an advanced factory, which makes only T2 (and a
 // factory only T1); only an advanced engineer builds an advanced extractor,
 // over our extractor, which it replaces when done, earning more; T2 can't
@@ -1893,6 +1940,7 @@ static const Test tests[] = {
 	{"game-over", test_game_over},
 	{"context", test_context},
 	{"t2", test_t2},
+	{"map", test_map},
 };
 
 // tests            run all, in order

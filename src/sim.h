@@ -163,6 +163,9 @@ typedef struct {
 	float build_time;                  // times every unit's build time
 	// The environment.
 	float yield[SOURCE_COUNT];         // times the income of units of each source
+	// The map.
+	float size;                        // the zone's width and depth, units (256..2048, a multiple of 64)
+	float spots;                       // metal spots, at most (8..256): mirrored pairs, four by the bases
 } ZoneContext;
 
 ZoneContext zone_context_default(void);
@@ -170,12 +173,13 @@ ZoneContext zone_context_default(void);
 // Every field of a context, in order, for writing and reading it (wire,
 // replays, saves) and for its checks: zone_context_ok() is false on anything
 // outside what the sim can run with (it asserts on nothing a file can say).
-enum { ZONE_CONTEXT_FIELDS = 10 + SOURCE_COUNT };
+enum { ZONE_CONTEXT_FIELDS = 12 + SOURCE_COUNT };
 static inline float *zone_context_field(ZoneContext *c, int k)
 {
 	float *fields[ZONE_CONTEXT_FIELDS] = {&c->start_metal, &c->start_energy, &c->base_metal, &c->base_energy,
 	                                      &c->metal_cap, &c->energy_cap, &c->truck_metal, &c->truck_energy,
-	                                      &c->cost, &c->build_time, &c->yield[0], &c->yield[1], &c->yield[2]};
+	                                      &c->cost, &c->build_time, &c->yield[0], &c->yield[1], &c->yield[2],
+	                                      &c->size, &c->spots};
 	static_assert(SOURCE_COUNT == 3, "a field per source");
 	return fields[k];
 }
@@ -344,12 +348,13 @@ typedef struct {
 	uint16_t *qx, *qz;
 	int16_t *qvx, *qvz;
 	int64_t *sent;
+	float map;             // the zone's width: the positions' scale (quant.h)
 } Perception;
 
 // Where a perceived unit is now, by dead reckoning.
 static inline V2 perception_at(const Perception *p, ptrdiff_t s, Tick tick)
 {
-	return q_predict(p->qx[s], p->qz[s], p->qvx[s], p->qvz[s], (float)(tick.v - p->sent[s]) * SIM_DT);
+	return q_predict(p->qx[s], p->qz[s], p->qvx[s], p->qvz[s], (float)(tick.v - p->sent[s]) * SIM_DT, p->map);
 }
 
 typedef enum : uint8_t {
@@ -460,8 +465,23 @@ typedef struct {
 
 // Metal spots: shared map data. An extractor only earns on a spot its
 // faction owns; who owns contested spots is decided between factions.
-enum { MAX_SPOTS = 32 };
+enum { MAX_SPOTS = 256 };
 static constexpr float SPOT_RADIUS = 2.5f;
+
+// A set of spots, by index.
+typedef struct {
+	uint64_t w[MAX_SPOTS / 64];
+} SpotSet;
+static inline bool spotset_has(const SpotSet *s, int32_t k) { return s->w[k >> 6] >> (k & 63) & 1; }
+static inline void spotset_add(SpotSet *s, int32_t k) { s->w[k >> 6] |= (uint64_t)1 << (k & 63); }
+static inline bool spotset_any(const SpotSet *s)
+{
+	uint64_t any = 0;
+	for (int k = 0; k < MAX_SPOTS / 64; k++) any |= s->w[k];
+	return any != 0;
+}
+// Words a zone with `spots` spots uses (what the wire carries).
+static inline int spotset_words(int32_t spots) { return (spots + 63) / 64; }
 
 typedef struct {
 	int32_t count;
@@ -476,7 +496,7 @@ typedef struct {
 	SeenEntry *seen;
 	ptrdiff_t arrived_count;   // shells arriving, in delivery order
 	Launch *arrived;
-	uint64_t spots;            // metal spots this faction owns now
+	SpotSet spots;             // metal spots this faction owns now
 } FactionEffects;
 
 typedef struct {
@@ -487,7 +507,7 @@ typedef struct {
 	Projectiles incoming;
 	Perception seen;           // its enemies, as it perceives them
 	Economy economy[MAX_PLAYERS]; // each player's; those past config.players stay as they started
-	uint64_t spots;            // metal spots it extracts from (an effect)
+	SpotSet spots;             // metal spots it extracts from (an effect)
 	uint8_t away;              // players (bit per slot) nobody is playing: their bots are; set by COMMAND_AI_SLOTS
 	int64_t respawn_at[MAX_PLAYERS]; // home zone: the tick each player's lost commander reappears; -1: none
 	bool fallen;               // its headquarters was destroyed here: the game is lost

@@ -472,18 +472,18 @@ static bool parse_line(Parser *p, char *line)
 		s->config.commanders = on;
 		return true;
 	}
-	if (!strcmp(key, "economy") || !strcmp(key, "environment")) {
+	if (!strcmp(key, "economy") || !strcmp(key, "environment") || !strcmp(key, "map")) {
 		bool on;
 		if (!strcmp(key, "economy") && n == 2 && parse_on(tok[1], &on)) {
 			s->config.economy = on;
 			return true;
 		}
 		// The zone's context (context.h): a preset and fields.
-		if (n < 2) return bad(p, "economy on|off, or economy|environment PRESET [FIELD=VALUE...]", nullptr);
+		if (n < 2) return bad(p, "economy on|off, or economy|environment|map PRESET [FIELD=VALUE...]", nullptr);
 		char spec[256] = "", why[160];
 		for (int k = 1; k < n; k++) snprintf(spec + strlen(spec), sizeof spec - strlen(spec), "%s%s", k > 1 ? " " : "", tok[k]);
-		if (!context_parse(&s->config.context, !strcmp(key, "economy") ? CONTEXT_ECONOMY : CONTEXT_ENVIRONMENT, spec, why,
-		                   sizeof why))
+		ContextPart part = !strcmp(key, "economy") ? CONTEXT_ECONOMY : !strcmp(key, "map") ? CONTEXT_MAP : CONTEXT_ENVIRONMENT;
+		if (!context_parse(&s->config.context, part, spec, why, sizeof why))
 			return bad(p, why, nullptr);
 		return true;
 	}

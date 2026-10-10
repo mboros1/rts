@@ -15,7 +15,8 @@ typedef struct {
 	float max_height;
 } Terrain;
 
-void terrain_generate(Terrain *t, Arena *arena, uint64_t seed);
+// A square map `size` units across (a multiple of the cell), from the seed.
+void terrain_generate(Terrain *t, Arena *arena, uint64_t seed, float size);
 
 // Bilinear height at a world position, clamped to the map.
 float terrain_height(const Terrain *t, float x, float z);

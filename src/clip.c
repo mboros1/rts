@@ -580,7 +580,7 @@ static bool playback_open(Playback *p, const char *path, Arena *work)
 		}
 	}
 	if (!welcomed || !p->player_known) return false;
-	terrain_generate(&p->terrain, work, p->config.seed);
+	terrain_generate(&p->terrain, work, p->config.seed, p->config.context.size);
 	if (p->player) {
 		// The faction is whichever the snapshot is for: read from WELCOME again.
 		NetlogReader scan = p->nr;
@@ -595,7 +595,7 @@ static bool playback_open(Playback *p, const char *path, Arena *work)
 		p->faction = faction;
 		remote_init(&p->remote, &p->config, (FactionId){faction}, work);
 	} else {
-		mirror_init(&p->mirror, work, p->config.max_units, p->config.max_projectiles);
+		mirror_init(&p->mirror, work, p->config.max_units, p->config.max_projectiles, p->config.context.size);
 	}
 	p->arrivals = PUSH(work, Arrival, records);
 	return true;
@@ -619,12 +619,12 @@ static void playback_welcome(Playback *p, ByteReader *r)
 	if (sim_config_equal(&config, &p->config)) return;
 	p->config = config;
 	memcpy(p->base, base, sizeof base);
-	terrain_generate(&p->terrain, p->work, config.seed);
+	terrain_generate(&p->terrain, p->work, config.seed, config.context.size);
 	if (p->player) {
 		remote_destroy(&p->remote);
 		remote_init(&p->remote, &config, (FactionId){p->faction}, p->work);
 	} else {
-		mirror_init(&p->mirror, p->work, config.max_units, config.max_projectiles);
+		mirror_init(&p->mirror, p->work, config.max_units, config.max_projectiles, config.context.size);
 	}
 	p->have_state = false;
 	p->world_changed = true;

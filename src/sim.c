@@ -164,6 +164,7 @@ ZoneContext zone_context_default(void)
 		.truck_metal = 1000.0f, .truck_energy = 5000.0f,
 		.cost = 1.0f, .build_time = 1.0f,
 		.yield = {1.0f, 1.0f, 1.0f},
+		.size = 512.0f, .spots = 24.0f,
 	};
 }
 
@@ -176,7 +177,9 @@ bool zone_context_ok(const ZoneContext *c)
 	}
 	// Starting past the room there is, or building in no time, can't be.
 	return c->start_metal <= c->metal_cap && c->start_energy <= c->energy_cap && c->cost <= 100.0f
-	    && c->build_time >= 0.01f && c->build_time <= 100.0f;
+	    && c->build_time >= 0.01f && c->build_time <= 100.0f && c->size >= 256.0f && c->size <= 2048.0f
+	    && c->size == 64.0f * (float)(int32_t)(c->size / 64.0f) && c->spots >= 8.0f && c->spots <= (float)MAX_SPOTS
+	    && c->spots == (float)(int32_t)c->spots;
 }
 
 SimConfig sim_config_default(void)
@@ -210,7 +213,7 @@ int32_t spot_at(const Spots *spots, V2 at)
 
 // Mirrored pairs, so neither side's half is richer: two close to each base,
 // the rest scattered and spaced apart. Deterministic from the seed.
-static void spots_generate(Spots *s, const Terrain *t, uint64_t seed, const V2 base[FACTION_COUNT])
+static void spots_generate(Spots *s, const Terrain *t, uint64_t seed, const V2 base[FACTION_COUNT], int32_t most)
 {
 	*s = (Spots){0};
 	Rng rng = rng_seed(seed ^ 0x5b075u);
@@ -220,7 +223,7 @@ static void spots_generate(Spots *s, const Terrain *t, uint64_t seed, const V2 b
 		s->at[s->count++] = near[k];
 		s->at[s->count++] = v2(t->size_x - near[k].x, near[k].z);
 	}
-	for (int tries = 0; tries < 4000 && s->count + 2 <= MAX_SPOTS - 8; tries++) {
+	for (int tries = 0; tries < 4000 && s->count + 2 <= most; tries++) {
 		V2 p = v2(rng_range(&rng, 40.0f, mid - 20.0f), rng_range(&rng, 40.0f, t->size_z - 40.0f));
 		bool apart = true;
 		for (int32_t k = 0; k < s->count && apart; k++) apart = v2_len2(v2_sub(s->at[k], p)) > 40.0f * 40.0f;
@@ -402,9 +405,9 @@ bool ballistic_solve(V3 from, V3 to, float speed, bool lob, V3 *vel, float *time
 
 // ---------------------------------------------------------------- interaction phase
 
-static void perception_init(Perception *p, Arena *a, ptrdiff_t cap)
+static void perception_init(Perception *p, Arena *a, ptrdiff_t cap, float map)
 {
-	*p = (Perception){.cap = cap};
+	*p = (Perception){.cap = cap, .map = map};
 	p->live = PUSH(a, uint8_t, cap);
 	p->gen = PUSH(a, uint32_t, cap);
 	p->type = PUSH(a, UnitType, cap);
@@ -451,8 +454,8 @@ static void sense(Sim *sim, FactionId f, FactionEffects *fx)
 			.slot = (uint16_t)s,
 			.gen = enemy->slot_gen[s],
 			.type = enemy->type[d],
-			.qx = q_pos(enemy->px[d]),
-			.qz = q_pos(enemy->pz[d]),
+			.qx = q_pos(enemy->px[d], sim->terrain.size_x),
+			.qz = q_pos(enemy->pz[d], sim->terrain.size_x),
 			.qvx = q_vel(enemy->vx[d]),
 			.qvz = q_vel(enemy->vz[d]),
 		};
@@ -496,12 +499,12 @@ static void contest_spots(Sim *sim)
 			if (k >= 0) claim[f][k] = true;
 		}
 	}
-	uint64_t owned[FACTION_COUNT] = {0};
+	SpotSet owned[FACTION_COUNT] = {0};
 	for (int32_t k = 0; k < sim->spots.count; k++) {
 		int8_t o = sim->spot_owner[k];
 		if (o < 0 || !claim[o][k]) o = claim[0][k] && !claim[1][k] ? 0 : claim[1][k] && !claim[0][k] ? 1 : -1;
 		sim->spot_owner[k] = o;
-		if (o >= 0) owned[o] |= (uint64_t)1 << k;
+		if (o >= 0) spotset_add(&owned[o], k);
 	}
 	for (int f = 0; f < FACTION_COUNT; f++) sim->effects[f].spots = owned[f];
 }
@@ -1471,7 +1474,7 @@ static void run_economy(Faction *f, const Sim *sim)
 		income_e[o] += def->energy_income * yield;
 		if (def->metal_income > 0.0f) {
 			int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
-			if (k >= 0 && (f->spots >> k & 1)) income_m[o] += def->metal_income * yield;
+			if (k >= 0 && spotset_has(&f->spots, k)) income_m[o] += def->metal_income * yield;
 		}
 	}
 	float *metal[MAX_PLAYERS], *energy[MAX_PLAYERS], metal_cap[MAX_PLAYERS], energy_cap[MAX_PLAYERS];
@@ -1927,11 +1930,13 @@ void sim_init(Sim *sim, SimConfig config)
 	*sim = (Sim){.config = config};
 	sim->zone = arena_create("zone", (ptrdiff_t)256 << 20);
 	sim->interaction = arena_create("interaction", (ptrdiff_t)64 << 20);
-	terrain_generate(&sim->terrain, &sim->zone, config.seed);
+	terrain_generate(&sim->terrain, &sim->zone, config.seed, config.context.size);
 
 	static const char *scratch_names[FACTION_COUNT] = {"faction 0 scratch", "faction 1 scratch"};
 	const Terrain *t = &sim->terrain;
-	V2 bases[FACTION_COUNT] = {v2(64.0f, t->size_z * 0.5f), v2(t->size_x - 64.0f, t->size_z * 0.5f)};
+	// The bases an eighth of the way in from each side.
+	float in = 64.0f * (t->size_x / 512.0f);
+	V2 bases[FACTION_COUNT] = {v2(in, t->size_z * 0.5f), v2(t->size_x - in, t->size_z * 0.5f)};
 	for (int k = 0; k < FACTION_COUNT; k++) {
 		Faction *f = &sim->factions[k];
 		f->id = (FactionId){(uint32_t)k};
@@ -1949,7 +1954,7 @@ void sim_init(Sim *sim, SimConfig config)
 		p->weapon = PUSH(&sim->zone, UnitType, p->cap);
 		p->ttl = PUSH(&sim->zone, int32_t, p->cap);
 		p->id = PUSH(&sim->zone, uint32_t, p->cap);
-		perception_init(&f->seen, &sim->zone, config.max_units);
+		perception_init(&f->seen, &sim->zone, config.max_units, config.context.size);
 		f->outbox_cap = config.max_units;
 		f->outbox = PUSH(&sim->zone, Launch, f->outbox_cap);
 		f->scratch = arena_create(scratch_names[k], (ptrdiff_t)64 << 20);
@@ -1994,7 +1999,7 @@ void sim_init(Sim *sim, SimConfig config)
 		float spread = 1.6f * f_sqrt((float)config.initial_units);
 		for (int32_t n = 0; n < config.initial_units; n++) spawn_near_base(f, &config, t, spread);
 	}
-	spots_generate(&sim->spots, t, config.seed, bases);
+	spots_generate(&sim->spots, t, config.seed, bases, (int32_t)config.context.spots);
 	for (int k = 0; k < MAX_SPOTS; k++) sim->spot_owner[k] = -1;
 }
 
@@ -2127,7 +2132,7 @@ Hash faction_hash(const Faction *f)
 		              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
 		for (int k = 0; k < (int)countof(ef); k++) h = hash_f32(h, ef[k]);
 	}
-	h = hash_u64(h, f->spots);
+	for (int k = 0; k < MAX_SPOTS / 64; k++) h = hash_u64(h, f->spots.w[k]);
 	h = hash_u32(h, f->away);
 	for (int p = 0; p < MAX_PLAYERS; p++) h = hash_u64(h, (uint64_t)f->respawn_at[p]);
 	h = hash_u32(h, f->fallen);
@@ -2226,7 +2231,7 @@ void faction_write(const Faction *f, ByteBuf *b)
 		              e->metal_spent, e->energy_spent, e->metal_wanted, e->energy_wanted, e->rate};
 		for (int k = 0; k < (int)countof(ef); k++) putf(b, ef[k]);
 	}
-	put64(b, f->spots);
+	for (int k = 0; k < MAX_SPOTS / 64; k++) put64(b, f->spots.w[k]);
 	put8(b, f->away);
 	for (int pl = 0; pl < MAX_PLAYERS; pl++) put64(b, (uint64_t)f->respawn_at[pl]);
 	put8(b, f->fallen);
@@ -2373,7 +2378,7 @@ bool faction_read(Faction *f, ByteReader *r)
 		}
 		if (!(e->metal >= 0.0f && e->metal <= e->metal_cap && e->energy >= 0.0f && e->energy <= e->energy_cap)) return false;
 	}
-	f->spots = get64(r);
+	for (int k = 0; k < MAX_SPOTS / 64; k++) f->spots.w[k] = get64(r);
 	f->away = get8(r);
 	for (int pl = 0; pl < MAX_PLAYERS; pl++) {
 		f->respawn_at[pl] = (int64_t)get64(r);

@@ -1,0 +1,19 @@
+title Spike 21: zone size and metal
+about An 8v8 of bots on a huge zone: 2048 across with 256 metal spots, four times as wide as a standard one. Room for sixteen players to expand. 8x.
+
+scenario economy
+map huge
+players blue 8
+players red 8
+clip 0..7200
+speed 8
+camera 760,1100 1750
+
+# Observed: by 4 minutes 57 and 62 extractors (7 a player; a standard
+# zone gives 1.5 by 10), 356 and 361 units. On the bench (rts-headless
+# bench-teams 18000 8 huge), 126 a side by 10 minutes and the sim at 0.7 ms
+# a tick.
+at 7200 expect blue extractors >= 50
+at 7200 expect red extractors >= 50
+at 7200 expect blue units >= 300
+at 7200 expect red units >= 300

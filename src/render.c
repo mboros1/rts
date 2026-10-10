@@ -1,6 +1,7 @@
 #include "render.h"
 
 #include <math.h>
+#include <rlgl.h>
 
 static const char *UNIT_VS =
 	"#version 330\n"
@@ -41,57 +42,84 @@ static const Color SHELL_COLOR = {255, 220, 120, 255};
 
 // The terrain mesh is built from the sim's own heightfield, so units sit
 // exactly on what they're drawn on. Lighting is baked into vertex colours.
-static Model build_terrain(const Terrain *t)
+enum { TERRAIN_CHUNK = 128 };
+
+// One sample's lit colour, from its height and the slope around it.
+static void terrain_sample_color(const Terrain *t, int32_t i, int32_t j, unsigned char out[4], float normal[3])
 {
-	int32_t sx = t->cells_x + 1, sz = t->cells_z + 1;
+	int32_t sx = t->cells_x + 1, sz = t->cells_z + 1, v = j * sx + i;
+	float h = t->heights[v];
+	float hl = t->heights[j * sx + (i > 0 ? i - 1 : i)];
+	float hr = t->heights[j * sx + (i < sx - 1 ? i + 1 : i)];
+	float hd = t->heights[(j > 0 ? j - 1 : j) * sx + i];
+	float hu = t->heights[(j < sz - 1 ? j + 1 : j) * sx + i];
+	float nx = hl - hr, ny = 2.0f * t->cell, nz = hd - hu;
+	float nl = sqrtf(nx * nx + ny * ny + nz * nz);
+	nx /= nl, ny /= nl, nz /= nl;
+	normal[0] = nx, normal[1] = ny, normal[2] = nz;
+	float k = h / (t->max_height > 0.0f ? t->max_height : 1.0f);
+	float light = 0.5f + 0.5f * fmaxf(0.0f, nx * 0.37f + ny * 0.86f + nz * 0.33f);
+	float r = (60.0f + 70.0f * k) * light, g = (95.0f + 60.0f * k) * light, b = (55.0f + 40.0f * k) * light;
+	out[0] = (unsigned char)fminf(r, 255.0f);
+	out[1] = (unsigned char)fminf(g, 255.0f);
+	out[2] = (unsigned char)fminf(b, 255.0f);
+	out[3] = 255;
+}
+
+// The cells [i0, i0 + w) x [j0, j0 + h) as a mesh.
+static Model build_terrain_chunk(const Terrain *t, int32_t i0, int32_t j0, int32_t w, int32_t h)
+{
+	int32_t sx = w + 1, sz = h + 1;
 	Mesh m = {0};
 	m.vertexCount = sx * sz;
-	m.triangleCount = 2 * t->cells_x * t->cells_z;
+	m.triangleCount = 2 * w * h;
 	m.vertices = MemAlloc((unsigned)(m.vertexCount * 3) * sizeof(float));
 	m.normals = MemAlloc((unsigned)(m.vertexCount * 3) * sizeof(float));
 	m.colors = MemAlloc((unsigned)(m.vertexCount * 4));
 	m.indices = MemAlloc((unsigned)(m.triangleCount * 3) * sizeof(unsigned short));
 	ASSERT(m.vertexCount <= 65535);
-
-	for (int32_t j = 0; j < sz; j++) {
+	for (int32_t j = 0; j < sz; j++)
 		for (int32_t i = 0; i < sx; i++) {
-			int32_t v = j * sx + i;
-			float x = (float)i * t->cell, z = (float)j * t->cell;
-			float h = t->heights[v];
-			float hl = t->heights[j * sx + (i > 0 ? i - 1 : i)];
-			float hr = t->heights[j * sx + (i < sx - 1 ? i + 1 : i)];
-			float hd = t->heights[(j > 0 ? j - 1 : j) * sx + i];
-			float hu = t->heights[(j < sz - 1 ? j + 1 : j) * sx + i];
-			float nx = hl - hr, ny = 2.0f * t->cell, nz = hd - hu;
-			float nl = sqrtf(nx * nx + ny * ny + nz * nz);
-			nx /= nl, ny /= nl, nz /= nl;
-			m.vertices[v * 3 + 0] = x;
-			m.vertices[v * 3 + 1] = h;
-			m.vertices[v * 3 + 2] = z;
-			m.normals[v * 3 + 0] = nx;
-			m.normals[v * 3 + 1] = ny;
-			m.normals[v * 3 + 2] = nz;
-			float k = h / (t->max_height > 0.0f ? t->max_height : 1.0f);
-			float light = 0.5f + 0.5f * fmaxf(0.0f, nx * 0.37f + ny * 0.86f + nz * 0.33f);
-			float r = (60.0f + 70.0f * k) * light, g = (95.0f + 60.0f * k) * light,
-			      b = (55.0f + 40.0f * k) * light;
-			m.colors[v * 4 + 0] = (unsigned char)fminf(r, 255.0f);
-			m.colors[v * 4 + 1] = (unsigned char)fminf(g, 255.0f);
-			m.colors[v * 4 + 2] = (unsigned char)fminf(b, 255.0f);
-			m.colors[v * 4 + 3] = 255;
+			int32_t v = j * sx + i, gi = i0 + i, gj = j0 + j;
+			m.vertices[v * 3 + 0] = (float)gi * t->cell;
+			m.vertices[v * 3 + 1] = t->heights[gj * (t->cells_x + 1) + gi];
+			m.vertices[v * 3 + 2] = (float)gj * t->cell;
+			terrain_sample_color(t, gi, gj, m.colors + v * 4, m.normals + v * 3);
 		}
-	}
 	int32_t k = 0;
-	for (int32_t j = 0; j < t->cells_z; j++) {
-		for (int32_t i = 0; i < t->cells_x; i++) {
+	for (int32_t j = 0; j < h; j++)
+		for (int32_t i = 0; i < w; i++) {
 			unsigned short a = (unsigned short)(j * sx + i), b = (unsigned short)(a + 1);
 			unsigned short c = (unsigned short)(a + sx), d = (unsigned short)(c + 1);
 			unsigned short tri[6] = {a, c, b, b, c, d};
 			for (int q = 0; q < 6; q++) m.indices[k++] = tri[q];
 		}
-	}
 	UploadMesh(&m, false);
 	return LoadModelFromMesh(m);
+}
+
+static void build_terrain(Renderer *r, const Terrain *t, Arena *program)
+{
+	r->terrain_chunks = 0;
+	r->samples_x = t->cells_x + 1;
+	for (int32_t j0 = 0; j0 < t->cells_z; j0 += TERRAIN_CHUNK)
+		for (int32_t i0 = 0; i0 < t->cells_x; i0 += TERRAIN_CHUNK) {
+			int32_t c = r->terrain_chunks++;
+			ASSERT(c < (int32_t)countof(r->terrain));
+			r->chunk_i[c] = i0;
+			r->chunk_j[c] = j0;
+			r->chunk_w[c] = t->cells_x - i0 < TERRAIN_CHUNK ? t->cells_x - i0 : TERRAIN_CHUNK;
+			r->chunk_h[c] = t->cells_z - j0 < TERRAIN_CHUNK ? t->cells_z - j0 : TERRAIN_CHUNK;
+			r->terrain[c] = build_terrain_chunk(t, i0, j0, r->chunk_w[c], r->chunk_h[c]);
+		}
+	r->terrain_vertices = (ptrdiff_t)(t->cells_x + 1) * (t->cells_z + 1);
+	r->terrain_colors = PUSH(program, unsigned char, r->terrain_vertices * 4);
+	float normal[3];
+	for (int32_t j = 0; j <= t->cells_z; j++)
+		for (int32_t i = 0; i <= t->cells_x; i++)
+			terrain_sample_color(t, i, j, r->terrain_colors + ((ptrdiff_t)j * (t->cells_x + 1) + i) * 4, normal);
+	r->fogged_colors = PUSH(program, unsigned char, r->terrain_vertices * 4);
+	r->chunk_colors = PUSH(program, unsigned char, (TERRAIN_CHUNK + 1) * (TERRAIN_CHUNK + 1) * 4);
 }
 
 Camera3D render_camera(const Terrain *t, V2 focus, float distance)
@@ -143,10 +171,10 @@ void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Are
 	r->unit_mesh[UNIT_HEADQUARTERS] = GenMeshCylinder(0.5f, 1.0f, 6);
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) ASSERT(r->unit_mesh[k].vertexCount > 0); // a mesh for every type
 	r->shell_mesh = GenMeshSphere(1.0f, 6, 8);
-	r->terrain = build_terrain(terrain);
-	r->terrain_vertices = r->terrain.meshes[0].vertexCount;
-	r->terrain_colors = arena_copy(program, r->terrain.meshes[0].colors, r->terrain_vertices * 4, 1);
-	r->fogged_colors = PUSH(program, unsigned char, r->terrain_vertices * 4);
+	build_terrain(r, terrain, program);
+	// Far enough to see a whole zone from above it (a standard zone keeps
+	// raylib's default).
+	rlSetClipPlanes(RL_CULL_DISTANCE_NEAR, terrain->size_x <= 512.0f ? RL_CULL_DISTANCE_FAR : 3.0 * terrain->size_x);
 
 	r->heading_cap = max_units;
 	for (int k = 0; k < FACTION_COUNT; k++) r->heading[k] = PUSH(program, float, r->heading_cap);
@@ -167,15 +195,22 @@ void renderer_set_fog(Renderer *r, const uint8_t *visible)
 		}
 		src = r->fogged_colors;
 	}
-	// Buffer 3 of a raylib mesh holds vertex colours.
-	UpdateMeshBuffer(r->terrain.meshes[0], 3, src, (int)(r->terrain_vertices * 4), 0);
+	// Each chunk's colours from the samples it covers. Buffer 3 of a raylib
+	// mesh holds vertex colours.
+	for (int32_t c = 0; c < r->terrain_chunks; c++) {
+		int32_t w = r->chunk_w[c] + 1, h = r->chunk_h[c] + 1;
+		for (int32_t j = 0; j < h; j++)
+			memcpy(r->chunk_colors + (ptrdiff_t)j * w * 4,
+			       src + ((ptrdiff_t)(r->chunk_j[c] + j) * r->samples_x + r->chunk_i[c]) * 4, (size_t)w * 4);
+		UpdateMeshBuffer(r->terrain[c].meshes[0], 3, r->chunk_colors, w * h * 4, 0);
+	}
 }
 
 void renderer_unload(Renderer *r)
 {
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) UnloadMesh(r->unit_mesh[k]);
 	UnloadMesh(r->shell_mesh);
-	UnloadModel(r->terrain);
+	for (int32_t c = 0; c < r->terrain_chunks; c++) UnloadModel(r->terrain[c]);
 	r->material.shader = (Shader){0};
 	UnloadShader(r->shader);
 }
@@ -203,7 +238,7 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
                          const uint8_t *selected, int selected_faction)
 {
 	ASSERT(scene->max_units <= r->heading_cap);
-	DrawModel(r->terrain, (Vector3){0, 0, 0}, 1.0f, WHITE);
+	for (int32_t c = 0; c < r->terrain_chunks; c++) DrawModel(r->terrain[c], (Vector3){0, 0, 0}, 1.0f, WHITE);
 	float ahead = alpha * SIM_DT;
 
 	for (int f = 0; f < FACTION_COUNT; f++) {

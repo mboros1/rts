@@ -17,6 +17,8 @@ static float *f_cost(ZoneContext *c) { return &c->cost; }
 static float *f_build_time(ZoneContext *c) { return &c->build_time; }
 static float *f_metal(ZoneContext *c) { return &c->yield[SOURCE_METAL]; }
 static float *f_generator(ZoneContext *c) { return &c->yield[SOURCE_GENERATOR]; }
+static float *f_size(ZoneContext *c) { return &c->size; }
+static float *f_spots(ZoneContext *c) { return &c->spots; }
 
 static const Field economy_fields[] = {
 	{"start_metal", f_start_metal}, {"start_energy", f_start_energy}, {"base_metal", f_base_metal},
@@ -27,15 +29,19 @@ static const Field economy_fields[] = {
 // One per income source: a new source is a new field here.
 static const Field environment_fields[] = {{"metal", f_metal}, {"generator", f_generator}};
 static_assert(countof(environment_fields) == SOURCE_COUNT - 1, "a field per income source");
+static const Field map_fields[] = {{"size", f_size}, {"spots", f_spots}};
 
 // Presets: a part's fields, from the standard context.
 static void economy_preset(ZoneContext *c, int k)
 {
+	// The rules only: the environment and the map stay.
 	ZoneContext d = zone_context_default();
-	float yield[SOURCE_COUNT];
+	float yield[SOURCE_COUNT], size = c->size, spots = c->spots;
 	memcpy(yield, c->yield, sizeof yield);
 	*c = d;
 	memcpy(c->yield, yield, sizeof yield);
+	c->size = size;
+	c->spots = spots;
 	switch (k) {
 	case 0: break;                                                   // standard
 	case 1: c->base_metal = 8.0f; break;                             // home: where the surplus army comes from
@@ -53,6 +59,14 @@ static void environment_preset(ZoneContext *c, int k)
 }
 static const char *const environment_presets[] = {"standard", "barren", "abundant"};
 
+static void map_preset(ZoneContext *c, int k)
+{
+	static const float size[] = {512.0f, 1024.0f, 2048.0f}, spots[] = {24.0f, 96.0f, 256.0f};
+	c->size = size[k];
+	c->spots = spots[k];
+}
+static const char *const map_presets[] = {"standard", "large", "huge"};
+
 static bool context_refuse(char *err, size_t err_len, const char *why, const char *what)
 {
 	snprintf(err, err_len, "%s: %s", why, what);
@@ -61,11 +75,11 @@ static bool context_refuse(char *err, size_t err_len, const char *why, const cha
 
 bool context_parse(ZoneContext *c, ContextPart part, const char *spec, char *err, size_t err_len)
 {
-	bool economy = part == CONTEXT_ECONOMY;
-	const Field *table = economy ? economy_fields : environment_fields;
-	int field_count = economy ? (int)countof(economy_fields) : (int)countof(environment_fields);
-	const char *const *names = economy ? economy_presets : environment_presets;
-	int preset_count = economy ? (int)countof(economy_presets) : (int)countof(environment_presets);
+	bool economy = part == CONTEXT_ECONOMY, map = part == CONTEXT_MAP;
+	const Field *table = economy ? economy_fields : map ? map_fields : environment_fields;
+	int field_count = economy ? (int)countof(economy_fields) : map ? (int)countof(map_fields) : (int)countof(environment_fields);
+	const char *const *names = economy ? economy_presets : map ? map_presets : environment_presets;
+	int preset_count = economy ? (int)countof(economy_presets) : map ? (int)countof(map_presets) : (int)countof(environment_presets);
 	char buf[256];
 	if (strlen(spec) >= sizeof buf) return context_refuse(err, err_len, "too long", spec);
 	snprintf(buf, sizeof buf, "%s", spec);
@@ -80,23 +94,29 @@ bool context_parse(ZoneContext *c, ContextPart part, const char *spec, char *err
 			if (!first || k == preset_count)
 				return context_refuse(err, err_len,
 				              economy ? "a preset (standard home rich lean) first, then FIELD=VALUE"
+				              : map   ? "a preset (standard large huge) first, then FIELD=VALUE"
 				                      : "a preset (standard barren abundant) first, then FIELD=VALUE",
 				              t);
 			if (economy) economy_preset(&out, k);
+			else if (map) map_preset(&out, k);
 			else environment_preset(&out, k);
 			continue;
 		}
 		*eq = 0;
 		int k = 0;
 		while (k < field_count && strcmp(table[k].name, t)) k++;
-		if (k == field_count) return context_refuse(err, err_len, economy ? "no such economy field" : "no such income source", t);
+		if (k == field_count)
+			return context_refuse(err, err_len, economy ? "no such economy field" : map ? "no such map field (size spots)" : "no such income source", t);
 		char *end;
 		float v = strtof(eq + 1, &end);
 		if (eq[1] == 0 || *end || !(v >= 0.0f && v <= 1e7f)) return context_refuse(err, err_len, "expected a number >= 0 for", t);
 		*table[k].field(&out) = v;
 	}
 	if (!zone_context_ok(&out))
-		return context_refuse(err, err_len, "out of range (start within storage, cost up to 100, build_time 0.01..100)", spec);
+		return context_refuse(err, err_len,
+		                      "out of range (start within storage, cost up to 100, build_time 0.01..100, size 256..2048 "
+		                      "a multiple of 64, spots 8..256)",
+		                      spec);
 	*c = out;
 	return true;
 }

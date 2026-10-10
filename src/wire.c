@@ -4,12 +4,13 @@ enum : uint8_t { UNIT_SPAWN = 1, UNIT_MOVE, UNIT_HP, UNIT_DEATH };
 
 // ---------------------------------------------------------------- mirror
 
-void mirror_init(Mirror *m, Arena *a, ptrdiff_t max_units, ptrdiff_t max_shells)
+void mirror_init(Mirror *m, Arena *a, ptrdiff_t max_units, ptrdiff_t max_shells, float map)
 {
 	*m = (Mirror){.dilation = 1000};
 	for (int f = 0; f < FACTION_COUNT; f++) {
 		MirrorUnits *u = &m->units[f];
 		u->cap = max_units;
+		u->map = map;
 		u->live = PUSH(a, uint8_t, max_units);
 		u->gen = PUSH(a, uint32_t, max_units);
 		u->type = PUSH(a, UnitType, max_units);
@@ -196,8 +197,8 @@ void wire_encode_tick(Mirror *m, const Sim *sim, ByteBuf *out, bool digest, uint
 				u->live[s] = 1;
 				u->gen[s] = su->slot_gen[s];
 				u->type[s] = su->type[d];
-				u->qx[s] = q_pos(su->px[d]);
-				u->qz[s] = q_pos(su->pz[d]);
+				u->qx[s] = q_pos(su->px[d], u->map);
+				u->qz[s] = q_pos(su->pz[d], u->map);
 				u->qvx[s] = qvx;
 				u->qvz[s] = qvz;
 				u->qhp[s] = qhp;
@@ -213,8 +214,8 @@ void wire_encode_tick(Mirror *m, const Sim *sim, ByteBuf *out, bool digest, uint
 			// Snapshots carry the age since sent in 16 bits: refresh before it wraps.
 			bool stale = tick - u->sent[s] > RESEND_AGE;
 			if (drifted || turned || stale) {
-				u->qx[s] = q_pos(su->px[d]);
-				u->qz[s] = q_pos(su->pz[d]);
+				u->qx[s] = q_pos(su->px[d], u->map);
+				u->qz[s] = q_pos(su->pz[d], u->map);
 				u->qvx[s] = qvx;
 				u->qvz[s] = qvz;
 				u->sent[s] = tick;
@@ -430,7 +431,8 @@ void wire_encode_faction_tick(const Sim *sim, FactionId f, const Command *cmds, 
 	put16(out, dilation);
 	put8(out, hash);
 	if (hash) put64(out, faction_hash(fa).v);
-	put64(out, sim->effects[f.v].spots);
+	// The spots owned: as many words as the zone has spots for.
+	for (int k = 0; k < spotset_words((int32_t)sim->config.context.spots); k++) put64(out, sim->effects[f.v].spots.w[k]);
 
 	ptrdiff_t count_at = reserve32(out);
 	uint32_t n = 0;
@@ -502,7 +504,7 @@ bool wire_read_faction_tick(ByteReader *r, Arena *a, const SimConfig *c, Faction
 	if (r->bad || has_hash > 1 || out->dilation > 10000) return false;
 	out->has_hash = has_hash;
 	if (has_hash) out->hash = (Hash){get64(r)};
-	out->effects.spots = get64(r);
+	for (int k = 0; k < spotset_words((int32_t)c->context.spots); k++) out->effects.spots.w[k] = get64(r);
 
 	uint32_t n = get32(r);
 	if (r->bad || n > 4096) return false;
