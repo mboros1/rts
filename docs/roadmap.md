@@ -56,6 +56,7 @@ talking over sockets. Each spike is defined by what it proves, not by features.
 | 18 | Commanders | A player is somewhere | Each player starts with only a commander (it builds the basics; engineers come from the first factory); no free income or storage in a zone without yours; a headquarters per side, no player's, where commanders respawn every 60 s; warp home (energy streamed as building is, cast, cooldown), automatic 30 s after logging out |
 | 18b | Bots with commanders | Bots open and play as players now do | The commander-only opening; bots keep their commanders useful and alive, and warp home |
 | 18c | Winning | A game ends | Destroying a side's headquarters ends the game |
+| 19 | Zone contexts | Zones differ | Each zone has its economy's rules and its environment (what each income source gives), set like doctrines per world and zone; the standard context is the sim as it was |
 
 Then the UI spikes: the strategic map as the logistics console with pings
 and chat, minimap, control groups and idle builders, and a team playtest.
@@ -916,6 +917,38 @@ Done. A game ends.
   headquarters, west freezes, every view says red won.
 - **Formats**: replay v16, wire v13, zone state v10.
 
+## Spike 19 results (2026-10-09)
+
+Done. Each zone has a context: its economy's rules and its environment.
+
+- **The context** (`ZoneContext` in the sim's settings): start resources,
+  free income where your commander is, base storage, truck and vault room,
+  multipliers on every unit's cost and build time; and a yield per income
+  source (a unit type names its source: extractors `metal`, generators
+  `generator`). It travels with the config: the wire, replay headers, zone
+  saves (replay v17, wire v14, zone state v11).
+- **Written as doctrines are** (`context.h`): `economy PRESET [FIELD=VALUE]`
+  (standard home rich lean) and `environment PRESET [FIELD=VALUE]` (standard
+  barren abundant), in scripts and world files (`economy in north rich`).
+  Unknown presets, fields or sources and values out of range are refused
+  whole; `rts world --new` checks every zone's before replacing the old
+  world (it used to delete the old world first).
+- **Home is a preset**: home zones start `economy home` (8 metal a second
+  free); the headquarters rule is gone from the sim. A world can make home
+  poor or a front rich.
+- **The standard context is the sim as it was**: script demos re-render
+  byte for byte. Bots, storage, the build menu's costs and the info pane's
+  income read the zone's numbers.
+- **Seen**: F1 shows the zone's economy and environment; `rts world
+  --status` lists each zone's context lines.
+- **Clips** can put two zones side by side with their own terrains
+  (`--compare` with `--views`).
+- **Evidence**: `test_context` (presets, fields, refusals, parts kept apart,
+  cost and yield in the sim, the wire and replay round trips); the world
+  smoke test checks home zones get the home economy and fronts don't. Demo
+  24: north rich and abundant beside south lean (costs x2) and barren (x0.3),
+  at the same moments: 203 blue army units north against 24 south.
+
 If spike 3 runs long, split it: first the faction split on the server only
 (a faction's state can be rebuilt from its effect stream), then the client
 copy over the socket.
@@ -952,12 +985,11 @@ restart).
 
 - T2: a second tier of units from a T2 factory. Unpaired sends (pioneering)
   stay first-tier only (`unpaired_can_send`, spike 18b).
-- An economy context, before the balance spike: the economy's constants
-  (incomes, home income, base storage, truck and vault room, costs) as a
-  context a zone is given, as doctrines are, so zones can differ (a rich
-  home, lean fronts) and a world file or script can stage a scenario. It is
-  part of the sim's settings, so it goes in replays and zone state. Until
-  then they're constants in sim.c and sim.h.
+- Sources that vary: wind (BAR's minimum and maximum), tides; a zone's
+  yield of a source as a range the zone's seed varies over time (spike 19
+  keeps them multipliers). With the units that use them: wind, tidal,
+  solar, geothermal generators. A campaign of planets (Earth, the Moon,
+  Mars, the belt, Titan) is the kind of world this is for.
 - A balance spike: energy is plentiful everywhere and metal scarce (spike
   16b: fronts float full energy, metal seldom overflows), so shipping energy
   means little. With it, weapons costing energy per shot, from the firing

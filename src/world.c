@@ -96,6 +96,19 @@ bool world_parse(World *w, Str text, const char *path, char *err, ptrdiff_t err_
 			for (int k = first; k < n; k++) snprintf(spec + strlen(spec), sizeof spec - strlen(spec), "%s%s", k > first ? " " : "", tok[k]);
 			char *to = zone < 0 ? w->doctrine[side] : w->doctrine_in[zone][side];
 			snprintf(to, sizeof w->doctrine[side], "%s", spec);
+		} else if ((!strcmp(tok[0], "economy") || !strcmp(tok[0], "environment")) && n >= 2) {
+			// Checked when the world starts (rts world --new); here only where it goes.
+			bool economy = !strcmp(tok[0], "economy");
+			int first = 1, zone = -1;
+			if (!strcmp(tok[1], "in")) {
+				if (n < 4 || (zone = world_zone(w, tok[2])) < 0)
+					return world_bad(err, err_len, path, line_no, "economy|environment in ZONE: a zone named before this line");
+				first = 3;
+			}
+			char *to = economy ? (zone < 0 ? w->economy : w->economy_in[zone])
+			                   : (zone < 0 ? w->environment : w->environment_in[zone]);
+			to[0] = 0;
+			for (int k = first; k < n; k++) snprintf(to + strlen(to), sizeof w->economy - strlen(to), "%s%s", k > first ? " " : "", tok[k]);
 		} else if (!strcmp(tok[0], "setup") && n >= 3) {
 			// setup ZONE LINE: a script line the zone starts with (a fixture:
 			// what's there at the start; checked when the zone reads its script).
@@ -106,7 +119,7 @@ bool world_parse(World *w, Str text, const char *path, char *err, ptrdiff_t err_
 			if (strlen(to) + 1 >= sizeof w->setup[zone]) return world_bad(err, err_len, path, line_no, "too much setup for one zone");
 		} else {
 			return world_bad(err, err_len, path, line_no,
-			                 "expected: port N | zone NAME X Y [home SIDE] | link A B | players SIDE N | doctrine ... | setup ZONE ...");
+			                 "expected: port N | zone NAME X Y [home SIDE] | link A B | players SIDE N | doctrine ... | economy ... | environment ... | setup ZONE ...");
 		}
 	}
 	if (w->zone_count == 0) return world_bad(err, err_len, path, line_no, "no zones");

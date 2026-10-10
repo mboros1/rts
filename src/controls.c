@@ -476,7 +476,8 @@ static void button_frame(Rectangle r, const MenuButton *b, bool hover, float s)
 	DrawRectangleLinesEx(r, fmaxf(1.0f, s), PANEL_EDGE);
 }
 
-static void draw_build_item(Rectangle r, const MenuButton *b, const char *key, bool keys_live, bool hover, float s)
+static void draw_build_item(Rectangle r, const MenuButton *b, const ZoneContext *zc, const char *key, bool keys_live, bool hover,
+                            float s)
 {
 	if (!b->shown) {
 		DrawRectangleRec(r, (Color){22, 24, 28, 255});
@@ -486,7 +487,8 @@ static void draw_build_item(Rectangle r, const MenuButton *b, const char *key, b
 	const UnitDef *def = &unit_defs[b->type];
 	text(def->name, r.x + 6.0f * s, r.y + 6.0f * s, 14.0f * s, TEXT);
 	// Costs, as BAR shows them: metal over energy, bottom right.
-	const char *m = TextFormat("%.0f", def->metal_cost), *e = TextFormat("%.0f", def->energy_cost);
+	// The zone's: its cost multiplier.
+	const char *m = TextFormat("%.0f", def->metal_cost * zc->cost), *e = TextFormat("%.0f", def->energy_cost * zc->cost);
 	text(m, r.x + r.width - (float)MeasureText(m, (int)(14.0f * s)) - 6.0f * s, r.y + r.height - 36.0f * s, 14.0f * s, METAL);
 	text(e, r.x + r.width - (float)MeasureText(e, (int)(14.0f * s)) - 6.0f * s, r.y + r.height - 19.0f * s, 14.0f * s, ENERGY);
 	text(key, r.x + 6.0f * s, r.y + r.height - 19.0f * s, 14.0f * s, keys_live ? TEXT : TEXT_DIM);
@@ -583,13 +585,13 @@ static void draw_info(const Controls *c, const Sim *sim, const Layout *L, const 
 		         def->build_power > 0.0f ? TextFormat("   build power %.0f", def->build_power) : "");
 	else
 		snprintf(line, sizeof line, "sight %.0f%s%s", def->sight,
-		         def->metal_income > 0.0f ? TextFormat("   +%.1f metal", def->metal_income) : "",
-		         def->energy_income > 0.0f ? TextFormat("   +%.0f energy", def->energy_income) : "");
+		         def->metal_income > 0.0f ? TextFormat("   +%.1f metal", def->metal_income * sim->config.context.yield[def->source]) : "",
+		         def->energy_income > 0.0f ? TextFormat("   +%.0f energy", def->energy_income * sim->config.context.yield[def->source]) : "");
 	text(line, x, y + 78.0f * sc, 13.0f * sc, TEXT);
 	if (u->type[d] == UNIT_METAL_TRUCK || u->type[d] == UNIT_METAL_VAULT)
-		text(TextFormat("storage +%.0f metal", TRUCK_METAL), x, y + 96.0f * sc, 13.0f * sc, METAL);
+		text(TextFormat("storage +%.0f metal", sim->config.context.truck_metal), x, y + 96.0f * sc, 13.0f * sc, METAL);
 	if (u->type[d] == UNIT_ENERGY_TRUCK || u->type[d] == UNIT_ENERGY_VAULT)
-		text(TextFormat("storage +%.0f energy", TRUCK_ENERGY), x, y + 96.0f * sc, 13.0f * sc, ENERGY);
+		text(TextFormat("storage +%.0f energy", sim->config.context.truck_energy), x, y + 96.0f * sc, 13.0f * sc, ENERGY);
 	if (u->type[d] == UNIT_FACTORY && u->progress[d] >= 1.0f) {
 		// In order, runs of a type together: "queue: raider, 5 tank".
 		char q[160] = "queue:";
@@ -696,7 +698,7 @@ void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, const
 
 	panel(L.build, s);
 	for (int k = 0; k < BUILD_ITEMS; k++)
-		draw_build_item(L.item[k], &build.item[k], action_key(c, build_action(k)), build_keys, CheckCollisionPointRec(mouse, L.item[k]), s);
+		draw_build_item(L.item[k], &build.item[k], &sim->config.context, action_key(c, build_action(k)), build_keys, CheckCollisionPointRec(mouse, L.item[k]), s);
 	for (int k = 0; k < BUILD_TABS; k++)
 		draw_text_button(L.tab[k], &build.tab[k], action_key(c, build_action(BUILD_ITEMS + k)), build_keys,
 		                 CheckCollisionPointRec(mouse, L.tab[k]), s);

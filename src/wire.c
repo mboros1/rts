@@ -592,6 +592,8 @@ void wire_put_config(ByteBuf *b, const SimConfig *c)
 	put8(b, c->bases);
 	for (int f = 0; f < FACTION_COUNT; f++) put8(b, c->players[f]);
 	put8(b, c->commanders);
+	ZoneContext zc = c->context;
+	for (int k = 0; k < ZONE_CONTEXT_FIELDS; k++) putf(b, *zone_context_field(&zc, k));
 }
 
 bool wire_get_config(ByteReader *r, SimConfig *c)
@@ -619,7 +621,8 @@ bool wire_get_config(ByteReader *r, SimConfig *c)
 	uint8_t commanders = get8(r);
 	if (commanders > 1) return false;
 	c->commanders = commanders;
-	return !r->bad && sum > 0 && c->max_units > 0 && c->max_units <= 1 << 16
+	for (int k = 0; k < ZONE_CONTEXT_FIELDS; k++) *zone_context_field(&c->context, k) = getf(r);
+	return !r->bad && zone_context_ok(&c->context) && sum > 0 && c->max_units > 0 && c->max_units <= 1 << 16
 	    && c->max_projectiles > 0 && c->max_projectiles <= 1 << 20 && c->spawn_interval > 0
 	    && c->initial_units >= 0 && c->initial_units <= c->population && c->population <= c->max_units;
 }

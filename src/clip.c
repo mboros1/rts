@@ -777,16 +777,18 @@ int clip_netlog(const ClipRequest *req)
 	const char *paths[2] = {req->netlog, req->compare};
 	for (int k = 0; k < count; k++)
 		if (!playback_open(&views[k], paths[k], &work)) return fail("cannot replay netlog", paths[k]);
-	if (count == 2 && !sim_config_equal(&views[0].config, &views[1].config))
-		return fail("netlogs are from different matches", req->compare);
+	// One match seen two ways shares a camera, so it must be one match; two
+	// zones (--views) each have their own.
+	if (count == 2 && !req->views && !sim_config_equal(&views[0].config, &views[1].config))
+		return fail("netlogs are from different matches (two zones: --views)", req->compare);
 
 	double t_start = views[0].t_start, t_end = views[0].t_end;
 	for (int k = 1; k < count; k++) {
 		t_start = views[k].t_start > t_start ? views[k].t_start : t_start;
 		t_end = views[k].t_end < t_end ? views[k].t_end : t_end;
 	}
-	Renderer renderer;
-	renderer_init(&renderer, &views[0].terrain, views[0].config.max_units, &work);
+	Renderer renderer[2];
+	for (int v = 0; v < count; v++) renderer_init(&renderer[v], &views[v].terrain, views[v].config.max_units, &work);
 	ClipOut out;
 	if (!out_open(&out, req)) return fail("cannot start ffmpeg for", req->video);
 	int rw = out.w * SUPERSAMPLE, rh = out.h * SUPERSAMPLE;
@@ -820,13 +822,13 @@ int clip_netlog(const ClipRequest *req)
 	for (int64_t k = 0; k < frames; k++) {
 		double t = t_start + (double)k / CLIP_FPS;
 		for (int v = 0; v < count; v++) playback_advance(&views[v], t);
-		if (views[0].world_changed) {
+		for (int v = 0; v < count; v++) {
+			if (!views[v].world_changed) continue;
 			// Into another zone: its terrain, and a camera that finds its way again.
-			// (Two views compared go to the same zones together.)
-			renderer_unload(&renderer);
-			renderer_init(&renderer, &views[0].terrain, views[0].config.max_units, &work);
-			for (int v = 0; v < count; v++) views[v].world_changed = false;
-			director = (Director){.side = director.side};
+			renderer_unload(&renderer[v]);
+			renderer_init(&renderer[v], &views[v].terrain, views[v].config.max_units, &work);
+			views[v].world_changed = false;
+			if (v == 0) director = (Director){.side = director.side};
 		}
 		bool on_map[2] = {false, false}, ready = true;
 		for (int v = 0; v < count; v++) {
@@ -854,7 +856,7 @@ int clip_netlog(const ClipRequest *req)
 			map_draw(&views[0].dir, views[0].player ? views[0].faction : -1, -1, rw, rh);
 		} else if (count == 1) {
 			out_begin(&out);
-			playback_draw(&views[0], &renderer, &scenes[0], cam, t, &frame, rw, rh, nullptr);
+			playback_draw(&views[0], &renderer[0], &scenes[0], cam, t, &frame, rw, rh, nullptr);
 		} else {
 			out_begin(&out);
 			EndTextureMode();
@@ -867,7 +869,7 @@ int clip_netlog(const ClipRequest *req)
 					map_draw(&views[v].dir, views[v].player ? views[v].faction : -1, -1, rw / 2, rh);
 					draw_heading(heading, rw / 2);
 				} else {
-					playback_draw(&views[v], &renderer, &scenes[v], half_cam, t, &frame, rw / 2, rh, heading);
+					playback_draw(&views[v], &renderer[v], &scenes[v], half_cam, t, &frame, rw / 2, rh, heading);
 				}
 				EndTextureMode();
 				BeginTextureMode(out.big);
@@ -902,7 +904,7 @@ int clip_netlog(const ClipRequest *req)
 	for (int v = 0; v < count; v++) mismatches += views[v].mismatches;
 	if (count == 2) UnloadRenderTexture(half);
 	int status = out_close(&out, mismatches ? fail("a client's hashes mismatched", req->netlog) : 0);
-	renderer_unload(&renderer);
+	for (int v = 0; v < count; v++) renderer_unload(&renderer[v]);
 	for (int v = 0; v < count; v++)
 		if (views[v].player) remote_destroy(&views[v].remote);
 	return status;

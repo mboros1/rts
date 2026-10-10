@@ -2,7 +2,8 @@
 # tools/world-smoke BIN_DIR OUT_DIR: the game as a player gets it, through
 # `rts world`. Checks that:
 #   - a new world starts its coordinator and zones in the background, and the
-#     map (as text) shows every zone up and reporting, and blue's map shows
+#     map (as text) shows every zone up and reporting, home zones with the
+#     home economy, and blue's map shows
 #     nothing of red's numbers (fog);
 #   - a player's journey (map, a zone, the map, another zone) keeps its
 #     faction in step, with the bot playing as that player;
@@ -37,6 +38,8 @@ for i in 1 2 3 4 5 6 7 8 9 10; do # until every zone has reported
 done
 [ "$(grep -c ' up ' "$out/status1.txt")" = 3 ] || fail "not all three zones up: $(cat "$out/status1.txt")"
 grep -q 'links: west-middle middle-east' "$out/status1.txt" || fail "no links on the map"
+grep -q '^context west: economy home$' "$out/status1.txt" || fail "blue's home isn't given the home economy"
+grep -q 'economy home' "$out/w/live/middle.script" && fail "a front was given the home economy"
 # Fog: blue's map has nothing of red's numbers, even in red's home.
 grep '^east ' "$out/status1.txt" | grep -q 'red 0 units 0 bldg' && fail "red's home looks empty to a spectator"
 $world --status --as blue > "$out/status-blue.txt"

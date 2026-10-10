@@ -9,6 +9,8 @@
 //   scenario skirmish                 # starting config and bot behaviour
 //   seed 7 | units 400 | weights 6 3 2 | respawn off | economy on
 //   players blue 3                    # a side's players (1..8), each with their own base
+//   economy rich cost=0.9             # economy: the zone's rules, and its environment
+//   environment barren generator=2    #   (context.h: presets and fields)
 //   commanders on                     # economy: each player starts with only a commander
 //                                     #   (and a side with a base, its headquarters); see sim.h
 //   bases blue | bases red | bases none | bases both  # economy: who starts with a base

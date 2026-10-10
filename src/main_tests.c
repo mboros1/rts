@@ -8,6 +8,7 @@
 #include "bot.c"
 #include "replay.c"
 #include "scenario.c"
+#include "context.c"
 #include "script.c"
 #include "wire.c"
 #include "menu.c"
@@ -1147,7 +1148,7 @@ static void test_economies(void)
 	float before = e1->metal;
 	sim_step(&sim, nullptr, 0);
 	CHECK(e0->metal == e0->metal_cap);
-	float base = 1.0f * SIM_DT;   // BASE_METAL_INCOME, a tick of it
+	float base = 1.0f * SIM_DT;   // the default base_metal, a tick of it
 	CHECK(e1->metal > before + 2.0f * base - 1e-3f && e1->metal < before + 2.0f * base + 1e-3f);
 	// Shares: what's asked, up to what the giver has and the taker's room.
 	Command share = share_command((FactionId){0}, (PlayerSlot){1}, (PlayerSlot){0}, 100.0f, 0.0f);
@@ -1259,13 +1260,13 @@ static void test_trucks(void)
 	};
 	sim_step(&sim, setup, 3);
 	sim_step(&sim, nullptr, 0);
-	CHECK(e->energy_cap == BASE_ENERGY_CAP + 2.0f * TRUCK_ENERGY && e->metal_cap == BASE_METAL_CAP + TRUCK_METAL);
-	CHECK(e1->energy_cap == BASE_ENERGY_CAP);
+	CHECK(e->energy_cap == zone_context_default().energy_cap + 2.0f * zone_context_default().truck_energy && e->metal_cap == zone_context_default().metal_cap + zone_context_default().truck_metal);
+	CHECK(e1->energy_cap == zone_context_default().energy_cap);
 	// Room is room: past the base, income stays with player 0, not spilling to 1.
-	e->energy = BASE_ENERGY_CAP;
+	e->energy = zone_context_default().energy_cap;
 	float e1_before = e1->energy;
 	for (int t = 0; t < 30; t++) sim_step(&sim, nullptr, 0);
-	CHECK(e->energy > BASE_ENERGY_CAP + 29.0f && e1->energy < e1_before + 31.0f);
+	CHECK(e->energy > zone_context_default().energy_cap + 29.0f && e1->energy < e1_before + 31.0f);
 	UnitHandle truck[3];
 	for (ptrdiff_t i = 0, n = 0; i < u->count; i++)
 		if (unit_is_truck(u->type[i])) truck[n++] = units_handle(u, i);
@@ -1276,16 +1277,16 @@ static void test_trucks(void)
 	float e1_had = e1->energy;
 	Command give = {.faction = {0}, .player = {0}, .to = {1}, .kind = COMMAND_GIVE, .count = 1, .units = &energy_truck};
 	sim_step(&sim, &give, 1);
-	CHECK(e->energy_cap == BASE_ENERGY_CAP + TRUCK_ENERGY && e1->energy_cap == BASE_ENERGY_CAP + TRUCK_ENERGY);
+	CHECK(e->energy_cap == zone_context_default().energy_cap + zone_context_default().truck_energy && e1->energy_cap == zone_context_default().energy_cap + zone_context_default().truck_energy);
 	CHECK(e->energy > 12990.0f && e->energy < 13100.0f);           // 18000 less a load, plus a tick's income
-	CHECK(e1->energy > e1_had + TRUCK_ENERGY - 1.0f);
+	CHECK(e1->energy > e1_had + zone_context_default().truck_energy - 1.0f);
 	// Dug in as a vault, the room stays.
 	UnitHandle other = unit_handle_eq(energy_truck, truck[0]) ? truck[1] : truck[0];
 	if (u->type[units_find(u, other)] != UNIT_ENERGY_TRUCK) other = truck[2];
 	Command dig = {.faction = {0}, .player = {0}, .kind = COMMAND_ENTRENCH, .count = 1, .units = &other};
 	sim_step(&sim, &dig, 1);
 	for (int t = 0; t < 200; t++) sim_step(&sim, nullptr, 0);
-	CHECK(u->type[units_find(u, other)] == UNIT_ENERGY_VAULT && e->energy_cap == BASE_ENERGY_CAP + TRUCK_ENERGY);
+	CHECK(u->type[units_find(u, other)] == UNIT_ENERGY_VAULT && e->energy_cap == zone_context_default().energy_cap + zone_context_default().truck_energy);
 	// The metal truck sent through the transporter, for player 1: a full load
 	// leaves, even from below the base (the player chose to send it).
 	UnitHandle metal_truck = truck[0];
@@ -1303,7 +1304,7 @@ static void test_trucks(void)
 				CHECK(player_eq(f->departures[k].owner, (PlayerSlot){1}) && f->departures[k].energy == 0.0f);
 			}
 	}
-	CHECK(left_m == TRUCK_METAL);
+	CHECK(left_m == zone_context_default().truck_metal);
 	CHECK(e->metal < 600.0f);                                        // 1500 less the load, plus income
 	// Arriving: two metal trucks for player 1 bring their room and 1500 metal.
 	sim_step(&sim, nullptr, 0);
@@ -1311,13 +1312,13 @@ static void test_trucks(void)
 	Command arrive = {.faction = {0}, .player = {1}, .kind = COMMAND_ARRIVE, .unit_type = UNIT_METAL_TRUCK, .amount = 2,
 	                  .target = {110, 256}, .metal = 1500.0f};
 	sim_step(&sim, &arrive, 1);
-	CHECK(e1->metal_cap == BASE_METAL_CAP + 2.0f * TRUCK_METAL && e1->metal > m1 + 1499.0f);
+	CHECK(e1->metal_cap == zone_context_default().metal_cap + 2.0f * zone_context_default().truck_metal && e1->metal > m1 + 1499.0f);
 	// The vault destroyed: the room goes, and what's past the cap with it.
 	e->energy = e->energy_cap;
 	u->hp[units_find(u, other)] = 0.0f;
 	sim_step(&sim, nullptr, 0);
 	sim_step(&sim, nullptr, 0);
-	CHECK(e->energy_cap == BASE_ENERGY_CAP && e->energy <= BASE_ENERGY_CAP);
+	CHECK(e->energy_cap == zone_context_default().energy_cap && e->energy <= zone_context_default().energy_cap);
 	sim_destroy(&sim);
 }
 
@@ -1455,7 +1456,7 @@ static void test_commanders(void)
 	}
 	CHECK(hq == 1 && cmd == 2 && other == 0);
 	sim_step(&sim, nullptr, 0);
-	CHECK(f->economy[1].metal_cap == BASE_METAL_CAP && f->economy[1].metal_income > 0.0f);
+	CHECK(f->economy[1].metal_cap == zone_context_default().metal_cap && f->economy[1].metal_income > 0.0f);
 	// Can't be given away.
 	Command give = {.faction = {0}, .player = {1}, .to = {0}, .kind = COMMAND_GIVE, .count = 1, .units = &boss[1]};
 	sim_step(&sim, &give, 1);
@@ -1471,7 +1472,7 @@ static void test_commanders(void)
 	sim_step(&sim, nullptr, 0);
 	int back = 0;
 	for (ptrdiff_t i = 0; i < u->count; i++) back += u->type[i] == UNIT_COMMANDER && u->owner[i].v == 1;
-	CHECK(back == 1 && f->respawn_at[1] == -1 && f->economy[1].metal_cap == BASE_METAL_CAP);
+	CHECK(back == 1 && f->respawn_at[1] == -1 && f->economy[1].metal_cap == zone_context_default().metal_cap);
 	// blue.0 warps home: 10 s at full rate, 5000 energy, then beside the
 	// headquarters, recharging; it can't warp again meanwhile.
 	ptrdiff_t b0 = units_find(u, boss[0]);
@@ -1585,6 +1586,72 @@ static void test_game_over(void)
 	sim_destroy(&late);
 	arena_destroy(&a);
 	sim_destroy(&sim);
+}
+
+// A zone's context: presets and fields, refused whole when wrong; the
+// standard one is the sim as it was; it changes what a zone pays and earns;
+// and it travels with the config (wire, replays).
+static void test_context(void)
+{
+	ZoneContext c = zone_context_default();
+	char err[200];
+	CHECK(zone_context_ok(&c) && c.base_metal == 1.0f && c.metal_cap == 2000.0f && c.yield[SOURCE_GENERATOR] == 1.0f);
+	CHECK(context_parse(&c, CONTEXT_ECONOMY, "home", err, sizeof err) && c.base_metal == 8.0f);
+	CHECK(context_parse(&c, CONTEXT_ECONOMY, "cost=1.5 truck_metal=2000", err, sizeof err) && c.base_metal == 8.0f
+	      && c.cost == 1.5f && c.truck_metal == 2000.0f);
+	CHECK(context_parse(&c, CONTEXT_ENVIRONMENT, "barren generator=2", err, sizeof err)
+	      && c.yield[SOURCE_METAL] == 0.5f && c.yield[SOURCE_GENERATOR] == 2.0f && c.cost == 1.5f); // parts apart
+	CHECK(context_parse(&c, CONTEXT_ECONOMY, "lean", err, sizeof err) && c.cost == 1.25f && c.truck_metal == 1000.0f
+	      && c.yield[SOURCE_GENERATOR] == 2.0f); // a preset sets its own part only
+	ZoneContext before = c;
+	const char *bad_economy[] = {"plenty", "cost=", "cost=-1", "cost=abc", "wind=2", "cost=1 home", "start_metal=5000",
+	                             "build_time=0", "cost=200"};
+	for (int k = 0; k < (int)countof(bad_economy); k++)
+		CHECK(!context_parse(&c, CONTEXT_ECONOMY, bad_economy[k], err, sizeof err) && !memcmp(&c, &before, sizeof c));
+	CHECK(!context_parse(&c, CONTEXT_ENVIRONMENT, "wind=0.3", err, sizeof err)); // no wind yet: a typo fails
+	CHECK(!context_parse(&c, CONTEXT_ENVIRONMENT, "cost=2", err, sizeof err));   // an economy field
+	CHECK(parse_fails("scenario economy\neconomy rich cost=nope\n", "expected a number"));
+	CHECK(parse_fails("scenario economy\nenvironment marsh\n", "a preset"));
+
+	// What a zone pays and earns: twice the cost, half the generators.
+	SimConfig cfg = sim_config_default();
+	cfg.economy = true;
+	cfg.bases = 1;
+	SimConfig lean = cfg;
+	lean.context.cost = 2.0f;
+	lean.context.yield[SOURCE_GENERATOR] = 0.5f;
+	Sim a, b;
+	sim_init(&a, cfg);
+	sim_init(&b, lean);
+	for (Sim *sim = &a; sim; sim = sim == &a ? &b : nullptr) {
+		Command gen = {.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_GENERATOR, .amount = 4, .target = v2(60.0f, 200.0f), .radius = 8.0f};
+		sim_step(sim, &gen, 1);
+		Units *u = &sim->factions[0].units;
+		UnitHandle plant = NO_UNIT;
+		for (ptrdiff_t i = 0; i < u->count; i++)
+			if (u->type[i] == UNIT_FACTORY) plant = units_handle(u, i);
+		Command make = {.faction = {0}, .kind = COMMAND_PRODUCE, .unit_type = UNIT_TANK, .amount = 1, .count = 1, .units = &plant};
+		sim_step(sim, &make, 1);
+		for (int t = 0; t < 10; t++) sim_step(sim, nullptr, 0);
+	}
+	const Economy *ea = &a.factions[0].economy[0], *eb = &b.factions[0].economy[0];
+	CHECK(ea->energy_income > eb->energy_income && eb->energy_income == 30.0f + 4 * 40.0f * 0.5f);
+	CHECK(ea->metal_wanted > 0.0f && eb->metal_wanted > 1.99f * ea->metal_wanted && eb->metal_wanted < 2.01f * ea->metal_wanted);
+	sim_destroy(&a);
+	sim_destroy(&b);
+
+	// It travels: the wire's config and a replay's header.
+	Arena ar = arena_create("context", 4 << 20);
+	ByteBuf buf = bytebuf_make(&ar, 1024);
+	wire_put_config(&buf, &lean);
+	ByteReader r = byte_reader(buf.data, buf.len);
+	SimConfig back = sim_config_default();
+	CHECK(wire_get_config(&r, &back) && r.pos == r.len && !memcmp(&back.context, &lean.context, sizeof lean.context));
+	ReplayWriter w;
+	replay_begin(&w, &ar, lean);
+	ReplayReader rr;
+	CHECK(replay_open(&rr, replay_bytes(&w)) == REPLAY_OK && !memcmp(&rr.config.context, &lean.context, sizeof lean.context));
+	arena_destroy(&ar);
 }
 
 // Players: every unit has an owner and only the owner's orders move it;
@@ -1732,6 +1799,7 @@ static const Test tests[] = {
 	{"keymap", test_keymap},
 	{"commanders", test_commanders},
 	{"game-over", test_game_over},
+	{"context", test_context},
 };
 
 // tests            run all, in order

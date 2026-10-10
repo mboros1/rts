@@ -77,6 +77,24 @@ static bool running(WorldCmd *w, const char *name) { return platform_alive(read_
 
 // The formats a world's saved state is in; a world made by another build
 // can't be continued, only replaced.
+// Zone k's context as script lines, in order: home's preset, every zone's,
+// its own; each checked (a bad one is fatal, naming the file). With no
+// buffer, only checked.
+static void zone_context_lines(const World *wd, int k, const char *file, char *out, size_t out_len)
+{
+	const char *lines[][2] = {{"economy", wd->zones[k].home >= 0 ? "home" : ""}, {"economy", wd->economy},
+	                          {"economy", wd->economy_in[k]}, {"environment", wd->environment},
+	                          {"environment", wd->environment_in[k]}};
+	ZoneContext zc = zone_context_default();
+	for (int l = 0; l < (int)countof(lines); l++) {
+		if (!lines[l][1][0]) continue;
+		char why[160];
+		if (!context_parse(&zc, l < 3 ? CONTEXT_ECONOMY : CONTEXT_ENVIRONMENT, lines[l][1], why, sizeof why))
+			fatal("%s: %s %s (zone %s): %s", file, lines[l][0], lines[l][1], wd->zones[k].name, why);
+		if (out) snprintf(out + strlen(out), out_len - strlen(out), "%s %s\n", lines[l][0], lines[l][1]);
+	}
+}
+
 static const char *formats(void) { return fmt("zone-state %d wire %d\n", ZONE_STATE_VERSION, WIRE_VERSION); }
 
 static bool load_world(WorldCmd *w)
@@ -201,6 +219,13 @@ static void print_status(WorldCmd *w, uint8_t viewer)
 		return;
 	}
 	directory_print(&d, stdout);
+	// Each zone's context, as the world file gave it.
+	for (int k = 0; k < w->world.zone_count; k++) {
+		char lines[1024] = "";
+		zone_context_lines(&w->world, k, "world.txt", lines, sizeof lines);
+		for (char *l = lines; *l; l++) if (*l == '\n') *l = *(l + 1) ? ';' : 0;
+		if (lines[0]) printf("context %s: %s\n", w->world.zones[k].name, lines);
+	}
 }
 
 int world_main(int argc, char **argv)
@@ -243,15 +268,19 @@ int world_main(int argc, char **argv)
 
 	bool have = load_world(&w);
 	if (new_file || load) {
+		// A new world's file is checked whole before the old world goes.
+		Str text = {0};
+		static World check;
+		if (new_file) {
+			char err[256];
+			if (!platform_read_file(&w.arena, new_file, &text)) fatal("cannot read %s", new_file);
+			if (!world_parse(&check, text, new_file, err, sizeof err)) fatal("%s", err);
+			for (int k = 0; k < check.zone_count; k++) zone_context_lines(&check, k, new_file, nullptr, 0);
+		}
 		if (have && any_running(&w) && !world_stop(&w)) fatal("cannot stop the running world");
 		const char *rm[] = {"rm", "-rf", w.live, nullptr};
 		run_tool(rm);
 		if (new_file) {
-			Str text;
-			World check;
-			char err[256];
-			if (!platform_read_file(&w.arena, new_file, &text)) fatal("cannot read %s", new_file);
-			if (!world_parse(&check, text, new_file, err, sizeof err)) fatal("%s", err);
 			if (!platform_make_dir(w.live)) fatal("cannot create %s", w.live);
 			if (!platform_write_file(live_path(&w, "world.txt"), text.ptr, text.len)) fatal("cannot write world.txt");
 			if (!platform_write_file(live_path(&w, "formats"), formats(), (ptrdiff_t)strlen(formats())))
@@ -262,15 +291,17 @@ int world_main(int argc, char **argv)
 				for (const char *c = check.zones[k].name; *c; c++) seed = (seed ^ (uint8_t)*c) * 1099511628211u;
 				// Only a side's home zone starts with its base; elsewhere it has to get in.
 				int8_t home = check.zones[k].home;
-				char script[2048];
+				char script[4096];
 				snprintf(script, sizeof script, "scenario economy\ncommanders on\nseed %llu\nbases %s\nplayers blue %d\nplayers red %d\n%s%s%s%s%s%s%s",
 				                         (unsigned long long)(seed % 1000000007u),
 				                         home == 0 ? "blue" : home == 1 ? "red" : "none", check.players[0], check.players[1],
 				                         world_doctrine(&check, k, 0)[0] ? "doctrine blue " : "", world_doctrine(&check, k, 0),
 				                         world_doctrine(&check, k, 0)[0] ? "\n" : "",
 				                         world_doctrine(&check, k, 1)[0] ? "doctrine red " : "", world_doctrine(&check, k, 1),
-				                         world_doctrine(&check, k, 1)[0] ? "\n" : "", check.setup[k]);
-				static_assert(sizeof script > sizeof check.setup[0] + 3 * 192 + 128, "room for the zone script");
+				                         world_doctrine(&check, k, 1)[0] ? "\n" : "", "");
+				zone_context_lines(&check, k, new_file, script + strlen(script), sizeof script - strlen(script));
+				snprintf(script + strlen(script), sizeof script - strlen(script), "%s", check.setup[k]);
+				static_assert(sizeof script > sizeof check.setup[0] + 7 * 192 + 128, "room for the zone script");
 				if (!platform_write_file(live_path(&w, fmt("%s.script", check.zones[k].name)), script, (ptrdiff_t)strlen(script)))
 					fatal("cannot write the zone scripts");
 			}

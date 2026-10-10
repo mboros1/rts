@@ -186,8 +186,8 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	const Units *u = &me->units;
 	// Trucks' room is for shipping, not a budget: plan on the base storage.
 	Economy plan = me->economy[bot->player.v];
-	plan.metal_cap = BASE_METAL_CAP;
-	plan.energy_cap = BASE_ENERGY_CAP;
+	plan.metal_cap = sim->config.context.metal_cap;
+	plan.energy_cap = sim->config.context.energy_cap;
 	const Economy *e = &plan;
 	const Doctrine *d = &bot->doctrine;
 	int engineers = 0, factories = 0, army = 0, scouts = 0, sappers = 0, metal_trucks = 0, energy_trucks = 0;
@@ -415,7 +415,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	// home, only once there's a factory (bot_economy builds that first).
 	if (w->home[here] && factories == 0) return;
 	if (transporters == 0 || (own_transporter(bot, u, true) && transporters < d->transporters)) {
-		if (idle_builders == 0 || e->metal < 0.5f * unit_defs[UNIT_TRANSPORTER].metal_cost) return;
+		if (idle_builders == 0 || e->metal < 0.5f * unit_defs[UNIT_TRANSPORTER].metal_cost * sim->config.context.cost) return;
 		Promised none = {0};
 		V2 site;
 		if (!site_near_base(sim, bot, UNIT_TRANSPORTER, &none, &site)) return;
@@ -461,7 +461,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 	int32_t spare_builders = idle_crew - (d->crew_builder == UNIT_ENGINEER ? 1 : 0); // an engineer stays home
 	bool trucks = idle_metal_trucks > 0 && idle_energy_trucks > 0;
 	if (spare_builders >= d->crew_builders && trucks && e->energy >= crew_energy
-	    && e->metal >= unit_defs[UNIT_TRANSPORTER].metal_cost) {
+	    && e->metal >= unit_defs[UNIT_TRANSPORTER].metal_cost * sim->config.context.cost) {
 		int target = -1;
 		for (int z = 0; z < w->count; z++)
 			if (z != here && w->linked[z] && !w->ours[z] && !bot_believes_enemy(w, z) && (target < 0 || rng_below(&bot->rng, 2)))
@@ -525,7 +525,7 @@ static void bot_strategy(Bot *bot, const Sim *sim, Arena *arena, Command *out, p
 		if (w->home[z]) home = z;
 	for (int r = 0; r < 2; r++) {
 		UnitType kind = r ? UNIT_ENERGY_TRUCK : UNIT_METAL_TRUCK;
-		float have = r ? e->energy : e->metal, base = r ? BASE_ENERGY_CAP : BASE_METAL_CAP;
+		float have = r ? e->energy : e->metal, base = r ? sim->config.context.energy_cap : sim->config.context.metal_cap;
 		const uint8_t *short_of = r ? w->short_energy : w->short_metal;
 		int32_t idle = 0;
 		ptrdiff_t truck = -1;

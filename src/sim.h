@@ -66,12 +66,15 @@ static inline bool unit_is_truck(UnitType t) { return t == UNIT_METAL_TRUCK || t
 // What entrenching applies to: combat units become turrets, trucks vaults.
 static inline bool unit_digs_in(UnitType t) { return unit_is_combat(t) || unit_is_truck(t); }
 
-// Storage: a player's room for metal and energy in a zone is the base plus
-// what their trucks and vaults there add.
-static constexpr float BASE_METAL_CAP = 2000.0f;
-static constexpr float BASE_ENERGY_CAP = 10000.0f;
-static constexpr float TRUCK_METAL = 1000.0f;   // a metal truck or vault's room; a load
-static constexpr float TRUCK_ENERGY = 5000.0f;  // an energy truck or vault's
+// Where a unit's income comes from: a zone's environment says how much each
+// gives there (ZoneContext.yield). New kinds of generator (wind, tidal,
+// solar...) are new sources.
+typedef enum : uint8_t {
+	SOURCE_NONE,
+	SOURCE_METAL,       // extractors, on metal spots
+	SOURCE_GENERATOR,   // the plain generator
+	SOURCE_COUNT,
+} IncomeSource;
 
 // What a unit type is. Content, not state: never changes during a run.
 typedef struct {
@@ -96,7 +99,8 @@ typedef struct {
 	float metal_cost, energy_cost;
 	float build_time;
 	float build_power;  // engineers and factories
-	float metal_income, energy_income; // per second, once built
+	float metal_income, energy_income; // per second, once built, times the zone's yield of its source
+	IncomeSource source;
 } UnitDef;
 
 extern const UnitDef unit_defs[UNIT_TYPE_COUNT];
@@ -111,6 +115,37 @@ typedef enum : uint8_t {
 	ORDER_WARP,         // a commander warping home: still, silent, paying (work: progress); a hit stops it
 	ORDER_KIND_COUNT,
 } OrderKind;
+
+// A zone's context: its economy's rules, and its environment (what each
+// income source gives there). Set per zone, like doctrines (context.h);
+// zone_context_default() is the standard one.
+typedef struct {
+	// The rules.
+	float start_metal, start_energy;   // each player's, at the start
+	float base_metal, base_energy;     // free income per second, where a player's commander is
+	float metal_cap, energy_cap;       // base storage, there too
+	float truck_metal, truck_energy;   // a truck's or vault's room (a full load)
+	float cost;                        // times every unit's metal and energy cost
+	float build_time;                  // times every unit's build time
+	// The environment.
+	float yield[SOURCE_COUNT];         // times the income of units of each source
+} ZoneContext;
+
+ZoneContext zone_context_default(void);
+
+// Every field of a context, in order, for writing and reading it (wire,
+// replays, saves) and for its checks: zone_context_ok() is false on anything
+// outside what the sim can run with (it asserts on nothing a file can say).
+enum { ZONE_CONTEXT_FIELDS = 10 + SOURCE_COUNT };
+static inline float *zone_context_field(ZoneContext *c, int k)
+{
+	float *fields[ZONE_CONTEXT_FIELDS] = {&c->start_metal, &c->start_energy, &c->base_metal, &c->base_energy,
+	                                      &c->metal_cap, &c->energy_cap, &c->truck_metal, &c->truck_energy,
+	                                      &c->cost, &c->build_time, &c->yield[0], &c->yield[1], &c->yield[2]};
+	static_assert(SOURCE_COUNT == 3, "a field per source");
+	return fields[k];
+}
+bool zone_context_ok(const ZoneContext *c);
 
 typedef struct {
 	uint64_t seed;
@@ -130,6 +165,7 @@ typedef struct {
 	// their commander is. Off: the older start (a factory and two engineers
 	// each), base storage and income everywhere.
 	bool commanders;
+	ZoneContext context;      // economy: its rules and environment here
 } SimConfig;
 
 SimConfig sim_config_default(void);
@@ -141,7 +177,7 @@ static inline bool sim_config_equal(const SimConfig *a, const SimConfig *b)
 	         && a->spawn_interval == b->spawn_interval && a->max_units == b->max_units
 	         && a->max_projectiles == b->max_projectiles && a->economy == b->economy && a->bases == b->bases;
 	for (int f = 0; f < FACTION_COUNT; f++) same = same && a->players[f] == b->players[f];
-	same = same && a->commanders == b->commanders;
+	same = same && a->commanders == b->commanders && !memcmp(&a->context, &b->context, sizeof a->context);
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) same = same && a->type_weight[k] == b->type_weight[k];
 	return same;
 }

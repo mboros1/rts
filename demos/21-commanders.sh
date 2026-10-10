@@ -15,7 +15,7 @@ about="Each player starts with only a commander: it builds the first factory, th
 work="$B/demo-commanders"
 rm -rf "$work"; mkdir -p "$work"
 # Setup: blue's generators, so the warp's 5000 energy comes in the time the demo has.
-printf 'scenario economy\ncommanders on\nbot blue off\nat 0 spawn blue generator 12 at 50,200 radius 12\n' > "$work/zone.script"
+printf 'scenario economy\ncommanders on\neconomy home\nbot blue off\nat 0 spawn blue generator 12 at 50,200 radius 12\n' > "$work/zone.script"
 port=$((39000 + $$ % 2000 * 3))
 "$B/rts-server" --script "$work/zone.script" --port "$port" --ticks 3000 > "$work/server.out" 2>&1 &
 server=$!

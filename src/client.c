@@ -516,7 +516,7 @@ static void client_bot(Client *c)
 static void client_overlay(const Client *c, bool connected)
 {
 	int y = 10, line = 20;
-	DrawRectangle(5, 5, 520, 7 * line + 10, (Color){0, 0, 0, 150});
+	DrawRectangle(5, 5, 680, 9 * line + 10, (Color){0, 0, 0, 150});
 	const char *side = c->opt.faction == 0 ? "blue" : c->opt.faction == 1 ? "red" : "spectator";
 	DrawText(TextFormat("%d fps   %s at %s:%d   tick %lld%s", GetFPS(), side, c->opt.host, c->opt.port,
 	                    (long long)client_tick(c), c->player ? "   simulating locally" : ""), 12, y, 18, RAYWHITE);
@@ -532,6 +532,15 @@ static void client_overlay(const Client *c, bool connected)
 	         12, y, 16, LIGHTGRAY);
 	y += line;
 	DrawText(TextFormat("commands sent %lld", (long long)c->commands_sent), 12, y, 16, LIGHTGRAY);
+	y += line;
+	// This zone's context: what it gives and what things cost here.
+	const ZoneContext *zc = &c->config.context;
+	DrawText(TextFormat("zone economy: free %.1f metal, %.0f energy /s; storage %.0f / %.0f; costs x%.2f, build time x%.2f",
+	                    (double)zc->base_metal, (double)zc->base_energy, (double)zc->metal_cap, (double)zc->energy_cap,
+	                    (double)zc->cost, (double)zc->build_time), 12, y, 14, LIGHTGRAY);
+	y += line;
+	DrawText(TextFormat("zone environment: extractors x%.2f, generators x%.2f", (double)zc->yield[SOURCE_METAL],
+	                    (double)zc->yield[SOURCE_GENERATOR]), 12, y, 14, LIGHTGRAY);
 	y += line;
 	DrawText(TextFormat("%s or %s: strategic map | %s: this overlay", keymap_key_name(c->keys.key[BIND_MAP]),
 	                    keymap_key_name(c->keys.key[BIND_CANCEL]), keymap_key_name(c->keys.key[BIND_OVERLAY])),

@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 16; // 16: the game ending
+static constexpr uint32_t REPLAY_VERSION = 17; // 17: zone contexts
 
 // ---------------------------------------------------------------- writing
 
@@ -55,6 +55,7 @@ void replay_begin_from(ReplayWriter *w, Arena *buf, SimConfig c, Str snapshot)
 	put_u32(w, c.bases);
 	for (int f = 0; f < FACTION_COUNT; f++) put_u32(w, c.players[f]);
 	put_u32(w, c.commanders);
+	for (int k = 0; k < ZONE_CONTEXT_FIELDS; k++) put_f32(w, *zone_context_field(&c.context, k));
 	put_u32(w, (uint32_t)snapshot.len);
 	if (snapshot.len) put(w, snapshot.ptr, snapshot.len);
 }
@@ -193,6 +194,9 @@ ReplayStatus replay_open(ReplayReader *r, Str data)
 	if (!get_u32(r, &commanders)) return REPLAY_TRUNCATED;
 	if (commanders > 1) return REPLAY_BAD_CONFIG;
 	c->commanders = commanders;
+	for (int k = 0; k < ZONE_CONTEXT_FIELDS; k++)
+		if (!get_f32(r, zone_context_field(&c->context, k))) return REPLAY_TRUNCATED;
+	if (!zone_context_ok(&c->context)) return REPLAY_BAD_CONFIG;
 	// sim_init asserts on these; a file must not be able to trip an assert.
 	if (c->max_units <= 0 || c->max_projectiles <= 0 || c->spawn_interval <= 0
 	    || c->population > c->max_units || c->initial_units > c->population

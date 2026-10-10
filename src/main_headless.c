@@ -24,6 +24,7 @@
 #include "bot.c"
 #include "replay.c"
 #include "scenario.c"
+#include "context.c"
 #include "script.c"
 #include "wire.c"
 

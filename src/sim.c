@@ -72,11 +72,11 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 	},
 	[UNIT_EXTRACTOR] = {
 		.name = "extractor", .radius = 1.6f, .sight = 20.0f, .height = 1.6f, .hp = 300.0f,
-		.metal_cost = 50.0f, .energy_cost = 500.0f, .build_time = 60.0f, .metal_income = 3.0f,
+		.metal_cost = 50.0f, .energy_cost = 500.0f, .build_time = 60.0f, .metal_income = 3.0f, .source = SOURCE_METAL,
 	},
 	[UNIT_GENERATOR] = {
 		.name = "generator", .radius = 1.8f, .sight = 16.0f, .height = 3.0f, .hp = 200.0f,
-		.metal_cost = 40.0f, .energy_cost = 0.0f, .build_time = 50.0f, .energy_income = 40.0f,
+		.metal_cost = 40.0f, .energy_cost = 0.0f, .build_time = 50.0f, .energy_income = 40.0f, .source = SOURCE_GENERATOR,
 	},
 	[UNIT_FACTORY] = {
 		.name = "factory", .radius = 4.0f, .sight = 30.0f, .height = 3.5f, .hp = 1500.0f,
@@ -111,16 +111,7 @@ static constexpr float KIT_SPACING = 30.0f;        // between players' starting 
 static constexpr float MAX_SIGHT = 70.0f;          // the furthest any unit sees (scouts): checked in sim_init
 static constexpr float MAX_RADIUS = 5.0f;           // transporters; separation reach
 
-// The economy's constants: what a faction starts with and earns for free
-// (its headquarters), and how close a builder must be.
-static constexpr float START_METAL = 600.0f;
-static constexpr float START_ENERGY = 3000.0f;
-static constexpr float BASE_METAL_INCOME = 1.0f;
-static constexpr float BASE_ENERGY_INCOME = 30.0f;
-// At home (where the side's headquarters is) a player whose commander is
-// there gets more: home is where the surplus army comes from, and its metal
-// overflows into storage and trucks for the fronts.
-static constexpr float HOME_METAL_INCOME = 8.0f;
+// How close a builder must be.
 static constexpr float BUILD_RANGE = 6.0f;          // beyond the structure's radius
 static constexpr float GRID_CELL = 8.0f;
 static constexpr int32_t RETARGET_PERIOD = 8;
@@ -130,9 +121,34 @@ static constexpr uint32_t NO_SLOT = UINT32_MAX;
 
 static constexpr UnitHandle NO_UNIT = {NO_SLOT, 0};
 
+ZoneContext zone_context_default(void)
+{
+	return (ZoneContext){
+		.start_metal = 600.0f, .start_energy = 3000.0f,
+		.base_metal = 1.0f, .base_energy = 30.0f,
+		.metal_cap = 2000.0f, .energy_cap = 10000.0f,
+		.truck_metal = 1000.0f, .truck_energy = 5000.0f,
+		.cost = 1.0f, .build_time = 1.0f,
+		.yield = {1.0f, 1.0f, 1.0f},
+	};
+}
+
+bool zone_context_ok(const ZoneContext *c)
+{
+	ZoneContext copy = *c;
+	for (int k = 0; k < ZONE_CONTEXT_FIELDS; k++) {
+		float v = *zone_context_field(&copy, k);
+		if (!(v >= 0.0f && v <= 1e7f)) return false; // NaN fails too
+	}
+	// Starting past the room there is, or building in no time, can't be.
+	return c->start_metal <= c->metal_cap && c->start_energy <= c->energy_cap && c->cost <= 100.0f
+	    && c->build_time >= 0.01f && c->build_time <= 100.0f;
+}
+
 SimConfig sim_config_default(void)
 {
 	return (SimConfig){
+		.context = zone_context_default(),
 		.seed = 1,
 		.bases = (1 << FACTION_COUNT) - 1,
 		.initial_units = 5000,
@@ -669,8 +685,14 @@ static void apply_send(Faction *f, const Sim *sim, const Command *c)
 }
 
 // What a unit adds to its owner's storage: trucks and vaults.
-static float storage_metal(UnitType t) { return t == UNIT_METAL_TRUCK || t == UNIT_METAL_VAULT ? TRUCK_METAL : 0.0f; }
-static float storage_energy(UnitType t) { return t == UNIT_ENERGY_TRUCK || t == UNIT_ENERGY_VAULT ? TRUCK_ENERGY : 0.0f; }
+static float storage_metal(const ZoneContext *zc, UnitType t)
+{
+	return t == UNIT_METAL_TRUCK || t == UNIT_METAL_VAULT ? zc->truck_metal : 0.0f;
+}
+static float storage_energy(const ZoneContext *zc, UnitType t)
+{
+	return t == UNIT_ENERGY_TRUCK || t == UNIT_ENERGY_VAULT ? zc->truck_energy : 0.0f;
+}
 
 // Which players have their commander here (bit per slot): with commanders,
 // only they have the base storage and the free income.
@@ -691,14 +713,14 @@ static void count_storage(Faction *f, const Sim *sim)
 	int players = sim->config.players[f->id.v];
 	uint8_t based = sim->config.commanders ? commanders_here(f) : 0xff;
 	for (int p = 0; p < players; p++) {
-		f->economy[p].metal_cap = based >> p & 1 ? BASE_METAL_CAP : 0.0f;
-		f->economy[p].energy_cap = based >> p & 1 ? BASE_ENERGY_CAP : 0.0f;
+		f->economy[p].metal_cap = based >> p & 1 ? sim->config.context.metal_cap : 0.0f;
+		f->economy[p].energy_cap = based >> p & 1 ? sim->config.context.energy_cap : 0.0f;
 	}
 	const Units *u = &f->units;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (u->owner[i].v >= players || u->progress[i] < 1.0f) continue;
-		f->economy[u->owner[i].v].metal_cap += storage_metal(u->type[i]);
-		f->economy[u->owner[i].v].energy_cap += storage_energy(u->type[i]);
+		f->economy[u->owner[i].v].metal_cap += storage_metal(&sim->config.context, u->type[i]);
+		f->economy[u->owner[i].v].energy_cap += storage_energy(&sim->config.context, u->type[i]);
 	}
 	for (int p = 0; p < players; p++) {
 		Economy *e = &f->economy[p];
@@ -709,25 +731,25 @@ static void count_storage(Faction *f, const Sim *sim)
 
 // A truck's load, taken from its owner's store: as much as its room, or as
 // they have.
-static void take_load(Faction *f, ptrdiff_t i, float *metal, float *energy)
+static void take_load(Faction *f, const ZoneContext *zc, ptrdiff_t i, float *metal, float *energy)
 {
 	Economy *e = &f->economy[f->units.owner[i].v];
-	*metal = f_min(storage_metal(f->units.type[i]), e->metal);
-	*energy = f_min(storage_energy(f->units.type[i]), e->energy);
+	*metal = f_min(storage_metal(zc, f->units.type[i]), e->metal);
+	*energy = f_min(storage_energy(zc, f->units.type[i]), e->energy);
 	e->metal -= *metal;
 	e->energy -= *energy;
 }
 
 // A unit changing hands. Storage takes its room to the new owner, and a load
 // with it: as much as its room, or as the old owner has.
-static void hand_over(Faction *f, int players, ptrdiff_t i, PlayerSlot to)
+static void hand_over(Faction *f, const ZoneContext *zc, int players, ptrdiff_t i, PlayerSlot to)
 {
 	Units *u = &f->units;
-	float room_m = storage_metal(u->type[i]), room_e = storage_energy(u->type[i]);
+	float room_m = storage_metal(zc, u->type[i]), room_e = storage_energy(zc, u->type[i]);
 	if ((room_m > 0.0f || room_e > 0.0f) && u->progress[i] >= 1.0f && u->owner[i].v < players && to.v < players
 	    && !player_eq(u->owner[i], to)) {
 		float m, e;
-		take_load(f, i, &m, &e);
+		take_load(f, zc, i, &m, &e);
 		Economy *from = &f->economy[u->owner[i].v], *dst = &f->economy[to.v];
 		from->metal_cap -= room_m;
 		from->energy_cap -= room_e;
@@ -807,7 +829,7 @@ static void apply_give(Faction *f, const Sim *sim, const Command *c)
 		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0 || unit_is_personal(u->type[d])) continue; // a commander stays its player's
 		if (c->kind == COMMAND_GIVE) {
-			hand_over(f, players, d, c->to);
+			hand_over(f, &sim->config.context, players, d, c->to);
 			// A factory's output stays where it was pointed; anything else
 			// (a unit on its way out included) is now wholly theirs.
 			if (u->type[d] != UNIT_FACTORY) u->output[d] = c->to;
@@ -904,7 +926,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 			// A factory keeps making for whoever it was pointed at, unless
 			// that was its old owner.
 			if (u->type[i] != UNIT_FACTORY || player_eq(u->output[i], u->owner[i])) u->output[i] = c->player;
-			hand_over(f, sim->config.players[f->id.v], i, c->player);
+			hand_over(f, &sim->config.context, sim->config.players[f->id.v], i, c->player);
 		}
 		return;
 	}
@@ -1384,20 +1406,21 @@ static void run_economy(Faction *f, const Sim *sim)
 	int players = sim->config.players[f->id.v];
 	count_storage(f, sim);
 	uint8_t based = sim->config.commanders ? commanders_here(f) : 0xff;
-	float base_metal = sim->config.commanders && headquarters(f) >= 0 ? HOME_METAL_INCOME : BASE_METAL_INCOME;
+	const ZoneContext *zc = &sim->config.context;
 	float income_m[MAX_PLAYERS], income_e[MAX_PLAYERS];
 	for (int p = 0; p < players; p++) {
-		income_m[p] = based >> p & 1 ? base_metal : 0.0f;
-		income_e[p] = based >> p & 1 ? BASE_ENERGY_INCOME : 0.0f;
+		income_m[p] = based >> p & 1 ? zc->base_metal : 0.0f;
+		income_e[p] = based >> p & 1 ? zc->base_energy : 0.0f;
 	}
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (u->progress[i] < 1.0f) continue;
 		const UnitDef *def = &unit_defs[u->type[i]];
 		int o = u->owner[i].v;
-		income_e[o] += def->energy_income;
+		float yield = zc->yield[def->source];
+		income_e[o] += def->energy_income * yield;
 		if (def->metal_income > 0.0f) {
 			int32_t k = spot_at(&sim->spots, v2(u->px[i], u->pz[i]));
-			if (k >= 0 && (f->spots >> k & 1)) income_m[o] += def->metal_income;
+			if (k >= 0 && (f->spots >> k & 1)) income_m[o] += def->metal_income * yield;
 		}
 	}
 	float *metal[MAX_PLAYERS], *energy[MAX_PLAYERS], metal_cap[MAX_PLAYERS], energy_cap[MAX_PLAYERS];
@@ -1442,8 +1465,8 @@ static void run_economy(Faction *f, const Sim *sim)
 		}
 		int p = u->owner[i].v;
 		const UnitDef *def = &unit_defs[j.type];
-		want_m[p] += def->metal_cost * j.work / def->build_time;
-		want_e[p] += def->energy_cost * j.work / def->build_time;
+		want_m[p] += def->metal_cost * zc->cost * j.work / (def->build_time * zc->build_time);
+		want_e[p] += def->energy_cost * zc->cost * j.work / (def->build_time * zc->build_time);
 		busy[p] = true;
 		payer[n] = (uint8_t)p;
 		jobs[n++] = j;
@@ -1490,7 +1513,7 @@ static void run_economy(Faction *f, const Sim *sim)
 		float rate = 1.0f;
 		if (def->metal_cost > 0.0f) rate = f_min(rate, rate_m[p]);
 		if (def->energy_cost > 0.0f) rate = f_min(rate, rate_e[p]);
-		float step = j->work * rate / def->build_time;
+		float step = j->work * rate / (def->build_time * zc->build_time);
 		if (j->target >= 0) {
 			// Never past done, and never paying for more than was built.
 			step = f_min(step, 1.0f - u->progress[j->target]);
@@ -1511,8 +1534,8 @@ static void run_economy(Faction *f, const Sim *sim)
 				factory_release(f, sim, j->builder, j->type);
 			}
 		}
-		spent_m[p] += def->metal_cost * step;
-		spent_e[p] += def->energy_cost * step;
+		spent_m[p] += def->metal_cost * zc->cost * step;
+		spent_e[p] += def->energy_cost * zc->cost * step;
 	}
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (u->order[i] != ORDER_TRANSFORM) continue;
@@ -1567,7 +1590,7 @@ static void add_departure(Faction *f, const Departure *dep)
 }
 
 // Charged transporters fire: the batch waiting, all for one hop and route.
-static void fire_transporters(Faction *f)
+static void fire_transporters(Faction *f, const Sim *sim)
 {
 	Units *u = &f->units;
 	int32_t leaving[PAIRED_BATCH];
@@ -1584,7 +1607,7 @@ static void fire_transporters(Faction *f)
 		                 .owner = u->output[leaving[0]]};
 		for (ptrdiff_t k = 0; k < n; k++) {
 			dep.type = u->type[leaving[k]];
-			take_load(f, leaving[k], &dep.metal, &dep.energy);
+			take_load(f, &sim->config.context, leaving[k], &dep.metal, &dep.energy);
 			add_departure(f, &dep);
 		}
 		UnitHandle gh = units_handle(u, g);
@@ -1790,7 +1813,7 @@ static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const 
 	run_commanders(f, sim);
 	if (sim->config.economy) {
 		run_economy(f, sim);
-		fire_transporters(f);
+		fire_transporters(f, sim);
 	} else {
 		// No economy to pay from: transforms and warps just take their time.
 		Units *u = &f->units;
@@ -1821,6 +1844,7 @@ void sim_init(Sim *sim, SimConfig config)
 	ASSERT(config.max_units > 0 && config.max_projectiles > 0);
 	ASSERT(config.population <= config.max_units && config.initial_units <= config.population);
 	ASSERT(config.spawn_interval > 0);
+	ASSERT(zone_context_ok(&config.context));
 	for (int k = 0; k < FACTION_COUNT; k++) ASSERT(config.players[k] >= 1 && config.players[k] <= MAX_PLAYERS);
 	int32_t weights = 0;
 	for (int k = 0; k < COMBAT_TYPE_COUNT; k++) {
@@ -1863,7 +1887,8 @@ void sim_init(Sim *sim, SimConfig config)
 		f->winner = -1;
 		for (int pl = 0; pl < MAX_PLAYERS; pl++) f->respawn_at[pl] = -1;
 		for (int pl = 0; pl < MAX_PLAYERS; pl++)
-			f->economy[pl] = (Economy){START_METAL, START_ENERGY, BASE_METAL_CAP, BASE_ENERGY_CAP, .rate = 1.0f};
+			f->economy[pl] = (Economy){config.context.start_metal, config.context.start_energy, config.context.metal_cap,
+			                           config.context.energy_cap, .rate = 1.0f};
 		if (config.economy) {
 			// Each player: a factory facing the middle, and two engineers
 			// beside it; the first at the base, the others above and below it

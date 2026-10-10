@@ -55,6 +55,7 @@
 #include "bot.c"
 #include "replay.c"
 #include "scenario.c"
+#include "context.c"
 #include "script.c"
 #include "wire.c"
 #include "net.c"
@@ -187,7 +188,7 @@ static uint8_t side_short_of(const Sim *sim, int f, bool energy)
 	uint8_t mask = 0;
 	for (int p = 0; sim->config.economy && p < sim->config.players[f]; p++) {
 		const Economy *e = &sim->factions[f].economy[p];
-		bool short_of = energy ? e->energy < 0.5f * BASE_ENERGY_CAP : e->metal < 0.5f * BASE_METAL_CAP;
+		bool short_of = energy ? e->energy < 0.5f * sim->config.context.energy_cap : e->metal < 0.5f * sim->config.context.metal_cap;
 		mask |= (uint8_t)(short_of << p);
 	}
 	return mask;
