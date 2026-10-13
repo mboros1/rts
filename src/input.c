@@ -104,6 +104,10 @@ bool input_script_load(InputScript *s, Arena *arena, const char *path, char *err
 				else if (!strcmp(tok[k], "ctrl")) st.ctrl = true;
 				else goto bad;
 			}
+		} else if ((!strcmp(verb, "press") || !strcmp(verb, "release")) && (n == 4 || (n == 5 && !strcmp(tok[4], "shift")))) {
+			st.kind = !strcmp(verb, "press") ? STEP_PRESS : STEP_RELEASE;
+			st.shift = n == 5;
+			if (!parse_xy(tok[3], &st.a)) goto bad;
 		} else if (!strcmp(verb, "drag") && (n == 5 || (n == 6 && !strcmp(tok[5], "shift")))) {
 			st.kind = STEP_DRAG;
 			st.shift = n == 6;
@@ -164,6 +168,7 @@ void input_script_frame(InputScript *s, double t, int width, int height, float d
 	*in = (Input){.mouse = s->mouse, .width = width, .height = height, .dt = dt};
 	*due = nullptr;
 	*quit = false;
+	in->held[0] = s->holding;
 	if (s->next == s->count || s->steps[s->next].at > t) return;
 	const InputStep *st = &s->steps[s->next];
 	hold_modifiers(in, st);
@@ -205,6 +210,19 @@ void input_script_frame(InputScript *s, double t, int width, int height, float d
 			s->phase = 0;
 			s->next++;
 		}
+		break;
+	case STEP_PRESS:
+		in->mouse_delta = (Vector2){st->a.x - s->mouse.x, st->a.y - s->mouse.y};
+		in->mouse = s->mouse = st->a;
+		in->click[0] = in->held[0] = s->holding = true;
+		s->next++;
+		break;
+	case STEP_RELEASE:
+		in->mouse_delta = (Vector2){st->a.x - s->mouse.x, st->a.y - s->mouse.y};
+		in->mouse = s->mouse = st->a;
+		in->release[0] = true;
+		in->held[0] = s->holding = false;
+		s->next++;
 		break;
 	case STEP_SHOT:
 	case STEP_EXPECT:

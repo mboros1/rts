@@ -477,7 +477,7 @@ static void client_input(Client *c)
 {
 	if (!c->player) return;
 	client_targets(c);
-	Order orders[16];
+	Order orders[CONTROLS_ORDERS];
 	ptrdiff_t n = controls_input(&c->controls, &c->in, &c->remote.sim, &c->view, &c->frame, orders, countof(orders));
 	for (ptrdiff_t k = 0; k < n; k++)
 		client_send_order(c, orders[k].kind, orders[k].target, orders[k].type, orders[k].amount, orders[k].flags,

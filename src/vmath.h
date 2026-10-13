@@ -19,6 +19,7 @@ typedef struct {
 static inline float f_sqrt(float x) { return __builtin_sqrtf(x); }
 static inline float f_min(float a, float b) { return a < b ? a : b; }
 static inline float f_max(float a, float b) { return a > b ? a : b; }
+static inline float f_abs(float x) { return x < 0.0f ? -x : x; }
 static inline float f_clamp(float x, float lo, float hi) { return f_min(f_max(x, lo), hi); }
 
 static inline V2 v2(float x, float z) { return (V2){x, z}; }

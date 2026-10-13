@@ -80,6 +80,8 @@ typedef struct {
 	bool dragging;
 	Vector2 drag_start;
 	int placing;            // a structure type being placed, or -1
+	bool placing_drag;      // ... the button is down: a drag lays out a grid of them
+	V2 place_from;          // ... from here (a site)
 	int tab[2];             // the build grid's open category (builders: 0) and page (factories: 1)
 	int aiming;             // move or fight, waiting for a click: its CommandKind, or -1
 	bool sending;           // send: waiting for a zone's number
@@ -97,6 +99,8 @@ void controls_clear(Controls *c);
 
 // This frame's mouse and keys (input.h), against sim's view of our own faction.
 // Orders land in out (at most cap); returns how many.
+// Orders one frame can send, at most: a grid of sites (LATER_MAX) and a few more.
+enum { CONTROLS_ORDERS = LATER_MAX + 16 };
 ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const View *view, Arena *frame, Order *out,
                          ptrdiff_t cap);
 

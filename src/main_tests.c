@@ -1782,6 +1782,20 @@ static void test_later_orders(void)
 	for (ptrdiff_t i = 0; i < u->count; i++) after += u->type[i] == UNIT_GENERATOR && u->progress[i] >= 1.0f;
 	CHECK(after == before + 2);
 
+	// Steering: a second site straight behind the first; the engineer goes
+	// round the first generator (it used to stand against it).
+	e = units_find(u, eng);
+	at = v2(u->px[e], u->pz[e]);
+	Command behind[] = {
+		{.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_GENERATOR, .target = v2_add(at, v2(0.0f, 10.0f)), .count = 1, .units = &eng},
+		{.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_GENERATOR, .target = v2_add(at, v2(0.0f, 18.0f)), .count = 1, .units = &eng, .flags = COMMAND_QUEUED},
+	};
+	sim_step(&sim, behind, countof(behind));
+	for (int t = 0; t < 3000; t++) sim_step(&sim, nullptr, 0);
+	int behind_done = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) behind_done += u->type[i] == UNIT_GENERATOR && u->progress[i] >= 1.0f;
+	CHECK(behind_done == after + 2);
+
 	// A dead unit's list goes back to the pool.
 	Command more[] = {
 		{.faction = {0}, .kind = COMMAND_MOVE, .target = v2(140.0f, 200.0f), .count = 1, .units = &tank},

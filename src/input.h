@@ -9,7 +9,9 @@
 //   at 1.0 drag 300,250 1300,650      # left-drag from one point to another
 //   at 1.5 key Q                      # a tap; also: key Q shift | key Q ctrl
 //   at 2.0 click 800,450              # left; also: click X,Y right [shift] [ctrl]
-//   at 2.0 move 800,450               # the mouse, no button
+//   at 2.0 move 800,450               # the mouse (no button, or the one pressed)
+//   at 2.2 press 800,450              # the left button down, held while the mouse moves
+//   at 2.8 release 900,500 [shift]    # ... and up: a slow drag
 //   at 2.5 shot builders              # the frame, to SHOTS/builders.png
 //   at 3.0 expect sent build >= 1     # orders sent of a kind (sent any: all kinds)
 //   at 3.0 expect selected >= 2       # units selected
@@ -48,6 +50,8 @@ typedef enum : uint8_t {
 	STEP_CLICK,
 	STEP_MOVE,
 	STEP_DRAG,
+	STEP_PRESS,                 // the left button goes down here and stays down
+	STEP_RELEASE,               // ... and comes up here
 	STEP_SHOT,
 	STEP_EXPECT,
 	STEP_QUIT,
@@ -75,6 +79,7 @@ typedef struct {
 	ptrdiff_t count;
 	ptrdiff_t next;
 	int phase;                  // a drag or a click in progress: its frame
+	bool holding;               // the left button is down (press, until release)
 	Vector2 mouse;
 	int expects, failures;
 } InputScript;

@@ -36,6 +36,7 @@ void controls_clear(Controls *c)
 	c->selection_count = 0;
 	c->dragging = false;
 	c->placing = -1;
+	c->placing_drag = false;
 	c->aiming = -1;
 	c->sending = false;
 	c->landing_for = -1;
@@ -184,6 +185,24 @@ uint8_t *controls_selected(Controls *c, const Units *own, Arena *frame)
 }
 
 // Where a structure would go for this click: extractors snap to the spot.
+static constexpr float GRID_GAP = 2.0f; // between structures laid out by a drag
+
+// A drag while placing: sites filling the rectangle from `from` to `to`,
+// a footprint and a gap apart, rows from `from` outward; one site for a
+// click, or for an extractor (they go on spots). At most `cap`.
+static ptrdiff_t grid_sites(UnitType type, V2 from, V2 to, V2 *out, ptrdiff_t cap)
+{
+	float step = 2.0f * unit_defs[type].radius + GRID_GAP;
+	float dx = to.x - from.x, dz = to.z - from.z;
+	int nx = unit_is_extractor(type) ? 1 : 1 + (int)(fabsf(dx) / step);
+	int nz = unit_is_extractor(type) ? 1 : 1 + (int)(fabsf(dz) / step);
+	float sx = dx < 0.0f ? -step : step, sz = dz < 0.0f ? -step : step;
+	ptrdiff_t n = 0;
+	for (int j = 0; j < nz; j++)
+		for (int i = 0; i < nx && n < cap; i++) out[n++] = v2(from.x + sx * (float)i, from.z + sz * (float)j);
+	return n;
+}
+
 static V2 placement_site(const Sim *sim, UnitType type, V2 at)
 {
 	if (!unit_is_extractor(type)) return at;
@@ -378,12 +397,28 @@ ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const Vie
 		V2 at;
 		if (action_pressed(c, in, BIND_CANCEL) || in->click[1]) {
 			c->placing = -1;
+			c->placing_drag = false;
 			return n;
 		}
+		UnitType type = (UnitType)c->placing;
 		if (in->click[0] && !over_panels(&L, mouse) && pick_ground(view, &sim->terrain, mouse, &at)) {
-			UnitType type = (UnitType)c->placing;
-			order(c, frame, out, cap, &n, (Order){.kind = COMMAND_BUILD, .target = placement_site(sim, type, at), .type = type,
-			                                     .flags = shift ? COMMAND_QUEUED : 0});
+			c->place_from = placement_site(sim, type, at);
+			c->placing_drag = true;
+			return n;
+		}
+		// Let go: the site, or the grid dragged out (BAR lays out a line;
+		// a rectangle fills, and a thin one is a line). The first replaces
+		// the builders' orders unless shift; the rest queue after it.
+		if (c->placing_drag && in->release[0]) {
+			c->placing_drag = false;
+			V2 to = c->place_from;
+			if (pick_ground(view, &sim->terrain, mouse, &at)) to = at;
+			V2 sites[LATER_MAX];
+			ptrdiff_t count = grid_sites(type, c->place_from, to, sites, countof(sites));
+			for (ptrdiff_t k = 0; k < count; k++)
+				if (placement_ok(sim, c->me, type, sites[k]))
+					order(c, frame, out, cap, &n, (Order){.kind = COMMAND_BUILD, .target = sites[k], .type = type,
+					                                     .flags = shift || n > 0 ? COMMAND_QUEUED : 0});
 			if (!shift) c->placing = -1;
 			return n;
 		}
@@ -461,10 +496,16 @@ void controls_draw_world(const Controls *c, const Sim *sim, const View *view, Ve
 	if (c->placing < 0 || !pick_ground(view, &sim->terrain, mouse, &ghost)) return;
 	UnitType type = (UnitType)c->placing;
 	ghost = placement_site(sim, type, ghost);
-	bool ok = placement_ok(sim, c->me, type, ghost);
+	// Dragging: the grid it will lay out (red where a site can't go).
+	V2 sites[LATER_MAX];
+	ptrdiff_t count = c->placing_drag ? grid_sites(type, c->place_from, ghost, sites, countof(sites)) : 1;
+	if (!c->placing_drag) sites[0] = ghost;
 	const UnitDef *def = &unit_defs[type];
-	Vector3 at = {ghost.x, terrain_height(&sim->terrain, ghost.x, ghost.z) + def->height * 0.5f, ghost.z};
-	DrawCubeWires(at, def->radius * 2.0f, def->height, def->radius * 2.0f, ok ? GREEN : RED);
+	for (ptrdiff_t k = 0; k < count; k++) {
+		bool ok = placement_ok(sim, c->me, type, sites[k]);
+		Vector3 at = {sites[k].x, terrain_height(&sim->terrain, sites[k].x, sites[k].z) + def->height * 0.5f, sites[k].z};
+		DrawCubeWires(at, def->radius * 2.0f, def->height, def->radius * 2.0f, ok ? GREEN : RED);
+	}
 }
 
 static const Color PANEL = {14, 16, 20, 215}, PANEL_EDGE = {60, 66, 78, 255}, BUTTON = {32, 36, 44, 255},
@@ -671,7 +712,7 @@ static void draw_prompt(const Controls *c, const Layout *L)
 	char line[320] = "";
 	int used = 0;
 	if (c->placing >= 0)
-		snprintf(line, sizeof line, "placing a %s: click to build (shift: queue more), right-click or esc cancels", unit_defs[c->placing].name);
+		snprintf(line, sizeof line, "placing a %s: click to build, drag for a grid (shift: queue more), right-click or esc cancels", unit_defs[c->placing].name);
 	else if (c->aiming >= 0)
 		snprintf(line, sizeof line, "%s: click where (shift: queue more), right-click or esc cancels", c->aiming == COMMAND_MOVE ? "move" : "fight");
 	else if (c->sending) {

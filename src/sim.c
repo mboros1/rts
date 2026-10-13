@@ -151,6 +151,7 @@ static constexpr float GRID_CELL = 8.0f;
 static constexpr int32_t RETARGET_PERIOD = 8;
 static constexpr float ARRIVE_RADIUS = 3.0f;
 static constexpr float SEPARATION_MAX = 0.5f;   // per-tick push, units
+static constexpr float LOOK_AHEAD = 8.0f;       // structures this far ahead (past the unit's radius) are steered around
 static constexpr uint32_t NO_SLOT = UINT32_MAX;
 
 static constexpr UnitHandle NO_UNIT = {NO_SLOT, 0};
@@ -1110,6 +1111,45 @@ static void spawn(Faction *f, const Sim *sim)
 	spawn_near_base(f, c, &sim->terrain, 20.0f);
 }
 
+// A structure of ours in the way: veer past it, to the side the unit is
+// already off its centre (left if dead on), the harder the more head-on.
+// Structures only push units straight back, so without this a unit heading
+// at one stood against it for good. A structure its target is on (the site
+// it builds, the transporter it leaves by) isn't in the way: it's going there.
+static V2 around_structures(const Units *u, const Grid *grid, ptrdiff_t i, V2 desired, const UnitDef *def)
+{
+	float speed = v2_len(desired);
+	if (speed < 1e-4f) return desired;
+	V2 p = v2(u->px[i], u->pz[i]), dir = v2_scale(desired, 1.0f / speed);
+	float look = def->radius + LOOK_AHEAD;
+	float reach = look + MAX_RADIUS;
+	CellRange r = grid_range(grid, p.x - reach, p.z - reach, p.x + reach, p.z + reach);
+	float best_t = 1e30f, best_lat = 0.0f, best_clear = 1.0f;
+	int32_t j;
+	GRID_FOR(grid, r, j) {
+		if (j == i || !unit_is_structure(u->type[j])) continue;
+		float rj = unit_defs[u->type[j]].radius;
+		V2 at = v2(u->px[j], u->pz[j]);
+		if (v2_len(v2_sub(at, v2(u->tx[i], u->tz[i]))) < rj + 1.0f) continue; // where it's going
+		V2 rel = v2_sub(at, p);
+		float t = rel.x * dir.x + rel.z * dir.z;
+		if (t <= 0.0f || t > look + rj) continue;
+		float lat = dir.x * rel.z - dir.z * rel.x; // > 0: the structure is to the left
+		float clear = def->radius + rj + 0.5f;
+		if (f_abs(lat) >= clear || t >= best_t) continue;
+		best_t = t;
+		best_lat = lat;
+		best_clear = clear;
+	}
+	if (best_t >= 1e30f) return desired;
+	float w = (best_clear - f_abs(best_lat)) / best_clear;
+	float side = best_lat > 0.0f ? -1.0f : 1.0f;
+	V2 left = v2(-dir.z, dir.x);
+	V2 veer = v2_add(v2_scale(dir, 1.0f - w), v2_scale(left, side * w));
+	float len = v2_len(veer);
+	return len > 1e-4f ? v2_scale(veer, speed / len) : v2_scale(left, side * speed);
+}
+
 static void move_units(Faction *f, const Terrain *t)
 {
 	Units *u = &f->units;
@@ -1148,6 +1188,7 @@ static void move_units(Faction *f, const Terrain *t)
 				desired = v2_scale(to, def->speed / d);
 			}
 		}
+		desired = around_structures(u, &grid, i, desired, def);
 		V2 v = v2(u->vx[i], u->vz[i]);
 		V2 steer = v2_limit(v2_sub(desired, v), def->accel * SIM_DT);
 		v = v2_limit(v2_add(v, steer), def->speed);

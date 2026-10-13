@@ -102,7 +102,7 @@ static void handle_input(Game *g, const Input *in)
 	if (in->pressed[g->keys.key[BIND_OVERLAY]]) g->overlay = !g->overlay;
 	if (in->pressed[g->keys.key[BIND_SANDBOX_BOT]]) g->bots[0].enabled = !g->bots[0].enabled;
 	if (in->pressed[g->keys.key[BIND_SANDBOX_CLIP]]) start_clip(g);
-	Order orders[16];
+	Order orders[CONTROLS_ORDERS];
 	ptrdiff_t n = controls_input(&g->controls, in, &g->sim, &g->view, &g->commands, orders, countof(orders));
 	for (ptrdiff_t k = 0; k < n && g->queued_count < MAX_COMMANDS_PER_TICK; k++)
 		g->queued[g->queued_count++] = (Command){.faction = {0}, .kind = orders[k].kind, .target = orders[k].target,

@@ -54,5 +54,12 @@ at 11.1 shot unfinished
 at 11.2 click 770,560 right
 at 11.4 expect sent build == 3
 at 11.5 expect sent fight == 0           # not a fight order on the ground
-at 11.6 key Escape                       # nothing in progress: leaves (here, quits)
-at 12.6 expect sent any == 9            # never reached if Escape left
+# A drag while placing lays out a grid: generators, a block of them.
+at 11.7 key Z                           # the economy tab
+at 11.8 key W                           # a generator
+at 11.9 drag 1000,560 1150,660
+at 12.1 shot grid
+at 12.2 expect sent build >= 9          # 3 before, and the grid's
+at 12.3 expect busy == 0
+at 12.4 key Escape                      # nothing in progress: leaves (here, quits)
+at 13.4 expect sent any >= 15           # never reached if Escape left
