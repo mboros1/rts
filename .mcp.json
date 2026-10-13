@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "rts": {
+      "command": "python3",
+      "args": ["tools/agent/mcp_server.py"]
+    }
+  }
+}

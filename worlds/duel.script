@@ -1,0 +1,10 @@
+# A duel: one zone, blue (a person) against red (an agent through
+# tools/agent, or nobody). Each side starts with its headquarters and a
+# commander; T1 only; lose the headquarters, lose. Started by `make duel`.
+title Duel
+scenario economy
+commanders on
+seed 22
+bases both
+bot blue off
+bot red off

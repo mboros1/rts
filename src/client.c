@@ -552,7 +552,9 @@ static void client_note_draw(Client *c, double now)
 // --agent: something else plays this side through us (tools/agent, an MCP
 // server). One request a line on stdin, one JSON answer a line on stdout:
 //   state                                      our side as we simulate it, and the enemy as we see them
-//   cmd KIND FLAGS TYPE AMOUNT X Z TO ID...    a command (sim.h's numbers), for units by id
+//   cmd KIND FLAGS TYPE AMOUNT X Z TO ID...    a command, for units by id: KIND as input scripts
+//                                              name it (move, fight, build, ...), FLAGS queued,repeat
+//                                              or -, TYPE a unit name or -
 //   note say|pause|resume TEXT                 a note: everyone sees it (wire.h)
 // Ids are slot + 65536 * generation. It's an interface, not a cheat: the
 // agent knows what this client knows and sends what a player can send.
@@ -618,12 +620,25 @@ static void agent_state(Client *c)
 
 static void agent_command(Client *c, char *args)
 {
-	int kind, flags, type, amount, to;
+	char kind_s[32], flags_s[64], type_s[32];
+	int amount, to, used = 0;
 	float x, z;
-	int used = 0;
-	if (sscanf(args, "%d %d %d %d %f %f %d%n", &kind, &flags, &type, &amount, &x, &z, &to, &used) != 7 || kind < 0
-	    || kind >= COMMAND_KIND_COUNT || type < 0 || type >= UNIT_TYPE_COUNT || to < 0 || to >= MAX_PLAYERS) {
+	if (sscanf(args, "%31s %63s %31s %d %f %f %d%n", kind_s, flags_s, type_s, &amount, &x, &z, &to, &used) != 7
+	    || to < 0 || to >= MAX_PLAYERS) {
 		printf("{\"ok\":false,\"error\":\"cmd KIND FLAGS TYPE AMOUNT X Z TO ID...\"}\n");
+		return;
+	}
+	int kind = -1, type = -1;
+	for (int k = 0; k < COMMAND_KIND_COUNT; k++)
+		if (command_names[k] && !strcmp(kind_s, command_names[k])) kind = k;
+	if (!strcmp(type_s, "-")) type = 0;
+	for (int t = 0; t < UNIT_TYPE_COUNT; t++)
+		if (!strcmp(type_s, unit_defs[t].name)) type = t;
+	uint8_t flags = 0;
+	if (strstr(flags_s, "queued")) flags |= COMMAND_QUEUED;
+	if (strstr(flags_s, "repeat")) flags |= COMMAND_REPEAT;
+	if (kind < 0 || type < 0) {
+		printf("{\"ok\":false,\"error\":\"unknown %s\"}\n", kind < 0 ? "command" : "unit type");
 		return;
 	}
 	UnitHandle *ids = PUSH(&c->frame, UnitHandle, 8192);
@@ -636,8 +651,8 @@ static void agent_command(Client *c, char *args)
 		ids[n++] = (UnitHandle){(uint32_t)(id % 65536ull), (uint32_t)(id / 65536ull)};
 		p = end;
 	}
-	client_send_order(c, (CommandKind)kind, v2(x, z), (UnitType)type, amount, (uint8_t)flags, (PlayerSlot){(uint8_t)to},
-	                  0.0f, 0.0f, ids, n);
+	client_send_order(c, (CommandKind)kind, v2(x, z), (UnitType)type, amount, flags, (PlayerSlot){(uint8_t)to}, 0.0f,
+	                  0.0f, ids, n);
 	printf("{\"ok\":true,\"units\":%td}\n", n);
 }
 

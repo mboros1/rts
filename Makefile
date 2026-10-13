@@ -37,7 +37,7 @@ SRC      := $(wildcard src/*.c src/*.h)
 SIM_SRC  := $(filter-out src/main_game.c src/render.c src/render.h src/view.c src/view.h src/client.c src/clip.c src/clip.h,$(SRC))
 # The zone smoke test drives these through processes; rebuild them together.
 
-.PHONY: play world-soak work-log demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game check-ui bench bench-teams determinism-x86 soak cross clips demos demos-restore share clean
+.PHONY: duel play world-soak work-log demos-rerender all setup check check-zones check-world check-gcc-coord check-tests check-replay check-split check-demo-scripts check-game check-server check-net check-gcc check-gcc-tests check-gcc-headless check-gcc-server check-gcc-game check-ui bench bench-teams determinism-x86 soak cross clips demos demos-restore share clean
 
 all: $(B)/rts $(B)/rts-headless $(B)/rts-server $(B)/rts-coord
 
@@ -68,6 +68,13 @@ $(B)/rts-coord: src/main_coord.c $(SIM_SRC) | $(B)
 
 # The game. The world keeps running when the window closes: `build/rts world
 # --stop` stops it (every zone saves first).
+# A duel on one zone: you play blue; red is for an agent (tools/agent) or
+# nobody. `make duel` starts the zone and your client; the agent joins port 39200.
+duel: all
+	@$(B)/rts-server --script worlds/duel.script --port 39200 > $(B)/duel-server.out 2>&1 & echo $$! > $(B)/duel-server.pid
+	@sleep 0.5
+	@$(B)/rts --connect 127.0.0.1:39200 --faction blue; kill $$(cat $(B)/duel-server.pid) 2>/dev/null || true
+
 play: all
 	@if [ -n "$(WORLD)" ]; then $(B)/rts world --new $(WORLD); \
 	elif [ -f world/live/world.txt ]; then $(B)/rts world; \
