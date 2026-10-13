@@ -15,7 +15,7 @@ at 7.0 move 640,300
 at 7.4 shot factory-ghost
 at 7.8 click 640,300                    # placed: the engineers go to build it
 at 8.0 expect sent build == 1
-at 8.6 click 170,750                    # the factory's tile: only the factory
+at 8.6 click 170,710                    # the factory's tile: only the factory
 at 8.8 expect selected == 1
 at 9.2 shot factory
 at 9.6 key Q                            # a raider
@@ -27,7 +27,7 @@ at 11.4 shot queued
 at 12.0 key X                           # the logistics page: trucks
 at 12.6 shot logistics
 at 13.2 drag 450,200 1150,700
-at 13.5 click 60,750                    # the engineers' tile
+at 13.5 click 60,710                    # the engineers' tile
 at 13.8 expect selected == 2
 at 14.2 shot engineers
 at 14.6 key M                           # move, then where

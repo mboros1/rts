@@ -2,7 +2,7 @@
 # select the commander (its tile, beside the headquarters'), have it build
 # the first factory, queue an engineer there, and warp the commander home.
 at 3.5 drag 450,200 1150,700            # the commander and the headquarters
-at 3.8 click 60,750                     # the commander's tile: only it
+at 3.8 click 60,710                     # the commander's tile: only it
 at 4.0 expect selected == 1
 at 4.5 shot start
 at 5.2 key V                            # the build tab
@@ -19,7 +19,7 @@ at 25.2 key A                           # an engineer
 at 25.4 expect sent produce == 1
 at 25.8 shot factory
 at 26.5 drag 450,200 1150,700
-at 26.8 click 60,750                    # the commander again
+at 26.8 click 60,710                    # the commander again
 at 27.2 key U                           # warp home
 at 27.4 expect sent warp == 1
 at 29.0 shot warping

@@ -66,7 +66,7 @@ static Layout layout(int w, int h)
 	float bw = 104.0f * s, bh = 72.0f * s, th = 30.0f * s;   // a build item; a tab's height
 	float left = 4.0f * s, bottom = (float)h - 4.0f * s;
 	float grid_w = 4.0f * bw + 3.0f * gap + 2.0f * pad;
-	L.info = (Rectangle){left, bottom - 170.0f * s, grid_w, 170.0f * s};
+	L.info = (Rectangle){left, bottom - 210.0f * s, grid_w, 210.0f * s};
 	L.build = (Rectangle){left, L.info.y - gap - (2.0f * bh + th + 2.0f * gap + 2.0f * pad), grid_w,
 	                      2.0f * bh + th + 2.0f * gap + 2.0f * pad};
 	for (int k = 0; k < BUILD_ITEMS; k++)
@@ -476,8 +476,57 @@ ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const Vie
 
 // ---------------------------------------------------------------- drawing
 
+static Color order_color(OrderKind kind)
+{
+	return kind == ORDER_BUILD ? (Color){240, 210, 70, 230} : kind == ORDER_ATTACK_MOVE ? (Color){235, 80, 60, 230}
+	                                                         : (Color){120, 255, 140, 230};
+}
+
+static void ghost(const Sim *sim, UnitType type, float x, float z, Color color)
+{
+	const UnitDef *def = &unit_defs[type];
+	DrawCubeWires((Vector3){x, terrain_height(&sim->terrain, x, z) + def->height * 0.5f, z}, def->radius * 2.0f, def->height,
+	              def->radius * 2.0f, color);
+}
+
+// What's planned: every site our builders are going to build (a ghost), the
+// full size of what's being built (its outline), and for the units selected,
+// the path through their orders, coloured by kind (move, fight, build).
+static void draw_plans(const Controls *c, const Sim *sim)
+{
+	const Units *u = own_units(c, sim);
+	const Terrain *t = &sim->terrain;
+	Color planned = ColorAlpha(render_player_color((int)c->me.v, c->player), 0.75f), outline = {230, 230, 220, 160};
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (unit_is_structure(u->type[i]) && u->progress[i] < 1.0f) ghost(sim, u->type[i], u->px[i], u->pz[i], outline);
+		if (!player_eq(u->owner[i], c->player) || !unit_is_builder(u->type[i])) continue;
+		if (u->order[i] == ORDER_BUILD && units_find(u, u->building[i]) < 0) ghost(sim, u->build_type[i], u->tx[i], u->tz[i], planned);
+		for (int32_t n = u->later_head[i]; n >= 0; n = u->later_next[n])
+			if (u->later_kind[n] == ORDER_BUILD) ghost(sim, u->later_type[n], u->later_tx[n], u->later_tz[n], planned);
+	}
+	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
+		ptrdiff_t i = units_find(u, c->selection[k]);
+		if (i < 0 || unit_is_structure(u->type[i])) continue;
+		bool going = u->order[i] == ORDER_MOVE || u->order[i] == ORDER_ATTACK_MOVE || u->order[i] == ORDER_BUILD;
+		if (!going && u->later_len[i] == 0) continue;
+		Vector3 from = {u->px[i], u->py[i] + 0.4f, u->pz[i]};
+		if (going) {
+			Vector3 to = {u->tx[i], terrain_height(t, u->tx[i], u->tz[i]) + 0.4f, u->tz[i]};
+			DrawLine3D(from, to, order_color(u->order[i]));
+			from = to;
+		}
+		for (int32_t n = u->later_head[i]; n >= 0; n = u->later_next[n]) {
+			Vector3 to = {u->later_tx[n], terrain_height(t, u->later_tx[n], u->later_tz[n]) + 0.4f, u->later_tz[n]};
+			DrawLine3D(from, to, order_color(u->later_kind[n]));
+			DrawCircle3D(to, 1.0f, (Vector3){1, 0, 0}, 90.0f, order_color(u->later_kind[n]));
+			from = to;
+		}
+	}
+}
+
 void controls_draw_world(const Controls *c, const Sim *sim, const View *view, Vector2 mouse)
 {
+	draw_plans(c, sim);
 	if (c->landing_for >= 0) {
 		// Where an unpaired send may land: our strip, its edge traced on the ground.
 		const Terrain *t = &sim->terrain;
@@ -608,6 +657,45 @@ static const char *order_name(OrderKind o)
 	return o < ORDER_KIND_COUNT ? names[o] : "";
 }
 
+// What an order is, in a few words: "build generator", "move", "fight".
+static const char *order_words(OrderKind kind, UnitType type)
+{
+	return kind == ORDER_BUILD ? TextFormat("build %s", unit_defs[type].name) : kind == ORDER_MOVE ? "move"
+	     : kind == ORDER_ATTACK_MOVE ? "fight" : order_name(kind);
+}
+
+// One unit's orders: what it's doing, then what's queued, runs of the same
+// together ("then build generator x6"), as many lines as there's room for.
+static void draw_order_list(const Units *u, ptrdiff_t d, float x, float y, float bottom, float sc)
+{
+	if (u->order[d] == ORDER_IDLE && u->later_len[d] == 0) return;
+	float line = 15.0f * sc;
+	const char *now = order_words(u->order[d], u->build_type[d]);
+	ptrdiff_t site = u->order[d] == ORDER_BUILD ? units_find(u, u->building[d]) : -1;
+	if (site >= 0) now = TextFormat("%s (%.0f%%)", now, u->progress[site] * 100.0f);
+	text(TextFormat("now: %s", now), x, y, 13.0f * sc, TEXT);
+	y += line;
+	int shown = 0;
+	for (int32_t n = u->later_head[d]; n >= 0;) {
+		if (y + 2.0f * line > bottom && u->later_next[n] >= 0) { // room for one more line: say what's left
+			text(TextFormat("+%d more", u->later_len[d] - shown), x, y, 13.0f * sc, TEXT_DIM);
+			return;
+		}
+		int run = 1;
+		int32_t m = u->later_next[n];
+		while (m >= 0 && u->later_kind[m] == u->later_kind[n]
+		       && (u->later_kind[n] != ORDER_BUILD || u->later_type[m] == u->later_type[n])) {
+			run++;
+			m = u->later_next[m];
+		}
+		text(TextFormat("then: %s%s", order_words(u->later_kind[n], u->later_type[n]), run > 1 ? TextFormat(" x%d", run) : ""),
+		     x, y, 13.0f * sc, TEXT_DIM);
+		y += line;
+		shown += run;
+		n = m;
+	}
+}
+
 // The info pane: a tile per type selected, or one unit's details.
 static void draw_info(const Controls *c, const Sim *sim, const Layout *L, const SelectionSummary *s, Vector2 mouse,
                       bool live)
@@ -691,6 +779,7 @@ static void draw_info(const Controls *c, const Sim *sim, const Layout *L, const 
 		                                           : "warp home ready";
 		text(warp, x, y + 96.0f * sc, 13.0f * sc, u->recharge[d] > 0 ? TEXT_DIM : ENERGY);
 	}
+	draw_order_list(u, d, x, y + 118.0f * sc, L->info.y + L->info.height - 6.0f * sc, sc);
 	if (u->type[d] == UNIT_HEADQUARTERS) {
 		// Who's coming back, and when.
 		const Faction *fa = &sim->factions[c->me.v];

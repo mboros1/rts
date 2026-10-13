@@ -29,7 +29,7 @@ at 3.6 key Escape
 at 3.7 expect busy == 0
 at 3.8 expect sent fight == 0
 # Narrow to the factory with its tile (the second: types in order), then produce.
-at 4.0 click 170,750
+at 4.0 click 170,710
 at 4.2 expect selected == 1
 at 4.3 shot factory
 at 4.4 key Q                            # a raider

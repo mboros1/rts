@@ -1,0 +1,24 @@
+# Spike 22f demo, played: after the title card, select the commander,
+# drag out a block of generators, then shift-queue a move and a fight.
+# Its path runs through every order, the sites show as ghosts, and its
+# info pane lists what it's doing and what's next.
+at 3.5 drag 450,200 1150,700            # the headquarters and the commander
+at 3.8 click 60,710                     # the commander's tile: only it
+at 4.0 expect selected == 1
+at 4.4 key Z
+at 4.6 key W                            # a generator
+at 5.0 press 760,560
+at 5.4 move 800,580
+at 5.8 move 820,600
+at 6.2 release 820,600
+at 6.6 key M
+at 7.0 click 1000,500 shift             # then move
+at 7.2 key Escape
+at 7.4 key G
+at 7.8 click 1050,350 shift             # then fight
+at 8.0 key Escape
+at 8.6 expect sent build >= 6
+at 9.0 shot planned
+at 16.0 shot building
+at 24.0 shot later
+at 25.0 quit
