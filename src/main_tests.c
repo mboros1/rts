@@ -1703,6 +1703,31 @@ static void test_map(void)
 	sim_destroy(&big);
 }
 
+// The id map, with ids whose low bits are all the same (index << 8, as a
+// packed handle would be): every id found, deletes keep the rest findable,
+// and no id sits far from its home slot (the hash takes the top bits).
+static void test_idmap(void)
+{
+	Arena a = arena_create("idmap", 1 << 20);
+	IdMap m = idmap_make(&a, 1000);
+	for (uint32_t k = 0; k < 1000; k++) idmap_put(&m, k << 8, (int32_t)k);
+	bool found = true;
+	for (uint32_t k = 0; k < 1000; k++) found = found && idmap_get(&m, k << 8) == (int32_t)k;
+	CHECK(found && m.count == 1000 && idmap_get(&m, 7) == -1);
+	ptrdiff_t longest = 0;
+	for (ptrdiff_t i = 0; i < m.cap; i++) {
+		if (!m.keys[i]) continue;
+		ptrdiff_t d = (i - idmap_home(&m, m.keys[i] - 1)) & (m.cap - 1);
+		if (d > longest) longest = d;
+	}
+	CHECK(longest < 16);
+	for (uint32_t k = 0; k < 1000; k += 2) idmap_del(&m, k << 8);
+	found = true;
+	for (uint32_t k = 0; k < 1000; k++) found = found && idmap_get(&m, k << 8) == (k % 2 ? (int32_t)k : -1);
+	CHECK(found && m.count == 500);
+	arena_destroy(&a);
+}
+
 // Radar: an enemy out of sight but within our radar shows as a blip (what
 // it is, hidden); one inside an enemy jammer's reach doesn't show at all,
 // but the jammer does (it's transmitting); sight shows what it is.
@@ -2193,6 +2218,7 @@ static const Test tests[] = {
 	{"later-orders", test_later_orders},
 	{"cancel-build", test_cancel_build},
 	{"radar", test_radar},
+	{"idmap", test_idmap},
 	{"map", test_map},
 };
 

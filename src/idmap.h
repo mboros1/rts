@@ -16,19 +16,24 @@ typedef struct {
 	int32_t *vals;
 	ptrdiff_t cap;
 	ptrdiff_t count;
+	int shift;          // 32 - log2(cap): the home slot is the hash's top bits
 } IdMap;
 
 // Room for at least `entries` while staying at most half full.
 static inline IdMap idmap_make(Arena *a, ptrdiff_t entries)
 {
 	ptrdiff_t cap = 16;
-	while (cap < entries * 2) cap *= 2;
-	return (IdMap){PUSH(a, uint32_t, cap), PUSH(a, int32_t, cap), cap, 0};
+	int shift = 32 - 4;
+	while (cap < entries * 2) cap *= 2, shift--;
+	return (IdMap){PUSH(a, uint32_t, cap), PUSH(a, int32_t, cap), cap, 0, shift};
 }
 
+// Fibonacci hashing keeps its good bits at the top of the product: the low
+// bits of id * odd depend only on the id's low bits (strided or packed ids
+// would share slots).
 static inline ptrdiff_t idmap_home(const IdMap *m, uint32_t id)
 {
-	return (ptrdiff_t)((id * 0x9e3779b1u) & (uint32_t)(m->cap - 1));
+	return (ptrdiff_t)((id * 0x9e3779b1u) >> m->shift);
 }
 
 static inline int32_t idmap_get(const IdMap *m, uint32_t id)
@@ -42,7 +47,7 @@ static inline int32_t idmap_get(const IdMap *m, uint32_t id)
 // Inserts or overwrites. The caller keeps count below cap / 2.
 static inline void idmap_put(IdMap *m, uint32_t id, int32_t val)
 {
-	ASSERT(id != UINT32_MAX && m->count < m->cap - 1);
+	ASSERT(id != UINT32_MAX && m->count < m->cap / 2); // what idmap_make promises, so probes stay short
 	for (ptrdiff_t i = idmap_home(m, id);; i = (i + 1) & (m->cap - 1)) {
 		if (m->keys[i] == id + 1) {
 			m->vals[i] = val;
