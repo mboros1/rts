@@ -161,6 +161,7 @@ typedef struct {
 	float truck_metal, truck_energy;   // a truck's or vault's room (a full load)
 	float cost;                        // times every unit's metal and energy cost
 	float build_time;                  // times every unit's build time
+	float tier;                        // the highest tier anyone may build here (1 or 2)
 	// The environment.
 	float yield[SOURCE_COUNT];         // times the income of units of each source
 	// The map.
@@ -173,12 +174,12 @@ ZoneContext zone_context_default(void);
 // Every field of a context, in order, for writing and reading it (wire,
 // replays, saves) and for its checks: zone_context_ok() is false on anything
 // outside what the sim can run with (it asserts on nothing a file can say).
-enum { ZONE_CONTEXT_FIELDS = 12 + SOURCE_COUNT };
+enum { ZONE_CONTEXT_FIELDS = 13 + SOURCE_COUNT };
 static inline float *zone_context_field(ZoneContext *c, int k)
 {
 	float *fields[ZONE_CONTEXT_FIELDS] = {&c->start_metal, &c->start_energy, &c->base_metal, &c->base_energy,
 	                                      &c->metal_cap, &c->energy_cap, &c->truck_metal, &c->truck_energy,
-	                                      &c->cost, &c->build_time, &c->yield[0], &c->yield[1], &c->yield[2],
+	                                      &c->cost, &c->build_time, &c->tier, &c->yield[0], &c->yield[1], &c->yield[2],
 	                                      &c->size, &c->spots};
 	static_assert(SOURCE_COUNT == 3, "a field per source");
 	return fields[k];

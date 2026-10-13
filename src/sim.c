@@ -162,7 +162,7 @@ ZoneContext zone_context_default(void)
 		.base_metal = 1.0f, .base_energy = 30.0f,
 		.metal_cap = 2000.0f, .energy_cap = 10000.0f,
 		.truck_metal = 1000.0f, .truck_energy = 5000.0f,
-		.cost = 1.0f, .build_time = 1.0f,
+		.cost = 1.0f, .build_time = 1.0f, .tier = 1.0f,
 		.yield = {1.0f, 1.0f, 1.0f},
 		.size = 512.0f, .spots = 24.0f,
 	};
@@ -179,7 +179,7 @@ bool zone_context_ok(const ZoneContext *c)
 	return c->start_metal <= c->metal_cap && c->start_energy <= c->energy_cap && c->cost <= 100.0f
 	    && c->build_time >= 0.01f && c->build_time <= 100.0f && c->size >= 256.0f && c->size <= 2048.0f
 	    && c->size == 64.0f * (float)(int32_t)(c->size / 64.0f) && c->spots >= 8.0f && c->spots <= (float)MAX_SPOTS
-	    && c->spots == (float)(int32_t)c->spots;
+	    && c->spots == (float)(int32_t)c->spots && (c->tier == 1.0f || c->tier == 2.0f);
 }
 
 SimConfig sim_config_default(void)
@@ -904,6 +904,9 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		apply_spawn(f, t, c);
 		return;
 	}
+	// Past the zone's tier: nothing to build or make (T2 can be turned off).
+	if (((c->kind == COMMAND_PRODUCE && c->amount != 0) || c->kind == COMMAND_BUILD) && unit_tier(c->unit_type) > (int)sim->config.context.tier)
+		return;
 	if (c->kind == COMMAND_PRODUCE) {
 		apply_produce(f, c);
 		return;

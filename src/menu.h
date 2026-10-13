@@ -73,7 +73,7 @@ typedef struct {
 } MenuContext;
 
 // `tab`: the open category (builders) or page (factories).
-BuildMenu menu_build(const SelectionSummary *s, int tab);
+BuildMenu menu_build(const SelectionSummary *s, int tab, int tier); // `tier`: the zone's highest
 OrdersMenu menu_orders(const SelectionSummary *s, const MenuContext *ctx);
 
 // The build grid is open (and its keys live) for builders or factories.

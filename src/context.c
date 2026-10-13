@@ -17,6 +17,7 @@ static float *f_cost(ZoneContext *c) { return &c->cost; }
 static float *f_build_time(ZoneContext *c) { return &c->build_time; }
 static float *f_metal(ZoneContext *c) { return &c->yield[SOURCE_METAL]; }
 static float *f_generator(ZoneContext *c) { return &c->yield[SOURCE_GENERATOR]; }
+static float *f_tier(ZoneContext *c) { return &c->tier; }
 static float *f_size(ZoneContext *c) { return &c->size; }
 static float *f_spots(ZoneContext *c) { return &c->spots; }
 
@@ -24,7 +25,7 @@ static const Field economy_fields[] = {
 	{"start_metal", f_start_metal}, {"start_energy", f_start_energy}, {"base_metal", f_base_metal},
 	{"base_energy", f_base_energy}, {"metal_cap", f_metal_cap},       {"energy_cap", f_energy_cap},
 	{"truck_metal", f_truck_metal}, {"truck_energy", f_truck_energy}, {"cost", f_cost},
-	{"build_time", f_build_time},
+	{"build_time", f_build_time}, {"tier", f_tier},
 };
 // One per income source: a new source is a new field here.
 static const Field environment_fields[] = {{"metal", f_metal}, {"generator", f_generator}};

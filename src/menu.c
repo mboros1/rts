@@ -52,7 +52,7 @@ static const UnitType advanced_items[BUILD_TABS][BUILD_ITEMS] = {
 	{UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT, UNIT_TYPE_COUNT},
 };
 
-BuildMenu menu_build(const SelectionSummary *s, int tab)
+BuildMenu menu_build(const SelectionSummary *s, int tab, int tier)
 {
 	BuildMenu m = {.builders = s->builders};
 	if (!menu_build_open(s)) return m;
@@ -69,7 +69,7 @@ BuildMenu menu_build(const SelectionSummary *s, int tab)
 	}
 	for (int k = 0; k < BUILD_ITEMS; k++) {
 		UnitType type = items[tab][k];
-		if (type == UNIT_TYPE_COUNT) continue;
+		if (type == UNIT_TYPE_COUNT || unit_tier(type) > tier) continue; // past the zone's tier: not offered
 		// A builder's item: enabled if some builder selected can build it.
 		bool can = !s->builders;
 		for (int b = 0; b < UNIT_TYPE_COUNT && !can; b++) can = s->count[b] > 0 && builder_builds((UnitType)b, type);

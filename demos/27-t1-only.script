@@ -1,0 +1,22 @@
+title Spike 22a: T1 only
+about T2 is off until T1 plays well: the same generous economy as demo 25, but the zone's tier is 1 (the default). Blue's bot builds factories and a T1 army, and no advanced factory, engineer or T2 unit appears. 6x.
+
+scenario economy
+economy standard base_metal=30 base_energy=400
+bot red off
+clip 0..10800
+speed 6
+camera 100,250 95
+
+at 5400 select blue factory as plants
+at 5400 show plants tab 0
+at 9900 select blue tank as army
+at 9900 show army
+
+# Observed: by the same 6 minutes where demo 25 has T2 rolling, blue has
+# only T1: more factories and a T1 army.
+at 10800 expect blue advanced-factories == 0
+at 10800 expect blue heavy-tanks == 0
+at 10800 expect blue howitzers == 0
+at 10800 expect blue factories >= 3
+at 10800 expect blue tanks >= 20

@@ -321,8 +321,8 @@ static void bot_economy(Bot *bot, const Sim *sim, Arena *arena, Command *out, pt
 	int want_factories = 1 + (int)(e->metal_income / 10.0f);
 	if (want_factories > 4) want_factories = 4;
 	// T2: at home, once its economy is established (factories, and the metal
-	// to run them), one advanced factory.
-	bool t2 = (!bot->world || bot->world->home[bot->world->here]) && factories >= 3 && e->metal_income >= 20.0f
+	// to run them), one advanced factory; never where T2 is off.
+	bool t2 = sim->config.context.tier >= 2.0f && (!bot->world || bot->world->home[bot->world->here]) && factories >= 3 && e->metal_income >= 20.0f
 	       && advanced_factories == 0 && !advanced_factory_coming;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		// Engineers, and the commander: it builds the start (and never leaves, here or anywhere: 18b).

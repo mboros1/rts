@@ -1340,22 +1340,22 @@ static void test_menu(void)
 	// Builders: categories on the tabs, the open one's structures as items.
 	SelectionSummary s = menu_summarize(u, engineers, 2);
 	CHECK(s.total == 2 && s.builders && menu_build_open(&s));
-	BuildMenu b = menu_build(&s, 0);
+	BuildMenu b = menu_build(&s, 0, 2);
 	CHECK(b.builders && b.tab[0].active && b.tab[0].enabled && !b.tab[1].enabled); // combat: nothing yet
 	CHECK(b.item[0].shown && b.item[0].type == UNIT_EXTRACTOR && b.item[1].type == UNIT_GENERATOR && !b.item[3].shown);
 	// T2's: shown, but only an advanced engineer builds the advanced extractor.
 	CHECK(b.item[2].type == UNIT_ADVANCED_EXTRACTOR && !b.item[2].enabled && b.item[0].enabled);
-	b = menu_build(&s, 3);
+	b = menu_build(&s, 3, 2);
 	CHECK(b.tab[3].active && b.item[0].type == UNIT_FACTORY && b.item[1].type == UNIT_ADVANCED_FACTORY && b.item[1].enabled);
 	// A factory: pages, and what's queued.
 	Command q = {.faction = {0}, .kind = COMMAND_PRODUCE, .count = 1, .units = &factory, .unit_type = UNIT_TANK, .amount = 3};
 	sim_step(&sim, &q, 1);
 	s = menu_summarize(u, &factory, 1);
 	CHECK(s.factories && !s.builders);
-	b = menu_build(&s, 0);
+	b = menu_build(&s, 0, 2);
 	CHECK(!b.builders && b.item[0].type == UNIT_RAIDER && b.item[1].type == UNIT_TANK && b.item[1].queued == 3);
 	CHECK(b.tab[0].shown && b.tab[1].shown && !b.tab[2].shown);
-	b = menu_build(&s, 1);
+	b = menu_build(&s, 1, 2);
 	CHECK(b.item[0].type == UNIT_METAL_TRUCK && b.item[1].type == UNIT_ENERGY_TRUCK);
 	// Its orders: repeat (off) and clear; no move for a structure.
 	MenuContext alone = {.economy = true};
@@ -1365,7 +1365,7 @@ static void test_menu(void)
 	// Builders with the factory: the builders' grid.
 	UnitHandle both[3] = {engineers[0], engineers[1], factory};
 	s = menu_summarize(u, both, 3);
-	CHECK(menu_build(&s, 0).builders);
+	CHECK(menu_build(&s, 0, 2).builders);
 	// Orders for mobile units: move, fight, stop, entrench; send needs a world,
 	// give and take a team, take someone away.
 	s = menu_summarize(u, engineers, 2);
@@ -1703,6 +1703,38 @@ static void test_map(void)
 	sim_destroy(&big);
 }
 
+// T2 turned off (the default, tier 1): no advanced factory goes up, and one
+// that's there anyway makes nothing; T1 goes on as before.
+static void test_tier_off(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.bases = 1;
+	CHECK(c.context.tier == 1.0f);
+	Sim sim;
+	sim_init(&sim, c);
+	Units *u = &sim.factions[0].units;
+	Command setup = {.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_ADVANCED_FACTORY, .amount = 1, .target = v2(90.0f, 330.0f)};
+	sim_step(&sim, &setup, 1);
+	sim_step(&sim, nullptr, 0);
+	UnitHandle eng = NO_UNIT, plant = NO_UNIT;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] == UNIT_ENGINEER && unit_handle_eq(eng, NO_UNIT)) eng = units_handle(u, i);
+		if (u->type[i] == UNIT_ADVANCED_FACTORY) plant = units_handle(u, i);
+	}
+	CHECK(units_find(u, eng) >= 0 && units_find(u, plant) >= 0);
+	Command no[] = {
+		{.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_ADVANCED_FACTORY, .target = v2(120.0f, 330.0f), .count = 1, .units = &eng},
+		{.faction = {0}, .kind = COMMAND_PRODUCE, .unit_type = UNIT_HEAVY_TANK, .amount = 1, .count = 1, .units = &plant},
+	};
+	sim_step(&sim, no, countof(no));
+	CHECK(u->order[units_find(u, eng)] == ORDER_IDLE && u->queue_len[units_find(u, plant)] == 0);
+	Command yes = {.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_FACTORY, .target = v2(120.0f, 330.0f), .count = 1, .units = &eng};
+	sim_step(&sim, &yes, 1);
+	CHECK(u->order[units_find(u, eng)] == ORDER_BUILD);
+	sim_destroy(&sim);
+}
+
 // T2: any builder puts up an advanced factory, which makes only T2 (and a
 // factory only T1); only an advanced engineer builds an advanced extractor,
 // over our extractor, which it replaces when done, earning more; T2 can't
@@ -1711,6 +1743,7 @@ static void test_t2(void)
 {
 	SimConfig c = sim_config_default();
 	c.economy = true;
+	c.context.tier = 2.0f;
 	c.bases = 1;
 	Sim sim;
 	sim_init(&sim, c);
@@ -1940,6 +1973,7 @@ static const Test tests[] = {
 	{"game-over", test_game_over},
 	{"context", test_context},
 	{"t2", test_t2},
+	{"tier-off", test_tier_off},
 	{"map", test_map},
 };
 
