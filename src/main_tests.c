@@ -1703,6 +1703,46 @@ static void test_map(void)
 	sim_destroy(&big);
 }
 
+// Radar: an enemy out of sight but within our radar shows as a blip (what
+// it is, hidden); one inside an enemy jammer's reach doesn't show at all,
+// but the jammer does (it's transmitting); sight shows what it is.
+static void test_radar(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.bases = 0;
+	Sim sim;
+	sim_init(&sim, c);
+	Command setup[] = {
+		{.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_RADAR, .amount = 1, .target = v2(100.0f, 256.0f)},
+		{.faction = {1}, .kind = COMMAND_SPAWN, .unit_type = UNIT_TANK, .amount = 1, .target = v2(200.0f, 200.0f)},
+	};
+	sim_step(&sim, setup, countof(setup));
+	sim_step(&sim, nullptr, 0);
+	sim_step(&sim, nullptr, 0);
+	const Perception *p = &sim.factions[0].seen;
+	int blips = 0, tanks = 0, jammers = 0;
+	for (ptrdiff_t s = 0; s < p->cap; s++) blips += p->live[s] && p->type[s] == UNIT_BLIP;
+	CHECK(blips == 1); // 100 away: on radar (150), out of sight (26)
+	Command jam = {.faction = {1}, .kind = COMMAND_SPAWN, .unit_type = UNIT_JAMMER, .amount = 1, .target = v2(210.0f, 210.0f)};
+	sim_step(&sim, &jam, 1);
+	sim_step(&sim, nullptr, 0);
+	sim_step(&sim, nullptr, 0);
+	blips = 0;
+	for (ptrdiff_t s = 0; s < p->cap; s++) {
+		blips += p->live[s] && p->type[s] == UNIT_BLIP;
+		jammers += p->live[s] && p->type[s] == UNIT_JAMMER;
+	}
+	CHECK(blips == 0 && jammers == 1);
+	Command look = {.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_SCOUT, .amount = 1, .target = v2(180.0f, 200.0f)};
+	sim_step(&sim, &look, 1);
+	sim_step(&sim, nullptr, 0);
+	sim_step(&sim, nullptr, 0);
+	for (ptrdiff_t s = 0; s < p->cap; s++) tanks += p->live[s] && p->type[s] == UNIT_TANK;
+	CHECK(tanks == 1); // in sight: what it is, jammer or not
+	sim_destroy(&sim);
+}
+
 // Cancel: an unfinished structure goes, what was spent on it comes back,
 // and its builder stops (rather than putting the site back up). An
 // unfinished factory takes a queue.
@@ -2152,6 +2192,7 @@ static const Test tests[] = {
 	{"bot-commander-start", test_bot_commander_start},
 	{"later-orders", test_later_orders},
 	{"cancel-build", test_cancel_build},
+	{"radar", test_radar},
 	{"map", test_map},
 };
 

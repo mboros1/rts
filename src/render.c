@@ -326,6 +326,19 @@ static void build_models(Renderer *r)
 		{PART_CYLINDER, 6, 0, 0, 0, 1.06f, 0.08f, 1.06f, 0, TONE_METAL},
 		{PART_CYLINDER, 4, 0, 0.8f, 0, 0.08f, 0.2f, 0.08f, 0, TONE_METAL},
 		{PART_SPHERE, 8, 0, 0.92f, 0, 0.16f, 0.16f, 0.16f, 0, TONE_GLOW}));
+	mesh[UNIT_RADAR] = model_mesh(MODEL(
+		{PART_CYLINDER, 8, 0, 0, 0, 0.9f, 0.15f, 0.9f, 0, TONE_METAL},
+		{PART_CYLINDER, 6, 0, 0.15f, 0, 0.22f, 0.65f, 0.22f, 0, TONE_BODY},
+		{PART_CYLINDER, 12, 0, 0.82f, 0.05f, 1.0f, 0.08f, 1.0f, 70, TONE_TRIM},   // the dish, tipped
+		{PART_SPHERE, 6, 0, 0.98f, 0, 0.14f, 0.14f, 0.14f, 0, TONE_GLOW}));
+	mesh[UNIT_JAMMER] = model_mesh(MODEL(
+		{PART_BOX, 0, 0, 0.08f, 0, 0.9f, 0.16f, 0.9f, 0, TONE_METAL},
+		{PART_CONE, 4, 0, 0.16f, 0, 0.7f, 0.6f, 0.7f, 0, TONE_BODY},
+		{PART_CYLINDER, 4, 0, 0.6f, 0, 0.08f, 0.4f, 0.08f, 0, TONE_PALE},
+		{PART_SPHERE, 6, 0, 0.92f, 0, 0.2f, 0.12f, 0.2f, 0, (Color){170, 120, 255, 0}}));
+	mesh[UNIT_BLIP] = model_mesh(MODEL(
+		{PART_CONE, 4, 0, 0.5f, 0, 1.0f, 0.4f, 1.0f, 0, TONE_BODY},     // a diamond, hovering: where, not what
+		{PART_CONE, 4, 0, 0.5f, 0, 1.0f, 0.4f, 1.0f, 180, TONE_BODY}));
 	for (int k = 0; k < UNIT_TYPE_COUNT; k++) ASSERT(mesh[k].vertexCount > 0); // a model for every type
 }
 
@@ -367,10 +380,21 @@ void renderer_set_fog(Renderer *r, const uint8_t *visible)
 {
 	const unsigned char *src = r->terrain_colors;
 	if (visible) {
+		r->fog_frame++;
 		for (ptrdiff_t v = 0; v < r->terrain_vertices; v++) {
+			unsigned char *c = r->fogged_colors + v * 4;
+			if (visible[v] == 2) {
+				// Jammed: grey-violet static that shifts every few frames.
+				uint32_t h = (uint32_t)v * 2654435761u ^ (uint32_t)(r->fog_frame / 4) * 40503u;
+				h ^= h >> 15;
+				h *= 2246822519u;
+				h ^= h >> 13;
+				unsigned char n = (unsigned char)(40 + (h & 63));
+				c[0] = (unsigned char)(n + 12), c[1] = n, c[2] = (unsigned char)(n + 30), c[3] = 255;
+				continue;
+			}
 			// Out of sight: darker and cooler, so it reads as unknown ground.
 			bool seen = visible[v];
-			unsigned char *c = r->fogged_colors + v * 4;
 			c[0] = seen ? src[v * 4 + 0] : (unsigned char)(src[v * 4 + 0] * 2 / 5);
 			c[1] = seen ? src[v * 4 + 1] : (unsigned char)(src[v * 4 + 1] * 2 / 5);
 			c[2] = seen ? src[v * 4 + 2] : (unsigned char)(src[v * 4 + 2] * 1 / 2 + 10);

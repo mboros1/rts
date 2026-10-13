@@ -57,6 +57,9 @@ typedef enum : uint8_t {
 	UNIT_METAL_VAULT,   // a truck entrenched: hardened storage that doesn't move
 	UNIT_ENERGY_VAULT,
 	UNIT_HEADQUARTERS,  // a side's, no player's: commanders respawn here; lose it, lose the game
+	UNIT_RADAR,         // a tower: enemies in its range show as blips, sight or not
+	UNIT_JAMMER,        // a tower: our units in its range don't show on the enemy's radar
+	UNIT_BLIP,          // never built: how a radar contact is perceived (what it is, unknown)
 	UNIT_TYPE_COUNT,
 } UnitType;
 
@@ -91,7 +94,8 @@ static inline bool factory_makes(UnitType factory, UnitType t)
 static inline bool builder_builds(UnitType builder, UnitType t)
 {
 	if (!unit_is_builder(builder) || !unit_is_structure(t)) return false;
-	if (t == UNIT_TURRET || t == UNIT_METAL_VAULT || t == UNIT_ENERGY_VAULT || t == UNIT_HEADQUARTERS) return false;
+	if (t == UNIT_TURRET || t == UNIT_METAL_VAULT || t == UNIT_ENERGY_VAULT || t == UNIT_HEADQUARTERS || t == UNIT_BLIP)
+		return false;
 	return unit_tier(t) == 1 || t == UNIT_ADVANCED_FACTORY || unit_tier(builder) == 2;
 }
 // What stays with its player: never given, taken or entrenched (the headquarters is the side's).
@@ -135,6 +139,8 @@ typedef struct {
 	float build_power;  // engineers and factories
 	float metal_income, energy_income; // per second, once built, times the zone's yield of its source
 	IncomeSource source;
+	float radar;        // radar towers: enemies within this show as blips
+	float jam;          // jammers: our units within this don't show on enemy radar
 } UnitDef;
 
 extern const UnitDef unit_defs[UNIT_TYPE_COUNT];

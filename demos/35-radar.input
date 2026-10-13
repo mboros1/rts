@@ -1,0 +1,7 @@
+# Spike 22i demo, played: after the title card, the camera goes (by the
+# minimap) to where red is: blips to the north, static round the jammer.
+at 3.5 click 84,124                     # the minimap: between blue's radar and red
+at 5.0 shot radar
+at 6.0 click 98,128
+at 7.0 shot jammed
+at 8.0 quit

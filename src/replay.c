@@ -1,7 +1,7 @@
 #include "replay.h"
 
 static constexpr uint32_t REPLAY_MAGIC = 0x52535452u; // "RTSR" read as little-endian
-static constexpr uint32_t REPLAY_VERSION = 21; // 21: orders for later
+static constexpr uint32_t REPLAY_VERSION = 22; // 22: radar, jammers, blips
 
 // ---------------------------------------------------------------- writing
 

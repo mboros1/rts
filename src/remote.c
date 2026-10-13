@@ -159,4 +159,25 @@ void remote_fog(const Remote *r, uint8_t *visible)
 			if (x1 >= x0) memset(visible + (ptrdiff_t)j * sx + x0, 1, (size_t)(x1 - x0 + 1));
 		}
 	}
+	// Jammed (2): out of sight, on our radar, and within the reach of an
+	// enemy jammer we know of. It looks it: static, not plain fog.
+	const Perception *seen = &r->sim.factions[r->faction.v].seen;
+	for (ptrdiff_t s = 0; s < seen->cap; s++) {
+		if (!seen->live[s] || seen->type[s] != UNIT_JAMMER) continue;
+		V2 at = perception_at(seen, s, r->sim.tick);
+		float rc = unit_defs[UNIT_JAMMER].jam / t->cell, cx = at.x / t->cell, cz = at.z / t->cell;
+		for (int32_t j = (int32_t)f_max(0.0f, cz - rc); j <= (int32_t)f_min((float)(sz - 1), cz + rc); j++)
+			for (int32_t i = (int32_t)f_max(0.0f, cx - rc); i <= (int32_t)f_min((float)(sx - 1), cx + rc); i++) {
+				uint8_t *v = visible + (ptrdiff_t)j * sx + i;
+				float dx = (float)i - cx, dz = (float)j - cz;
+				if (*v || dx * dx + dz * dz > rc * rc) continue;
+				float x = (float)i * t->cell, z = (float)j * t->cell;
+				for (ptrdiff_t k = 0; k < u->count && !*v; k++) {
+					float reach = unit_defs[u->type[k]].radar;
+					if (reach <= 0.0f || u->progress[k] < 1.0f) continue;
+					float ex = u->px[k] - x, ez = u->pz[k] - z;
+					if (ex * ex + ez * ez < reach * reach) *v = 2;
+				}
+			}
+	}
 }

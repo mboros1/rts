@@ -139,6 +139,20 @@ const UnitDef unit_defs[UNIT_TYPE_COUNT] = {
 	[UNIT_HEADQUARTERS] = {
 		.name = "headquarters", .radius = 4.5f, .sight = 40.0f, .height = 4.0f, .hp = 6000.0f,
 	},
+	// Towers: quick and cheap to put up, and quick to lose.
+	[UNIT_RADAR] = {
+		.name = "radar", .radius = 1.2f, .sight = 26.0f, .height = 4.5f, .hp = 100.0f,
+		.metal_cost = 40.0f, .energy_cost = 300.0f, .build_time = 10.0f, .radar = 150.0f,
+	},
+	[UNIT_JAMMER] = {
+		.name = "jammer", .radius = 1.2f, .sight = 16.0f, .height = 3.5f, .hp = 100.0f,
+		.metal_cost = 50.0f, .energy_cost = 500.0f, .build_time = 12.0f, .jam = 70.0f,
+	},
+	// What a radar contact looks like to its finder: a position, and nothing
+	// about what's there. Targetable (where it is is known), not buildable.
+	[UNIT_BLIP] = {
+		.name = "blip", .radius = 1.0f, .height = 1.0f, .hp = 1.0f,
+	},
 };
 
 static constexpr float KIT_SPACING = 30.0f;        // between players' starting bases
@@ -495,6 +509,16 @@ static bool in_sight(const Units *own, const Grid *grid, float x, float z)
 	return false;
 }
 
+// Is (x, z) within any of these circles (x, z, radius)?
+static bool covered(const V3 *circles, ptrdiff_t n, float x, float z)
+{
+	for (ptrdiff_t k = 0; k < n; k++) {
+		float dx = circles[k].x - x, dz = circles[k].y - z;
+		if (dx * dx + dz * dz < circles[k].z * circles[k].z) return true;
+	}
+	return false;
+}
+
 // What faction `f` perceives of its enemy this tick, as entries against its
 // current perception: units entering sight, drifting from their dead
 // reckoning, or leaving sight. Reads both factions; writes neither.
@@ -507,9 +531,27 @@ static void sense(Sim *sim, FactionId f, FactionEffects *fx)
 	grid_build(&grid, &sim->interaction, &sim->terrain, me->units.px, me->units.pz, me->units.count);
 	fx->seen = PUSH(&sim->interaction, SeenEntry, enemy->cap);
 	fx->seen_count = 0;
+	// Radar: our finished towers' reach; jamming: the enemy's. A few of each.
+	const Units *own = &me->units;
+	V3 *radar = PUSH(&sim->interaction, V3, own->count > 0 ? own->count : 1);
+	V3 *jam = PUSH(&sim->interaction, V3, enemy->count > 0 ? enemy->count : 1);
+	ptrdiff_t radars = 0, jams = 0;
+	for (ptrdiff_t i = 0; i < own->count; i++)
+		if (unit_defs[own->type[i]].radar > 0.0f && own->progress[i] >= 1.0f)
+			radar[radars++] = v3(own->px[i], own->pz[i], unit_defs[own->type[i]].radar);
+	for (ptrdiff_t i = 0; i < enemy->count; i++)
+		if (unit_defs[enemy->type[i]].jam > 0.0f && enemy->progress[i] >= 1.0f)
+			jam[jams++] = v3(enemy->px[i], enemy->pz[i], unit_defs[enemy->type[i]].jam);
 	for (ptrdiff_t s = 0; s < enemy->cap; s++) {
 		int32_t d = enemy->slot_dense[s];
 		bool visible = d >= 0 && in_sight(&me->units, &grid, enemy->px[d], enemy->pz[d]);
+		// Out of sight but on our radar: a blip, unless jammed. A jammer
+		// itself shows for what it is (it's transmitting).
+		UnitType as = d >= 0 ? enemy->type[d] : UNIT_BLIP;
+		if (!visible && d >= 0 && covered(radar, radars, enemy->px[d], enemy->pz[d])) {
+			if (unit_defs[as].jam > 0.0f && enemy->progress[d] >= 1.0f) visible = true;
+			else if (!covered(jam, jams, enemy->px[d], enemy->pz[d])) visible = true, as = UNIT_BLIP;
+		}
 		if (!visible) {
 			if (p->live[s]) fx->seen[fx->seen_count++] = (SeenEntry){.tag = SEEN_LOST, .slot = (uint16_t)s};
 			continue;
@@ -517,13 +559,13 @@ static void sense(Sim *sim, FactionId f, FactionEffects *fx)
 		SeenEntry e = {
 			.slot = (uint16_t)s,
 			.gen = enemy->slot_gen[s],
-			.type = enemy->type[d],
+			.type = as,
 			.qx = q_pos(enemy->px[d], sim->terrain.size_x),
 			.qz = q_pos(enemy->pz[d], sim->terrain.size_x),
 			.qvx = q_vel(enemy->vx[d]),
 			.qvz = q_vel(enemy->vz[d]),
 		};
-		if (!p->live[s] || p->gen[s] != e.gen) {
+		if (!p->live[s] || p->gen[s] != e.gen || p->type[s] != e.type) { // new, or seen properly now (or only on radar)
 			e.tag = SEEN_ENTER;
 			fx->seen[fx->seen_count++] = e;
 			continue;

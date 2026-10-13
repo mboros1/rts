@@ -21,6 +21,7 @@
 typedef struct {
 	Shader shader;          // instanced, with a fixed directional light
 	Material material;
+	uint32_t fog_frame;          // jammed fog's static moves with it
 	Mesh unit_mesh[UNIT_TYPE_COUNT];
 	Mesh shell_mesh;
 	// The terrain, in chunks of up to TERRAIN_CHUNK cells a side (a mesh's
