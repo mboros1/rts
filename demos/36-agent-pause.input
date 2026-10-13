@@ -1,0 +1,14 @@
+# Spike 22j demo, played: after the title card, the commander alone; Z, Q:
+# an extractor to place, and every free metal spot lights up gold. Esc.
+# Red, through the MCP, pauses with a note; blue reads it, and resumes.
+at 3.5 drag 450,200 1150,700
+at 3.8 click 60,710                     # the commander
+at 4.2 key Z
+at 4.4 key Q                            # an extractor: the spots light up
+at 4.8 move 1000,450
+at 5.4 shot spots
+at 6.0 key Escape
+at 9.5 shot paused
+at 12.0 key P                           # resume
+at 13.0 shot resumed
+at 14.0 quit
