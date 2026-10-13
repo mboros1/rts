@@ -320,7 +320,7 @@ int main(int argc, char **argv)
 		                    &g.frame, selected, 0);
 		controls_draw_world(&g.controls, &g.sim, &g.view, in.mouse);
 		EndMode3D();
-		controls_draw_screen(&g.controls, &g.sim, GetScreenWidth(), GetScreenHeight(), &in);
+		controls_draw_screen(&g.controls, &g.sim, &g.view, GetScreenWidth(), GetScreenHeight(), &in);
 		if (g.overlay) draw_overlay(&g);
 		draw_toast(&g);
 		EndDrawing();

@@ -1178,7 +1178,7 @@ static int client_main(int argc, char **argv)
 			                    c.opt.faction < FACTION_COUNT ? c.opt.faction : -1);
 			if (c.player) controls_draw_world(&c.controls, &c.remote.sim, &c.view, c.in.mouse);
 			EndMode3D();
-			if (c.player) controls_draw_screen(&c.controls, &c.remote.sim, c.in.width, c.in.height, &c.in);
+			if (c.player) controls_draw_screen(&c.controls, &c.remote.sim, &c.view, c.in.width, c.in.height, &c.in);
 		}
 		if (!c.on_map) {
 			// The game's end: the coordinator's word, or (a zone on its own) our side's.

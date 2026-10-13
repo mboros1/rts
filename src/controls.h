@@ -47,6 +47,8 @@
 
 // One order from the player, before it's a Command: the client sends it,
 // the sandbox queues it. units points into the frame arena.
+enum { CONTROL_GROUPS = 9 };
+
 typedef struct {
 	CommandKind kind;
 	V2 target;
@@ -81,6 +83,13 @@ typedef struct {
 	Vector2 drag_start;
 	int placing;            // a structure type being placed, or -1
 	bool placing_drag;      // ... the button is down: a drag lays out a grid of them
+	// Control groups, 1 to 9 (Ctrl+digit sets, digit selects, twice looks):
+	// handles, stale ones dropped as they're used.
+	UnitHandle *group[CONTROL_GROUPS];
+	ptrdiff_t group_count[CONTROL_GROUPS];
+	double group_tapped[CONTROL_GROUPS];
+	double now;             // seconds, for double taps
+	int idle_next;          // the idle builder the next press goes to
 	V2 place_from;          // ... from here (a site)
 	int tab[2];             // the build grid's open category (builders: 0) and page (factories: 1)
 	int aiming;             // move or fight, waiting for a click: its CommandKind, or -1
@@ -101,7 +110,7 @@ void controls_clear(Controls *c);
 // Orders land in out (at most cap); returns how many.
 // Orders one frame can send, at most: a grid of sites (LATER_MAX) and a few more.
 enum { CONTROLS_ORDERS = LATER_MAX + 16 };
-ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const View *view, Arena *frame, Order *out,
+ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, View *view, Arena *frame, Order *out,
                          ptrdiff_t cap);
 
 // A placement, a move or fight, or a prompt in progress (cancel cancels it
@@ -116,4 +125,4 @@ void controls_draw_world(const Controls *c, const Sim *sim, const View *view, Ve
 // After EndMode3D: the panels, in a screen of w x h pixels: the game's
 // window (with its input: the mouse hovers and drags), or a clip's frame
 // (in: nullptr).
-void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, const Input *in);
+void controls_draw_screen(const Controls *c, const Sim *sim, const View *view, int w, int h, const Input *in); // view may be null (clips)

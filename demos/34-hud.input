@@ -1,0 +1,21 @@
+# Spike 22h demo, played: after the title card, the base becomes group 1;
+# an engineer starts a generator (its bar shows progress); the minimap
+# jumps the camera across the zone and back; 1 twice brings the group
+# back and looks at it; I finds the idle engineer.
+at 3.5 drag 450,200 1150,700            # the base
+at 3.8 key 1 ctrl                       # group 1
+at 4.2 key I                            # an idle engineer
+at 4.5 key Z
+at 4.7 key W                            # a generator
+at 5.0 click 820,600
+at 6.5 shot building
+at 7.5 click 200,124                    # the minimap: across the zone
+at 8.5 shot across
+at 9.5 key 1
+at 9.6 key 1                            # twice: the group, and the camera on it
+at 10.5 shot group
+at 10.8 expect selected >= 3
+at 11.5 key I
+at 12.0 shot idle
+at 12.2 expect selected == 1
+at 13.0 quit

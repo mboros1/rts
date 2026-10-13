@@ -29,6 +29,7 @@ void controls_init(Controls *c, FactionId me, Arena *a, ptrdiff_t max_units)
 {
 	*c = (Controls){.me = me, .selection = PUSH(a, UnitHandle, max_units), .placing = -1, .aiming = -1,
 	                .landing_for = -1, .send_for = -1, .team_count = 1};
+	for (int g = 0; g < CONTROL_GROUPS; g++) c->group[g] = PUSH(a, UnitHandle, max_units);
 }
 
 void controls_clear(Controls *c)
@@ -374,7 +375,27 @@ bool controls_busy(const Controls *c)
 	return c->placing >= 0 || c->aiming >= 0 || c->sending || c->landing_for >= 0 || c->send_for >= 0 || c->giving;
 }
 
-ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const View *view, Arena *frame, Order *out,
+// The groups panel: a button per group, three rows of three.
+static Rectangle group_button(const Layout *L, int g)
+{
+	float pad = 4.0f * L->s, top = 20.0f * L->s;
+	float w = (L->groups.width - 2.0f * pad) / 3.0f, h = (L->groups.height - top - pad) / 3.0f;
+	return (Rectangle){L->groups.x + pad + (float)(g % 3) * w, L->groups.y + top + (float)(g / 3) * h, w - 2.0f, h - 2.0f};
+}
+
+static bool idle_builder(const Controls *c, const Units *u, ptrdiff_t i)
+{
+	return player_eq(u->owner[i], c->player) && unit_is_builder(u->type[i]) && u->order[i] == ORDER_IDLE
+	    && u->later_len[i] == 0 && u->progress[i] >= 1.0f;
+}
+
+// A point on the minimap, in the zone.
+static V2 minimap_world(Rectangle r, const Terrain *t, Vector2 p)
+{
+	return v2((p.x - r.x) / r.width * t->size_x, (p.y - r.y) / r.height * t->size_z);
+}
+
+ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, View *view, Arena *frame, Order *out,
                          ptrdiff_t cap)
 {
 	ptrdiff_t n = 0;
@@ -385,6 +406,71 @@ ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const Vie
 	MenuContext ctx = menu_context(c, sim);
 	BuildMenu build = menu_build(&s, c->tab[!s.builders], (int)sim->config.context.tier);
 	OrdersMenu orders = menu_orders(&s, &ctx);
+
+	// The minimap: left (or held) moves the camera there, or gives a move
+	// or fight being aimed; right orders the selection there, as on the ground.
+	if (CheckCollisionPointRec(mouse, L.minimap) && !c->dragging && c->placing < 0) {
+		V2 at = minimap_world(L.minimap, &sim->terrain, mouse);
+		uint8_t later = shift ? COMMAND_QUEUED : 0;
+		if (in->click[0] && c->aiming >= 0) {
+			order(c, frame, out, cap, &n, (Order){.kind = (CommandKind)c->aiming, .target = at, .flags = later});
+			if (!shift) c->aiming = -1;
+		} else if (in->held[0] || in->click[0]) {
+			view->focus = at;
+		} else if (in->click[1]) {
+			order(c, frame, out, cap, &n, (Order){.kind = input_ctrl(in) ? COMMAND_MOVE : COMMAND_ATTACK_MOVE, .target = at, .flags = later});
+		}
+		if (in->click[0] || in->click[1] || in->held[0]) return n;
+	}
+
+	c->now += in->dt;
+	// Control groups: Ctrl+digit makes the selection group N; the digit
+	// selects it again (shift adds it), and twice quickly looks at it.
+	const Units *mine = own_units(c, sim);
+	for (int g = 0; g < CONTROL_GROUPS; g++) {
+		bool clicked = in->click[0] && CheckCollisionPointRec(mouse, group_button(&L, g));
+		if (!in->pressed[KEY_ONE + g] && !clicked) continue;
+		if (input_ctrl(in) && !clicked) {
+			c->group_count[g] = 0;
+			for (ptrdiff_t k = 0; k < c->selection_count; k++) c->group[g][c->group_count[g]++] = c->selection[k];
+		} else {
+			if (!shift) c->selection_count = 0;
+			ptrdiff_t kept = 0;
+			for (ptrdiff_t k = 0; k < c->group_count[g]; k++) {
+				ptrdiff_t d = units_find(mine, c->group[g][k]);
+				if (d < 0 || !player_eq(mine->owner[d], c->player)) continue; // gone, or given away
+				c->group[g][kept++] = c->group[g][k];
+				c->selection[c->selection_count++] = c->group[g][k];
+			}
+			c->group_count[g] = kept;
+			if (c->now - c->group_tapped[g] < 0.35 && kept > 0) {
+				V2 sum = v2(0.0f, 0.0f);
+				for (ptrdiff_t k = 0; k < kept; k++) {
+					ptrdiff_t d = units_find(mine, c->group[g][k]);
+					sum = v2_add(sum, v2(mine->px[d], mine->pz[d]));
+				}
+				view->focus = v2_scale(sum, 1.0f / (float)kept);
+			}
+			c->group_tapped[g] = c->now;
+		}
+		return n;
+	}
+	// The next idle builder: selected, and looked at.
+	if (action_pressed(c, in, BIND_IDLE_BUILDER) || (in->click[0] && CheckCollisionPointRec(mouse, L.idle))) {
+		ptrdiff_t count = 0, pick = -1;
+		for (ptrdiff_t i = 0; i < mine->count; i++)
+			if (idle_builder(c, mine, i) && count++ == c->idle_next) pick = i;
+		if (pick < 0)
+			for (ptrdiff_t i = 0; i < mine->count && pick < 0; i++)
+				if (idle_builder(c, mine, i)) pick = i;
+		c->idle_next = count ? (c->idle_next + 1) % (int)count : 0;
+		if (pick >= 0) {
+			c->selection_count = 0;
+			c->selection[c->selection_count++] = units_handle(mine, pick);
+			view->focus = v2(mine->px[pick], mine->pz[pick]);
+		}
+		return n;
+	}
 
 	// A prompt in progress takes the keys and clicks it needs.
 	if (send_input(c, in, sim, view, frame, out, cap, &n) || give_input(c, in, sim, frame, out, cap, &n)) return n;
@@ -578,6 +664,73 @@ static void panel(Rectangle r, float s)
 static void text(const char *t, float x, float y, float size, Color color) { DrawText(t, (int)x, (int)y, (int)size, color); }
 
 // A box with its name and UNDER CONSTRUCTION: what has a place, but not yet.
+// The minimap: the zone's ground by height, our units and structures in our
+// colour, the enemy we see in theirs, metal spots, and the camera's spot.
+// Drawn fresh each frame (a few thousand rectangles: raylib batches them).
+static Vector2 minimap_screen(Rectangle r, const Terrain *t, float x, float z)
+{
+	return (Vector2){r.x + x / t->size_x * r.width, r.y + z / t->size_z * r.height};
+}
+
+static void draw_minimap(const Controls *c, const Sim *sim, const View *view, Rectangle r, float s)
+{
+	const Terrain *t = &sim->terrain;
+	panel(r, s);
+	enum { CELLS = 48 };
+	float cw = r.width / CELLS, ch = r.height / CELLS;
+	// What we see now: cells within sight of our units (the fog, as on the ground).
+	const Units *own = &sim->factions[c->me.v].units;
+	bool seen_now[CELLS][CELLS] = {0};
+	float cx = t->size_x / CELLS, cz = t->size_z / CELLS;
+	for (ptrdiff_t i = 0; i < own->count; i++) {
+		float sight = unit_defs[own->type[i]].sight;
+		int i0 = (int)fmaxf(0.0f, (own->px[i] - sight) / cx), i1 = (int)fminf(CELLS - 1, (own->px[i] + sight) / cx);
+		int j0 = (int)fmaxf(0.0f, (own->pz[i] - sight) / cz), j1 = (int)fminf(CELLS - 1, (own->pz[i] + sight) / cz);
+		for (int j = j0; j <= j1; j++)
+			for (int k = i0; k <= i1; k++) {
+				float dx = ((float)k + 0.5f) * cx - own->px[i], dz = ((float)j + 0.5f) * cz - own->pz[i];
+				if (dx * dx + dz * dz <= sight * sight) seen_now[j][k] = true;
+			}
+	}
+	for (int j = 0; j < CELLS; j++)
+		for (int i = 0; i < CELLS; i++) {
+			float x = ((float)i + 0.5f) / CELLS * t->size_x, z = ((float)j + 0.5f) / CELLS * t->size_z;
+			float k = terrain_height(t, x, z) / (t->max_height > 0.0f ? t->max_height : 1.0f);
+			float dim = seen_now[j][i] ? 1.0f : 0.5f;
+			Color g = {(unsigned char)((48 + 70 * k) * dim), (unsigned char)((78 + 60 * k) * dim), (unsigned char)((46 + 40 * k) * dim), 255};
+			DrawRectangleRec((Rectangle){r.x + (float)i * cw, r.y + (float)j * ch, cw + 0.5f, ch + 0.5f}, g);
+		}
+	for (int32_t k = 0; k < sim->spots.count; k++) {
+		Vector2 p = minimap_screen(r, t, sim->spots.at[k].x, sim->spots.at[k].z);
+		DrawCircleV(p, 1.6f * s, (Color){20, 22, 26, 255});
+	}
+	const Faction *f = &sim->factions[c->me.v];
+	const Units *u = &f->units;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		Vector2 p = minimap_screen(r, t, u->px[i], u->pz[i]);
+		float d = (unit_is_structure(u->type[i]) ? 3.0f : 2.0f) * s;
+		DrawRectangleRec((Rectangle){p.x - d * 0.5f, p.y - d * 0.5f, d, d}, render_player_color((int)c->me.v, u->owner[i]));
+	}
+	const Perception *seen = &f->seen;
+	Color them = render_player_color(!(int)c->me.v, (PlayerSlot){0});
+	for (ptrdiff_t k = 0; k < seen->cap; k++) {
+		if (!seen->live[k]) continue;
+		V2 at = perception_at(seen, k, sim->tick);
+		Vector2 p = minimap_screen(r, t, at.x, at.z);
+		float d = (unit_is_structure(seen->type[k]) ? 3.0f : 2.0f) * s;
+		DrawRectangleRec((Rectangle){p.x - d * 0.5f, p.y - d * 0.5f, d, d}, them);
+	}
+	if (view) {
+		// The camera's spot: about what's on screen at this zoom.
+		float hw = view->distance * 0.75f, hh = view->distance * 0.45f;
+		Vector2 a = minimap_screen(r, t, view->focus.x - hw, view->focus.z - hh * 1.4f);
+		Vector2 b = minimap_screen(r, t, view->focus.x + hw, view->focus.z + hh * 0.6f);
+		Rectangle box = GetCollisionRec((Rectangle){a.x, a.y, b.x - a.x, b.y - a.y}, r); // clipped to the map
+		if (box.width > 0.0f && box.height > 0.0f) DrawRectangleLinesEx(box, 1.0f, (Color){230, 230, 220, 200});
+	}
+	DrawRectangleLinesEx(r, fmaxf(1.0f, s), PANEL_EDGE);
+}
+
 static void under_construction(Rectangle r, const char *name, float s)
 {
 	panel(r, s);
@@ -847,7 +1000,7 @@ static void draw_prompt(const Controls *c, const Layout *L)
 	text(line, r.x + 8.0f * s, r.y + 5.0f * s, size, TEXT);
 }
 
-void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, const Input *in)
+void controls_draw_screen(const Controls *c, const Sim *sim, const View *view, int w, int h, const Input *in)
 {
 	bool live = in != nullptr;
 	Vector2 mouse = live ? in->mouse : (Vector2){-1.0f, -1.0f};
@@ -857,6 +1010,21 @@ void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, const
 		                     1.0f, SELECTED_COLOR);
 	Layout L = layout(w, h);
 	float s = L.s;
+	// Health bars over our damaged units (and anything being built: its progress).
+	if (view) {
+		const Units *own = own_units(c, sim);
+		for (ptrdiff_t i = 0; i < own->count; i++) {
+			const UnitDef *def = &unit_defs[own->type[i]];
+			float frac = own->progress[i] < 1.0f ? own->progress[i] : own->hp[i] / def->hp;
+			if (frac >= 0.999f) continue;
+			Vector2 p = GetWorldToScreen((Vector3){own->px[i], own->py[i] + def->height + 0.8f, own->pz[i]}, view->camera);
+			float bw = fmaxf(14.0f, def->radius * 6.0f) * s, bh = 3.0f * s;
+			if (p.x < -bw || p.y < 0.0f || p.x > (float)w + bw || p.y > (float)h) continue;
+			Color fill = own->progress[i] < 1.0f ? ORANGE : frac > 0.5f ? ON : frac > 0.25f ? ENERGY : OFF;
+			DrawRectangleRec((Rectangle){p.x - bw * 0.5f, p.y, bw, bh}, (Color){20, 20, 24, 200});
+			DrawRectangleRec((Rectangle){p.x - bw * 0.5f, p.y, bw * frac, bh}, fill);
+		}
+	}
 	SelectionSummary sum = menu_summarize(own_units(c, sim), c->selection, c->selection_count);
 	MenuContext ctx = menu_context(c, sim);
 	BuildMenu build = menu_build(&sum, c->tab[!sum.builders], (int)sim->config.context.tier);
@@ -868,7 +1036,7 @@ void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, const
 		draw_resource(L.metal, "metal", e->metal, e->metal_cap, e->metal_income, e->metal_spent, METAL, s);
 		draw_resource(L.energy, "energy", e->energy, e->energy_cap, e->energy_income, e->energy_spent, ENERGY, s);
 	}
-	under_construction(L.minimap, "minimap", s);
+	draw_minimap(c, sim, view, L.minimap, s);
 
 	panel(L.build, s);
 	for (int k = 0; k < BUILD_ITEMS; k++)
@@ -882,8 +1050,25 @@ void controls_draw_screen(const Controls *c, const Sim *sim, int w, int h, const
 	for (int k = 0; k < ORDER_SLOTS; k++)
 		draw_text_button(L.order[k], &orders.slot[k], orders.slot[k].shown ? action_key(c, order_action[orders.slot[k].order]) : "", true,
 		                 CheckCollisionPointRec(mouse, L.order[k]), s);
-	under_construction(L.groups, "groups", s);
-	under_construction(L.idle, "idle builders", s);
+	panel(L.groups, s);
+	text("groups", L.groups.x + 6.0f * s, L.groups.y + 4.0f * s, 12.0f * s, TEXT_DIM);
+	const Units *mine = own_units(c, sim);
+	for (int g = 0; g < CONTROL_GROUPS; g++) {
+		ptrdiff_t alive = 0;
+		for (ptrdiff_t k = 0; k < c->group_count[g]; k++) alive += units_find(mine, c->group[g][k]) >= 0;
+		Rectangle b = group_button(&L, g);
+		bool hover = live && CheckCollisionPointRec(mouse, b);
+		DrawRectangleRec(b, alive ? (hover ? BUTTON_HOVER : BUTTON) : (Color){24, 26, 32, 255});
+		text(TextFormat("%d", g + 1), b.x + 3.0f * s, b.y + 2.0f * s, 11.0f * s, alive ? ENERGY : TEXT_DIM);
+		if (alive) text(TextFormat("%td", alive), b.x + 3.0f * s, b.y + b.height - 13.0f * s, 12.0f * s, TEXT);
+	}
+	panel(L.idle, s);
+	text("idle builders", L.idle.x + 6.0f * s, L.idle.y + 4.0f * s, 12.0f * s, TEXT_DIM);
+	int idle = 0;
+	for (ptrdiff_t i = 0; i < mine->count; i++) idle += idle_builder(c, mine, i);
+	text(TextFormat("%d", idle), L.idle.x + 10.0f * s, L.idle.y + 26.0f * s, 34.0f * s, idle ? ORANGE : TEXT_DIM);
+	text(TextFormat("%s: next", keymap_key_name(key_of(c, BIND_IDLE_BUILDER))), L.idle.x + 6.0f * s,
+	     L.idle.y + L.idle.height - 18.0f * s, 12.0f * s, TEXT_DIM);
 
 	// Your side's players, bottom right, in their colours.
 	panel(L.players, s);

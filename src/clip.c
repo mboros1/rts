@@ -476,7 +476,7 @@ int clip_run(const ClipRequest *req)
 			               .selection = script_run.group_units[g], .selection_count = script_run.group_len[g],
 			               .placing = -1, .aiming = -1, .landing_for = -1, .send_for = -1,
 			               .team_count = sim.config.players[script_run.group_side[g].v], .tab = {script_run.show_tab, script_run.show_tab}};
-			controls_draw_screen(&ui, &sim, rw, rh, nullptr);
+			controls_draw_screen(&ui, &sim, nullptr, rw, rh, nullptr);
 		} else {
 			draw_economies(&sim, rh);
 		}
