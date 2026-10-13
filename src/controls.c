@@ -620,6 +620,19 @@ static void draw_plans(const Controls *c, const Sim *sim)
 void controls_draw_world(const Controls *c, const Sim *sim, const View *view, Vector2 mouse)
 {
 	draw_plans(c, sim);
+	if (c->placing >= 0 && unit_is_extractor((UnitType)c->placing)) {
+		// Placing an extractor: every metal spot stands out, gold where it
+		// can go (a beam to find it from afar), grey where it can't.
+		for (int32_t k = 0; k < sim->spots.count; k++) {
+			V2 at = sim->spots.at[k];
+			bool ok = placement_ok(sim, c->me, (UnitType)c->placing, at);
+			float y = terrain_height(&sim->terrain, at.x, at.z);
+			Color mark = ok ? (Color){255, 200, 60, 255} : (Color){130, 130, 130, 160};
+			for (int r = 0; r < 2; r++)
+				DrawCircle3D((Vector3){at.x, y + 0.3f, at.z}, 3.0f + 0.8f * (float)r, (Vector3){1, 0, 0}, 90.0f, mark);
+			if (ok) DrawLine3D((Vector3){at.x, y, at.z}, (Vector3){at.x, y + 8.0f, at.z}, mark);
+		}
+	}
 	if (c->landing_for >= 0) {
 		// Where an unpaired send may land: our strip, its edge traced on the ground.
 		const Terrain *t = &sim->terrain;
@@ -700,9 +713,12 @@ static void draw_minimap(const Controls *c, const Sim *sim, const View *view, Re
 			Color g = {(unsigned char)((48 + 70 * k) * dim), (unsigned char)((78 + 60 * k) * dim), (unsigned char)((46 + 40 * k) * dim), 255};
 			DrawRectangleRec((Rectangle){r.x + (float)i * cw, r.y + (float)j * ch, cw + 0.5f, ch + 0.5f}, g);
 		}
+	bool extractor = c->placing >= 0 && unit_is_extractor((UnitType)c->placing);
 	for (int32_t k = 0; k < sim->spots.count; k++) {
 		Vector2 p = minimap_screen(r, t, sim->spots.at[k].x, sim->spots.at[k].z);
-		DrawCircleV(p, 1.6f * s, (Color){20, 22, 26, 255});
+		// Placing an extractor: free spots in gold, bigger.
+		bool open = extractor && placement_ok(sim, c->me, (UnitType)c->placing, sim->spots.at[k]);
+		DrawCircleV(p, (open ? 2.6f : 1.6f) * s, open ? (Color){255, 200, 60, 255} : (Color){20, 22, 26, 255});
 	}
 	const Faction *f = &sim->factions[c->me.v];
 	const Units *u = &f->units;
