@@ -98,7 +98,7 @@ static void start_clip(Game *g);
 
 static void handle_input(Game *g, const Input *in)
 {
-	if (in->pressed[g->keys.key[BIND_SANDBOX_PAUSE]]) g->paused = !g->paused;
+	if (in->pressed[g->keys.key[BIND_PAUSE]]) g->paused = !g->paused;
 	if (in->pressed[g->keys.key[BIND_OVERLAY]]) g->overlay = !g->overlay;
 	if (in->pressed[g->keys.key[BIND_SANDBOX_BOT]]) g->bots[0].enabled = !g->bots[0].enabled;
 	if (in->pressed[g->keys.key[BIND_SANDBOX_CLIP]]) start_clip(g);

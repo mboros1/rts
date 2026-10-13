@@ -40,7 +40,7 @@ typedef enum : uint8_t {
 	BIND_CANCEL,          // a placement or a prompt; with none, the map
 	BIND_OVERLAY,         // network and timing details
 	// The dev sandbox's own.
-	BIND_SANDBOX_PAUSE,
+	BIND_PAUSE,
 	BIND_SANDBOX_BOT,
 	BIND_SANDBOX_CLIP,
 	BIND_COUNT,

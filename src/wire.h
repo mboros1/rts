@@ -61,7 +61,7 @@
 #include "quant.h"
 #include "sim.h"
 
-enum { WIRE_VERSION = 18, DIGEST_EVERY = 30 };
+enum { WIRE_VERSION = 19, DIGEST_EVERY = 30 };
 static constexpr uint8_t SPECTATOR = 255;
 
 typedef enum : uint8_t {
@@ -74,6 +74,7 @@ typedef enum : uint8_t {
 	MSG_PONG,
 	MSG_FACTION_SNAPSHOT,
 	MSG_FACTION_TICK,
+	MSG_NOTE,               // pause, resume, a message: see wire_put_note
 	MSG_KIND_COUNT,
 } MsgKind;
 
@@ -169,3 +170,29 @@ bool wire_read_faction_tick(ByteReader *r, Arena *a, const SimConfig *c, Faction
 
 void wire_put_config(ByteBuf *b, const SimConfig *c);
 bool wire_get_config(ByteReader *r, SimConfig *c);   // false if out of range
+
+// Notes: pausing, resuming and messages between players (a player and an
+// agent playing the other side tell each other why they paused).
+// Client to server: action, text. Server to every client: whether the zone
+// is paused now, who said it (faction, player), text.
+enum { NOTE_MAX = 400 };
+typedef enum : uint8_t { NOTE_SAY, NOTE_PAUSE, NOTE_RESUME } NoteAction;
+static inline void wire_put_note_text(ByteBuf *b, const char *text, ptrdiff_t len)
+{
+	if (len > NOTE_MAX) len = NOTE_MAX;
+	put16(b, (uint16_t)len);
+	put_bytes(b, text, len);
+}
+// The text into out (NUL-terminated, NOTE_MAX + 1 bytes); false if malformed.
+static inline bool wire_get_note_text(ByteReader *r, char out[NOTE_MAX + 1])
+{
+	uint16_t len = get16(r);
+	if (r->bad || len > NOTE_MAX || r->len - r->pos < len) return false;
+	memcpy(out, r->data + r->pos, len);
+	r->pos += len;
+	out[len] = 0;
+	for (int k = 0; k < len; k++)
+		if ((unsigned char)out[k] < 32 && out[k] != '\n') out[k] = ' ';
+	return true;
+}
+

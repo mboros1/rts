@@ -170,8 +170,21 @@ void platform_reap_children(void) {}
 int platform_spawn_detached(const char *const argv[], const char *log_path) { (void)argv, (void)log_path; return 0; }
 bool platform_alive(int pid) { (void)pid; return false; }
 bool platform_terminate(int pid) { (void)pid; return false; }
+ptrdiff_t platform_stdin_read(char *buf, ptrdiff_t cap) { (void)buf, (void)cap; return -1; }
 
 #else
+
+ptrdiff_t platform_stdin_read(char *buf, ptrdiff_t cap)
+{
+	static bool nonblocking;
+	if (!nonblocking) {
+		fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
+		nonblocking = true;
+	}
+	ssize_t n = read(0, buf, (size_t)cap);
+	if (n > 0) return (ptrdiff_t)n;
+	return n == 0 ? -1 : 0; // 0 bytes read: closed; would block: nothing yet
+}
 
 static bool spawn_child(const char *const argv[], pid_t *pid)
 {

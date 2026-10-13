@@ -110,6 +110,12 @@ typedef struct {
 	ptrdiff_t queued_count;
 
 	double step_ms_avg;
+	// Paused by a player: no ticks until one resumes. The last note is kept
+	// for whoever joins meanwhile.
+	bool paused;
+	uint8_t note_faction;
+	PlayerSlot note_player;
+	char note[NOTE_MAX + 1];
 	double forced_dilation;   // 0: automatic
 	double speed;             // clock multiplier; 1 is real time
 	double dilation;
@@ -259,6 +265,18 @@ static void update_presence(Server *s)
 	s->run.presence_set = true;
 }
 
+static void send_note(Server *s, Client *c, double now)
+{
+	ArenaMark m = arena_mark(&s->encode);
+	ByteBuf b = bytebuf_make(&s->encode, NOTE_MAX + 16);
+	put8(&b, s->paused);
+	put8(&b, s->note_faction);
+	put8(&b, s->note_player.v);
+	wire_put_note_text(&b, s->note, (ptrdiff_t)strlen(s->note));
+	send_or_drop(s, c, MSG_NOTE, &b, now);
+	arena_rewind(m);
+}
+
 static void handle_hello(Server *s, Client *c, ByteReader *r, double now)
 {
 	uint32_t version = get32(r);
@@ -291,9 +309,31 @@ static void handle_hello(Server *s, Client *c, ByteReader *r, double now)
 	else wire_encode_snapshot(&s->mirror, &snap);
 	send_or_drop(s, c, plays ? MSG_FACTION_SNAPSHOT : MSG_SNAPSHOT, &snap, now);
 	arena_rewind(m);
+	if (s->paused || s->note[0]) send_note(s, c, now);
 	printf("server: client joined as %s.%d at tick %lld (snapshot %td bytes)\n",
 	       faction == SPECTATOR ? "spectator" : faction == 0 ? "blue" : "red", player.v,
 	       (long long)s->sim.tick.v, snap.len);
+}
+
+// A player pauses, resumes or says something; everyone hears it.
+static void handle_note(Server *s, Client *c, ByteReader *r, double now)
+{
+	uint8_t action = get8(r);
+	char text[NOTE_MAX + 1];
+	if (c->faction >= FACTION_COUNT || action > NOTE_RESUME || !wire_get_note_text(r, text)) {
+		conn_close(&c->conn, "bad note");
+		return;
+	}
+	if (action == NOTE_PAUSE) s->paused = true;
+	if (action == NOTE_RESUME) s->paused = false;
+	s->note_faction = c->faction;
+	s->note_player = c->player;
+	memcpy(s->note, text, sizeof text);
+	printf("server: %s.%d %s%s%s\n", c->faction == 0 ? "blue" : "red", c->player.v,
+	       action == NOTE_PAUSE ? "paused" : action == NOTE_RESUME ? "resumed" : "says", text[0] ? ": " : "", text);
+	fflush(stdout);
+	for (int k = 0; k < MAX_CLIENTS; k++)
+		if (s->clients[k].state == CLIENT_READY) send_note(s, &s->clients[k], now);
 }
 
 // Commands are untrusted: only orders, only as the client's own player of its
@@ -361,6 +401,7 @@ static void service_clients(Server *s, double now)
 			ByteReader r = byte_reader(f.data, f.len);
 			if (f.kind == MSG_HELLO && c->state == CLIENT_HELLO) handle_hello(s, c, &r, now);
 			else if (f.kind == MSG_COMMAND && c->state == CLIENT_READY) handle_command(s, c, &r);
+			else if (f.kind == MSG_NOTE && c->state == CLIENT_READY) handle_note(s, c, &r, now);
 			else if (f.kind == MSG_PING) conn_send(&c->conn, MSG_PONG, f.data, f.len, now);
 			else conn_close(&c->conn, "unexpected message");
 		}
@@ -1115,7 +1156,8 @@ int main(int argc, char **argv)
 		double now = platform_seconds();
 		service_clients(&s, now);
 		coord_service(&s, now);
-		if (now >= next) {
+		if (s.paused) next = now; // still: and no catching up after
+		if (now >= next && !s.paused) {
 			step(&s, now);
 			next += SIM_DT / (s.dilation * s.speed);
 			if (next < now - 0.25) next = now; // fell far behind: don't try to catch up

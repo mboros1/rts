@@ -22,7 +22,7 @@
 	"cancel": "Escape",
 	"overlay": "F1",
 
-	"sandbox_pause": "P",
+	"pause": "P",
 	"sandbox_bot": "F2",
 	"sandbox_clip": "F3"
 }

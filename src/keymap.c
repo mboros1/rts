@@ -11,7 +11,7 @@ static const char *const action_names[BIND_COUNT] = {
 	[BIND_TAB_1] = "tab_1", [BIND_TAB_2] = "tab_2", [BIND_TAB_3] = "tab_3", [BIND_TAB_4] = "tab_4",
 	[BIND_CAMERA_UP] = "camera_up", [BIND_CAMERA_DOWN] = "camera_down", [BIND_CAMERA_LEFT] = "camera_left",
 	[BIND_CAMERA_RIGHT] = "camera_right", [BIND_MAP] = "map", [BIND_CANCEL] = "cancel", [BIND_OVERLAY] = "overlay",
-	[BIND_SANDBOX_PAUSE] = "sandbox_pause", [BIND_SANDBOX_BOT] = "sandbox_bot", [BIND_SANDBOX_CLIP] = "sandbox_clip",
+	[BIND_PAUSE] = "pause", [BIND_SANDBOX_BOT] = "sandbox_bot", [BIND_SANDBOX_CLIP] = "sandbox_clip",
 };
 
 Keymap keymap_default(void)
@@ -28,7 +28,7 @@ Keymap keymap_default(void)
 		[BIND_CAMERA_UP] = KEYCODE_UP, [BIND_CAMERA_DOWN] = KEYCODE_DOWN, [BIND_CAMERA_LEFT] = KEYCODE_LEFT,
 		[BIND_CAMERA_RIGHT] = KEYCODE_RIGHT, [BIND_MAP] = KEYCODE_TAB, [BIND_CANCEL] = KEYCODE_ESCAPE,
 		[BIND_OVERLAY] = KEYCODE_F1,
-		[BIND_SANDBOX_PAUSE] = 'P', [BIND_SANDBOX_BOT] = KEYCODE_F1 + 1, [BIND_SANDBOX_CLIP] = KEYCODE_F1 + 2,
+		[BIND_PAUSE] = 'P', [BIND_SANDBOX_BOT] = KEYCODE_F1 + 1, [BIND_SANDBOX_CLIP] = KEYCODE_F1 + 2,
 	};
 	for (int a = 0; a < BIND_COUNT; a++) km.key[a] = defaults[a];
 	return km;

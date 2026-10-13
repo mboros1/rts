@@ -17,6 +17,8 @@ ptrdiff_t platform_page_size(void);
 
 // Monotonic seconds, for profiling only. The sim never reads the clock.
 double platform_seconds(void);
+// What's waiting on stdin, without blocking: bytes read, 0 if none yet, -1 if closed.
+ptrdiff_t platform_stdin_read(char *buf, ptrdiff_t cap);
 
 // Read a whole file into memory from the arena. Returns false if it cannot.
 typedef struct Arena Arena;

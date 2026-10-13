@@ -1,0 +1,7 @@
+# Spike 22e demo, played: after the title card, blue looks at its base;
+# red pauses with a note; blue reads it and resumes with P.
+at 2.5 shot playing
+at 6.0 shot paused
+at 9.0 key P                            # resume
+at 10.0 shot resumed
+at 11.0 quit

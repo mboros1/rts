@@ -66,6 +66,7 @@ typedef struct {
 	const char *coord, *zone, *switch_to;
 	int64_t switch_at, quit_after;
 	bool bot;
+	bool agent;                    // --agent: requests on stdin, answers on stdout (tools/agent)
 	const char *doctrine;          // --doctrine, for --bot
 	const char *keys;              // --keys: a keymap file (else config/keys.json, if there is one)
 	const char *input;             // --input: an input script (input.h) plays the controls
@@ -96,6 +97,11 @@ typedef struct {
 	Mirror mirror;              // spectators
 	bool ready;                 // has a snapshot
 	double last_delta_at;
+	// The zone's last note (wire.h): paused or not, who, what, and when it came.
+	bool paused;
+	uint8_t note_faction;
+	char note[NOTE_MAX + 1];
+	double note_at;
 
 	Arena program, frame, out;
 	Arena world;                // this zone's terrain and state: reset on a switch
@@ -108,6 +114,8 @@ typedef struct {
 	int journey_at;             // step of --journey in progress
 	double journey_until;
 	Bot bot;                    // --bot
+	char agent_in[1 << 16];     // --agent: stdin not yet a whole line
+	ptrdiff_t agent_len;
 	BotWorld bot_world;
 	int64_t bot_tick;
 	FILE *netlog;
@@ -386,6 +394,18 @@ static void client_frames(Client *c)
 					c->digest_mismatches += !info.digest_matched;
 				}
 			}
+		} else if (f.kind == MSG_NOTE) {
+			bool paused = get8(&r);
+			uint8_t faction = get8(&r);
+			get8(&r); // the player: one a side, for now
+			if (!wire_get_note_text(&r, c->note) || faction >= FACTION_COUNT) {
+				c->malformed++;
+				conn_close(&c->conn, "bad note");
+				continue;
+			}
+			c->paused = paused;
+			c->note_faction = faction;
+			c->note_at = client_now(c);
 		} else if (f.kind == MSG_PONG && f.len == 8) {
 			double sent;
 			memcpy(&sent, f.data, sizeof sent);
@@ -470,6 +490,187 @@ static void client_targets(Client *c)
 			t->neighbour[k] = t->neighbour[k] || (d->links[l][0] == k && d->links[l][1] == c->zone_at)
 			                                  || (d->links[l][1] == k && d->links[l][0] == c->zone_at);
 		t->count = k + 1;
+	}
+}
+
+static void client_send_note(Client *c, NoteAction action, const char *text)
+{
+	if (!c->conn.open) return;
+	arena_reset(&c->out);
+	ByteBuf b = bytebuf_make(&c->out, NOTE_MAX + 8);
+	put8(&b, action);
+	wire_put_note_text(&b, text, (ptrdiff_t)strlen(text));
+	conn_send(&c->conn, MSG_NOTE, b.data, b.len, client_now(c));
+}
+
+// The last note: while paused, and for a while after one arrives. Who
+// paused, and why (an agent playing the other side says so).
+static void client_note_draw(Client *c, double now)
+{
+	bool fresh = c->note[0] && now - c->note_at < 12.0;
+	if (!c->paused && !fresh) return;
+	float s = (float)c->in.height / 900.0f;
+	const char *who = c->note_faction == 0 ? "blue" : "red";
+	char head[64];
+	snprintf(head, sizeof head, c->paused ? "PAUSED by %s" : "%s says", who);
+	// Wrap the text to the box.
+	float w = 760.0f * s, x = ((float)c->in.width - w) * 0.5f, y = 120.0f * s;
+	int size = (int)(22.0f * s), line_h = (int)(28.0f * s);
+	char lines[16][128];
+	int n = 0;
+	const char *p = c->note;
+	while (*p && n < 16) {
+		int len = 0, fit = 0;
+		while (p[len] && p[len] != '\n' && len < 127) {
+			char tmp[128];
+			memcpy(tmp, p, (size_t)len + 1);
+			tmp[len + 1] = 0;
+			if (MeasureText(tmp, size) > (int)(w - 40.0f * s)) break;
+			len++;
+			if (p[len] == ' ' || p[len] == 0 || p[len] == '\n') fit = len;
+		}
+		if (fit == 0) fit = len > 0 ? len : 1;
+		memcpy(lines[n], p, (size_t)fit);
+		lines[n][fit] = 0;
+		n++;
+		p += fit;
+		while (*p == ' ' || *p == '\n') p++;
+	}
+	float h = (70.0f + 30.0f) * s + (float)(n * line_h);
+	DrawRectangle((int)x, (int)y, (int)w, (int)h, (Color){14, 16, 20, 230});
+	DrawRectangleLines((int)x, (int)y, (int)w, (int)h, c->note_faction == 0 ? (Color){70, 140, 235, 255} : (Color){225, 80, 60, 255});
+	DrawText(head, (int)(x + 20.0f * s), (int)(y + 16.0f * s), (int)(26.0f * s), RAYWHITE);
+	for (int k = 0; k < n; k++)
+		DrawText(lines[k], (int)(x + 20.0f * s), (int)(y + 56.0f * s) + k * line_h, size, (Color){225, 228, 232, 255});
+	if (c->paused && c->player) {
+		char hint[64];
+		snprintf(hint, sizeof hint, "%s to resume", keymap_key_name(c->keys.key[BIND_PAUSE]));
+		DrawText(hint, (int)(x + 20.0f * s), (int)(y + h - 34.0f * s), (int)(18.0f * s), (Color){120, 126, 136, 255});
+	}
+}
+
+// --agent: something else plays this side through us (tools/agent, an MCP
+// server). One request a line on stdin, one JSON answer a line on stdout:
+//   state                                      our side as we simulate it, and the enemy as we see them
+//   cmd KIND FLAGS TYPE AMOUNT X Z TO ID...    a command (sim.h's numbers), for units by id
+//   note say|pause|resume TEXT                 a note: everyone sees it (wire.h)
+// Ids are slot + 65536 * generation. It's an interface, not a cheat: the
+// agent knows what this client knows and sends what a player can send.
+static const char *const order_names[ORDER_KIND_COUNT] = {"idle", "move", "fight", "build", "send", "transform", "warp"};
+
+static void agent_state(Client *c)
+{
+	if (!c->ready || !c->player) {
+		printf("{\"ok\":false,\"error\":\"not in a zone yet\"}\n");
+		return;
+	}
+	const Sim *sim = &c->remote.sim;
+	int me = c->opt.faction;
+	const Faction *f = &sim->factions[me];
+	const Units *u = &f->units;
+	const Economy *e = &f->economy[c->opt.slot.v];
+	printf("{\"ok\":true,\"tick\":%lld,\"seconds\":%.1f,\"paused\":%s,\"side\":\"%s\",\"map\":%.0f,",
+	       (long long)sim->tick.v, (double)sim->tick.v * SIM_DT, c->paused ? "true" : "false", me ? "red" : "blue", sim->terrain.size_x);
+	printf("\"note\":{\"from\":\"%s\",\"text\":\"", c->note_faction ? "red" : "blue");
+	for (const char *p = c->note; *p; p++) {
+		if (*p == '"' || *p == '\\') putchar('\\');
+		if (*p == '\n') fputs("\\n", stdout);
+		else putchar(*p);
+	}
+	printf("\"},\"base\":[%.1f,%.1f],\"enemy_base\":[%.1f,%.1f],", f->base.x, f->base.z, sim->factions[!me].base.x,
+	       sim->factions[!me].base.z);
+	printf("\"economy\":{\"metal\":%.1f,\"energy\":%.1f,\"metal_cap\":%.0f,\"energy_cap\":%.0f,\"metal_income\":%.2f,"
+	       "\"energy_income\":%.2f,\"metal_wanted\":%.2f,\"energy_wanted\":%.2f,\"rate\":%.2f},",
+	       e->metal, e->energy, e->metal_cap, e->energy_cap, e->metal_income, e->energy_income, e->metal_wanted,
+	       e->energy_wanted, e->rate);
+	printf("\"units\":[");
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		UnitHandle h = units_handle(u, i);
+		printf("%s{\"id\":%llu,\"type\":\"%s\",\"x\":%.1f,\"z\":%.1f,\"hp\":%.0f,\"order\":\"%s\",\"tx\":%.1f,\"tz\":%.1f,"
+		       "\"progress\":%.2f,\"later\":%d",
+		       i ? "," : "", (unsigned long long)h.index + 65536ull * h.generation, unit_defs[u->type[i]].name, u->px[i],
+		       u->pz[i], u->hp[i], order_names[u->order[i]], u->tx[i], u->tz[i], u->progress[i], u->later_len[i]);
+		if (u->order[i] == ORDER_BUILD) printf(",\"building\":\"%s\"", unit_defs[u->build_type[i]].name);
+		if (unit_is_factory(u->type[i])) {
+			printf(",\"queue\":[");
+			for (int q = 0; q < u->queue_len[i]; q++)
+				printf("%s\"%s\"", q ? "," : "", unit_defs[(u->queue[i] >> (8 * q)) & 0xff].name);
+			printf("],\"repeat\":%s", u->repeat[i] ? "true" : "false");
+		}
+		printf("}");
+	}
+	printf("],\"enemies\":[");
+	const Perception *seen = &f->seen;
+	bool first = true;
+	for (ptrdiff_t s = 0; s < seen->cap; s++) {
+		if (!seen->live[s]) continue;
+		V2 at = perception_at(seen, s, sim->tick);
+		printf("%s{\"id\":%llu,\"type\":\"%s\",\"x\":%.1f,\"z\":%.1f}", first ? "" : ",",
+		       (unsigned long long)s + 65536ull * seen->gen[s], unit_defs[seen->type[s]].name, at.x, at.z);
+		first = false;
+	}
+	printf("],\"spots\":[");
+	for (int32_t k = 0; k < sim->spots.count; k++)
+		printf("%s{\"x\":%.1f,\"z\":%.1f,\"free\":%s}", k ? "," : "", sim->spots.at[k].x, sim->spots.at[k].z,
+		       placement_ok(sim, f->id, UNIT_EXTRACTOR, sim->spots.at[k]) ? "true" : "false");
+	printf("]}\n");
+}
+
+static void agent_command(Client *c, char *args)
+{
+	int kind, flags, type, amount, to;
+	float x, z;
+	int used = 0;
+	if (sscanf(args, "%d %d %d %d %f %f %d%n", &kind, &flags, &type, &amount, &x, &z, &to, &used) != 7 || kind < 0
+	    || kind >= COMMAND_KIND_COUNT || type < 0 || type >= UNIT_TYPE_COUNT || to < 0 || to >= MAX_PLAYERS) {
+		printf("{\"ok\":false,\"error\":\"cmd KIND FLAGS TYPE AMOUNT X Z TO ID...\"}\n");
+		return;
+	}
+	UnitHandle *ids = PUSH(&c->frame, UnitHandle, 8192);
+	ptrdiff_t n = 0;
+	char *p = args + used;
+	for (;;) {
+		char *end;
+		unsigned long long id = strtoull(p, &end, 10);
+		if (end == p || n == 8192) break;
+		ids[n++] = (UnitHandle){(uint32_t)(id % 65536ull), (uint32_t)(id / 65536ull)};
+		p = end;
+	}
+	client_send_order(c, (CommandKind)kind, v2(x, z), (UnitType)type, amount, (uint8_t)flags, (PlayerSlot){(uint8_t)to},
+	                  0.0f, 0.0f, ids, n);
+	printf("{\"ok\":true,\"units\":%td}\n", n);
+}
+
+// False when stdin closes: the agent is done, and so are we.
+static bool client_agent(Client *c)
+{
+	ptrdiff_t got = platform_stdin_read(c->agent_in + c->agent_len, (ptrdiff_t)sizeof c->agent_in - 1 - c->agent_len);
+	if (got < 0) return false;
+	c->agent_len += got;
+	for (;;) {
+		char *nl = memchr(c->agent_in, '\n', (size_t)c->agent_len);
+		if (!nl) {
+			if (c->agent_len == (ptrdiff_t)sizeof c->agent_in - 1) c->agent_len = 0; // a line too long: dropped
+			return true;
+		}
+		*nl = 0;
+		char *line = c->agent_in;
+		if (!strcmp(line, "state")) agent_state(c);
+		else if (!strncmp(line, "cmd ", 4)) agent_command(c, line + 4);
+		else if (!strncmp(line, "note ", 5)) {
+			char *text = line + 5;
+			NoteAction a = !strncmp(text, "pause", 5) ? NOTE_PAUSE : !strncmp(text, "resume", 6) ? NOTE_RESUME : NOTE_SAY;
+			text += a == NOTE_PAUSE ? 5 : a == NOTE_RESUME ? 6 : !strncmp(text, "say", 3) ? 3 : 0;
+			while (*text == ' ') text++;
+			client_send_note(c, a, text);
+			printf("{\"ok\":true}\n");
+		} else {
+			printf("{\"ok\":false,\"error\":\"state | cmd ... | note say|pause|resume TEXT\"}\n");
+		}
+		fflush(stdout);
+		ptrdiff_t rest = c->agent_len - (nl + 1 - c->agent_in);
+		memmove(c->agent_in, nl + 1, (size_t)rest);
+		c->agent_len = rest;
 	}
 }
 
@@ -711,6 +912,7 @@ static int client_main(int argc, char **argv)
 		if (!strcmp(a, "--headless")) c.opt.headless = true, used = 1;
 		else if (!strcmp(a, "--auto-orders")) c.opt.auto_orders = true, used = 1;
 		else if (!strcmp(a, "--bot")) c.opt.bot = true, used = 1;
+		else if (!strcmp(a, "--agent")) c.opt.agent = c.opt.headless = true, used = 1;
 		else if (!strcmp(a, "--clipboard")) c.opt.clipboard = true, used = 1;
 		else if (!v) fatal("%s needs a value", a);
 		else if (!strcmp(a, "--connect")) {
@@ -864,6 +1066,7 @@ static int client_main(int argc, char **argv)
 		}
 		if (c.opt.auto_orders) client_auto_orders(&c);
 		if (c.opt.bot && !c.on_map) client_bot(&c);
+		if (c.opt.agent && !client_agent(&c)) break;
 		if (c.conn.open && now >= c.next_ping) {
 			c.next_ping = now + 1.0;
 			conn_send(&c.conn, MSG_PING, &now, sizeof now, now);
@@ -971,6 +1174,9 @@ static int client_main(int argc, char **argv)
 		if (c.in.pressed[c.keys.key[BIND_OVERLAY]]) c.overlay = !c.overlay;
 		if (c.overlay) client_overlay(&c, c.conn.open);
 		else client_banner(&c, c.conn.open);
+		if (c.player && !c.on_map && c.in.pressed[c.keys.key[BIND_PAUSE]])
+			client_send_note(&c, c.paused ? NOTE_RESUME : NOTE_PAUSE, "");
+		if (!c.on_map) client_note_draw(&c, now);
 		if (c.opt.input) {
 			if (c.opt.title && c.ready_at > 0.0) client_title_card(&c, now - c.ready_at);
 			EndTextureMode();
