@@ -1703,6 +1703,45 @@ static void test_map(void)
 	sim_destroy(&big);
 }
 
+// Cancel: an unfinished structure goes, what was spent on it comes back,
+// and its builder stops (rather than putting the site back up). An
+// unfinished factory takes a queue.
+static void test_cancel_build(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.bases = 1;
+	Sim sim;
+	sim_init(&sim, c);
+	Units *u = &sim.factions[0].units;
+	UnitHandle eng = NO_UNIT;
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->type[i] == UNIT_ENGINEER && unit_handle_eq(eng, NO_UNIT)) eng = units_handle(u, i);
+	ptrdiff_t e = units_find(u, eng);
+	V2 at = v2_add(v2(u->px[e], u->pz[e]), v2(0.0f, 14.0f));
+	Command build = {.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_FACTORY, .target = at, .count = 1, .units = &eng};
+	sim_step(&sim, &build, 1);
+	for (int t = 0; t < 300; t++) sim_step(&sim, nullptr, 0);
+	UnitHandle site = NO_UNIT;
+	for (ptrdiff_t i = 0; i < u->count; i++)
+		if (u->type[i] == UNIT_FACTORY && u->progress[i] < 1.0f) site = units_handle(u, i);
+	CHECK(units_find(u, site) >= 0);
+	Command produce = {.faction = {0}, .kind = COMMAND_PRODUCE, .unit_type = UNIT_TANK, .amount = 2, .count = 1, .units = &site};
+	sim_step(&sim, &produce, 1);
+	CHECK(u->queue_len[units_find(u, site)] == 2);
+	float progress = u->progress[units_find(u, site)], metal = sim.factions[0].economy[0].metal;
+	Command cancel = {.faction = {0}, .kind = COMMAND_CANCEL, .count = 1, .units = &site};
+	sim_step(&sim, &cancel, 1);
+	float back = sim.factions[0].economy[0].metal - metal;
+	CHECK(units_find(u, site) < 0 && u->order[units_find(u, eng)] == ORDER_IDLE);
+	CHECK(back > 0.8f * progress * unit_defs[UNIT_FACTORY].metal_cost && back < 1.2f * progress * unit_defs[UNIT_FACTORY].metal_cost + 5.0f);
+	for (int t = 0; t < 60; t++) sim_step(&sim, nullptr, 0);
+	int sites = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) sites += u->type[i] == UNIT_FACTORY && u->progress[i] < 1.0f;
+	CHECK(sites == 0); // and nobody put it back up
+	sim_destroy(&sim);
+}
+
 // Orders for later (shift): queued moves run in order; a plain order
 // replaces the list; a queued build list is built in turn; lists survive a
 // snapshot (same hash), and a dead unit's nodes go back to the pool.
@@ -2112,6 +2151,7 @@ static const Test tests[] = {
 	{"tier-off", test_tier_off},
 	{"bot-commander-start", test_bot_commander_start},
 	{"later-orders", test_later_orders},
+	{"cancel-build", test_cancel_build},
 	{"map", test_map},
 };
 

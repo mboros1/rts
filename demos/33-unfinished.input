@@ -1,0 +1,15 @@
+# Spike 22g demo, played: after the title card, the commander starts a
+# factory; a click selects the unfinished factory, five tanks are queued
+# on it, and Cancel (N) takes it down, its cost so far refunded.
+at 3.5 drag 450,200 1150,700            # the headquarters and the commander
+at 3.8 click 60,710                     # only the commander
+at 4.2 key V                            # the build tab
+at 4.4 key Q                            # a factory
+at 4.8 click 700,560
+at 11.0 click 690,545                   # the unfinished factory
+at 11.4 key W shift                     # five tanks, queued before it's done
+at 12.0 shot selected
+at 14.0 key N                           # cancel
+at 15.0 shot cancelled
+at 15.2 expect sent cancel == 1
+at 16.0 quit

@@ -561,6 +561,7 @@ typedef enum : uint8_t {
 	COMMAND_SET_REPEAT, // these factories repeat (flags COMMAND_REPEAT) or don't, queue as it is
 	COMMAND_WARP,       // these commanders warp home (flags COMMAND_FREE: at no cost, a logged-out player's)
 	COMMAND_GAME_OVER,  // the zone's say: the game is over, side `amount` won; nothing happens here after
+	COMMAND_CANCEL,     // these unfinished structures go, what was spent on them back to whoever built them
 	COMMAND_KIND_COUNT,
 } CommandKind;
 

@@ -27,7 +27,7 @@ static const char *const command_names[COMMAND_KIND_COUNT] = {
 	[COMMAND_BUILD] = "build", [COMMAND_PRODUCE] = "produce", [COMMAND_SEND] = "send", [COMMAND_ARRIVE] = "arrive",
 	[COMMAND_ENTRENCH] = "entrench", [COMMAND_MOBILIZE] = "mobilize", [COMMAND_GIVE] = "give",
 	[COMMAND_OUTPUT] = "output", [COMMAND_SHARE] = "share", [COMMAND_AI_SLOTS] = "ai-slots", [COMMAND_TAKE] = "take",
-	[COMMAND_SET_REPEAT] = "repeat", [COMMAND_WARP] = "warp",
+	[COMMAND_SET_REPEAT] = "repeat", [COMMAND_WARP] = "warp", [COMMAND_CANCEL] = "cancel",
 };
 
 static bool parse_xy(const char *t, Vector2 *out)

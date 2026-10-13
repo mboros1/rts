@@ -436,8 +436,8 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 		uint8_t *which = PUSH(frame, uint8_t, u->count > 0 ? u->count : 1);
 		for (ptrdiff_t i = 0; i < u->count; i++) {
 			int s = PLAYER0 + (u->owner ? u->owner[i].v : 0);
-			if (f == selected_faction && selected && selected[i]) s = SELECTED;
 			if ((u->progress && u->progress[i] < 1.0f) || (u->order && u->order[i] == ORDER_TRANSFORM)) s = BUILDING;
+			if (f == selected_faction && selected && selected[i]) s = SELECTED; // shows even while it's being built
 			which[i] = (uint8_t)s;
 			size[u->type[i]][s]++;
 		}
@@ -461,7 +461,14 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 				float w = u->work[i];
 				h *= unit_digs_in(u->type[i]) ? 1.0f - 0.6f * w : 0.4f + 0.6f * w;
 			}
-			float y = u->py[i]; // models sit on their base
+			// Models sit on their base; a structure on the highest ground under
+			// it, so a wide one (a transporter's pad) doesn't sink into a slope.
+			float y = u->py[i];
+			if (unit_is_structure(u->type[i]) && scene->terrain)
+				for (int k = 0; k < 8; k++) {
+					float a = (float)k * (PI / 4.0f);
+					y = fmaxf(y, terrain_height(scene->terrain, x + def->radius * cosf(a), z + def->radius * sinf(a)));
+				}
 			float yaw = unit_is_structure(u->type[i]) ? 0.0f : heading[slot];
 			if (t == UNIT_ENGINEER || t == UNIT_ADVANCED_ENGINEER || t == UNIT_SAPPER) h *= 0.7f;
 			bucket[t][s][count[t][s]++] = transform(x, y, z, d, h, d, yaw);

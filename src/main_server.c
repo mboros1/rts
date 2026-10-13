@@ -356,7 +356,7 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	bool kind_ok = kind <= COMMAND_ATTACK_MOVE || kind == COMMAND_BUILD || kind == COMMAND_PRODUCE || kind == COMMAND_SEND
 	            || kind == COMMAND_ENTRENCH || kind == COMMAND_MOBILIZE || kind == COMMAND_GIVE || kind == COMMAND_OUTPUT
 	            || kind == COMMAND_SHARE || kind == COMMAND_TAKE || kind == COMMAND_SET_REPEAT
-	            || kind == COMMAND_WARP;
+	            || kind == COMMAND_WARP || kind == COMMAND_CANCEL;
 	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && to.v < s->sim.config.players[c->faction] && unit_type < UNIT_TYPE_COUNT
 	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : ZONE_MAX)
 	       && (flags & ~(COMMAND_REPEAT | COMMAND_QUEUED)) == 0 && route_ok(route)

@@ -17,7 +17,7 @@ static const KeyBinding order_action[MENU_ORDER_COUNT] = {
 	[MENU_ORDER_MOVE] = BIND_MOVE, [MENU_ORDER_FIGHT] = BIND_FIGHT, [MENU_ORDER_STOP] = BIND_STOP,
 	[MENU_ORDER_ENTRENCH] = BIND_ENTRENCH, [MENU_ORDER_REPEAT] = BIND_REPEAT, [MENU_ORDER_CLEAR] = BIND_CLEAR_QUEUE,
 	[MENU_ORDER_SEND] = BIND_SEND, [MENU_ORDER_GIVE] = BIND_GIVE, [MENU_ORDER_TAKE] = BIND_TAKE,
-	[MENU_ORDER_WARP] = BIND_WARP_HOME,
+	[MENU_ORDER_WARP] = BIND_WARP_HOME, [MENU_ORDER_CANCEL] = BIND_CANCEL_BUILD,
 };
 
 static int key_of(const Controls *c, KeyBinding a) { return c->keys ? c->keys->key[a] : keymap_default().key[a]; }
@@ -117,15 +117,21 @@ static void select_units(Controls *c, const Sim *sim, const View *view, Rectangl
 	const Units *u = own_units(c, sim);
 	if (!add) c->selection_count = 0;
 	ptrdiff_t best = -1;
-	float best_d2 = 14.0f * 14.0f;
+	float best_score = 1.0f;
 	for (ptrdiff_t i = 0; i < u->count; i++) {
 		if (!player_eq(u->owner[i], c->player)) continue; // teammates' units aren't yours to order
 		Vector2 s = GetWorldToScreen((Vector3){u->px[i], u->py[i] + 0.5f, u->pz[i]}, view->camera);
 		if (click) {
+			// Within its size on screen (a factory is big), or 14 px for a small
+			// one; the nearest, relative to that, wins.
+			Vector2 edge = GetWorldToScreen((Vector3){u->px[i] + unit_defs[u->type[i]].radius, u->py[i] + 0.5f, u->pz[i]},
+			                                view->camera);
+			float r = fmaxf(14.0f, hypotf(edge.x - s.x, edge.y - s.y));
 			float dx = s.x - box.x, dy = s.y - box.y;
-			if (dx * dx + dy * dy < best_d2) {
+			float score = (dx * dx + dy * dy) / (r * r);
+			if (score < best_score) {
 				best = i;
-				best_d2 = dx * dx + dy * dy;
+				best_score = score;
 			}
 		} else if (CheckCollisionPointRec(s, box)) {
 			c->selection[c->selection_count++] = units_handle(u, i);
@@ -296,6 +302,7 @@ static void press_order(Controls *c, const Sim *sim, const SelectionSummary *s, 
 		if (*n < cap) out[(*n)++] = (Order){.kind = COMMAND_TAKE, .to = c->player};
 		break;
 	case MENU_ORDER_WARP: order(c, frame, out, cap, n, (Order){.kind = COMMAND_WARP}); break;
+	case MENU_ORDER_CANCEL: order(c, frame, out, cap, n, (Order){.kind = COMMAND_CANCEL}); break;
 	case MENU_ORDER_NONE:
 	case MENU_ORDER_COUNT: break;
 	}
@@ -730,6 +737,12 @@ static void draw_info(const Controls *c, const Sim *sim, const Layout *L, const 
 	const char *who = c->team[u->owner[d].v] && c->team[u->owner[d].v][0] ? c->team[u->owner[d].v] : "you";
 	// What it's doing: a factory with a queue is producing, whatever its order says.
 	const char *doing = unit_is_factory(u->type[d]) && u->queue_len[d] ? "producing" : order_name(u->order[d]);
+	if (u->progress[d] < 1.0f) {
+		UnitHandle h = units_handle(u, d);
+		int on = 0;
+		for (ptrdiff_t i = 0; i < u->count; i++) on += u->order[i] == ORDER_BUILD && unit_handle_eq(u->building[i], h);
+		doing = TextFormat("being built: %d builder%s on it", on, on == 1 ? "" : "s");
+	}
 	text(TextFormat("%s   %s", doing, u->owner[d].v == c->player.v ? "" : who), x, y + 26.0f * sc,
 	     14.0f * sc, TEXT_DIM);
 	Rectangle hp = {x, y + 46.0f * sc, L->info.width - 20.0f * sc, 8.0f * sc};

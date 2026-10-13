@@ -11,12 +11,13 @@ SelectionSummary menu_summarize(const Units *u, const UnitHandle *selection, ptr
 		s.total++;
 		bool done = u->progress[d] >= 1.0f;
 		s.builders = s.builders || unit_is_builder(t);
-		s.factories = s.factories || (unit_is_factory(t) && done);
+		s.factories = s.factories || unit_is_factory(t); // unfinished too: it queues, and starts when done
+		s.unfinished = s.unfinished || (unit_is_structure(t) && !done);
 		s.mobile = s.mobile || !unit_is_structure(t);
 		s.digs_in = s.digs_in || unit_digs_in(t);
 		s.dug_in = s.dug_in || u->seeded[d];
 		s.warp_ready = s.warp_ready || (t == UNIT_COMMANDER && u->recharge[d] == 0 && u->order[d] != ORDER_WARP);
-		if (unit_is_factory(t) && done) {
+		if (unit_is_factory(t)) {
 			s.repeating = s.repeating || u->repeat[d];
 			for (int q = 0; q < u->queue_len[d]; q++) s.queued[u->queue[d] >> (8 * q) & 0xff]++;
 		}
@@ -91,6 +92,7 @@ const char *menu_order_label(MenuOrder o, bool active)
 	case MENU_ORDER_GIVE: return "Give";
 	case MENU_ORDER_TAKE: return "Take";
 	case MENU_ORDER_WARP: return "Warp home";
+	case MENU_ORDER_CANCEL: return "Cancel";
 	case MENU_ORDER_NONE:
 	case MENU_ORDER_COUNT: break;
 	}
@@ -118,6 +120,7 @@ OrdersMenu menu_orders(const SelectionSummary *s, const MenuContext *ctx)
 		{11, MENU_ORDER_GIVE, ctx->team && (any || ctx->economy), true, false, false},
 		{12, MENU_ORDER_TAKE, ctx->team, ctx->takeable, false, false},
 		{9, MENU_ORDER_WARP, s->count[UNIT_COMMANDER] > 0, s->warp_ready, false, false},
+		{4, MENU_ORDER_CANCEL, s->unfinished, true, false, false},
 	};
 	for (int k = 0; k < (int)countof(items); k++)
 		if (items[k].shown)

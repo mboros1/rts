@@ -27,6 +27,7 @@ typedef enum : uint8_t {
 	BIND_GIVE,
 	BIND_TAKE,
 	BIND_WARP_HOME,
+	BIND_CANCEL_BUILD,    // unfinished structures selected: they go, refunded
 	// The build grid: items, row by row from the top left, then tabs.
 	BIND_BUILD_1, BIND_BUILD_2, BIND_BUILD_3, BIND_BUILD_4,
 	BIND_BUILD_5, BIND_BUILD_6, BIND_BUILD_7, BIND_BUILD_8,

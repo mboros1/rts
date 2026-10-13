@@ -644,13 +644,38 @@ static void queue_pop(Units *u, ptrdiff_t d)
 }
 
 // Factories queue units; anything else ignores a produce command.
+// Cancel: unfinished structures go, and what was spent on them so far
+// (their progress, at the zone's price) goes back to their owner, as much as
+// there's room for. Builders on them stop (they'd put the site back up).
+static void apply_cancel(Faction *f, const Sim *sim, const Command *c)
+{
+	Units *u = &f->units;
+	const ZoneContext *zc = &sim->config.context;
+	for (ptrdiff_t k = 0; k < c->count; k++) {
+		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
+		if (d < 0 || !unit_is_structure(u->type[d]) || u->progress[d] >= 1.0f) continue;
+		const UnitDef *def = &unit_defs[u->type[d]];
+		Economy *e = &f->economy[u->owner[d].v];
+		e->metal = f_min(e->metal_cap, e->metal + def->metal_cost * zc->cost * u->progress[d]);
+		e->energy = f_min(e->energy_cap, e->energy + def->energy_cost * zc->cost * u->progress[d]);
+		UnitHandle h = units_handle(u, d);
+		V2 at = v2(u->px[d], u->pz[d]);
+		for (ptrdiff_t i = 0; i < u->count; i++)
+			if (u->order[i] == ORDER_BUILD && (unit_handle_eq(u->building[i], h) || v2_len2(v2_sub(v2(u->tx[i], u->tz[i]), at)) < 9.0f)) {
+				u->order[i] = ORDER_IDLE;
+				u->building[i] = NO_UNIT;
+			}
+		units_kill(u, d);
+	}
+}
+
 static void apply_produce(Faction *f, const Command *c)
 {
 	if (c->unit_type >= UNIT_EXTRACTOR || c->amount < 0 || c->amount > FACTORY_QUEUE) return;
 	Units *u = &f->units;
 	for (ptrdiff_t k = 0; k < c->count; k++) {
 		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
-		if (d < 0 || !unit_is_factory(u->type[d]) || u->progress[d] < 1.0f) continue;
+		if (d < 0 || !unit_is_factory(u->type[d])) continue; // unfinished too: it starts when it's done
 		if (c->amount > 0 && !factory_makes(u->type[d], c->unit_type)) continue; // not this factory's tier
 		if (c->amount == 0) {
 			u->queue[d] = 0;
@@ -995,6 +1020,10 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 	}
 	if (c->kind == COMMAND_SHARE) {
 		apply_share(f, sim, c);
+		return;
+	}
+	if (c->kind == COMMAND_CANCEL) {
+		apply_cancel(f, sim, c);
 		return;
 	}
 	if (c->kind == COMMAND_WARP) {
