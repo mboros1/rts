@@ -7,21 +7,26 @@ static const char *UNIT_VS =
 	"#version 330\n"
 	"in vec3 vertexPosition;\n"
 	"in vec3 vertexNormal;\n"
+	"in vec4 vertexColor;\n"
 	"in mat4 instanceTransform;\n"
 	"uniform mat4 mvp;\n"
 	"out float shade;\n"
+	"out vec4 tone;\n"
 	"void main() {\n"
 	"    vec3 n = normalize(mat3(instanceTransform) * vertexNormal);\n"
 	"    shade = 0.45 + 0.55 * max(dot(n, normalize(vec3(0.4, 1.0, 0.3))), 0.0);\n"
+	"    tone = vertexColor;\n"
 	"    gl_Position = mvp * instanceTransform * vec4(vertexPosition, 1.0);\n"
 	"}\n";
 
 static const char *UNIT_FS =
 	"#version 330\n"
 	"in float shade;\n"
+	"in vec4 tone;\n"
 	"uniform vec4 colDiffuse;\n"
 	"out vec4 finalColor;\n"
-	"void main() { finalColor = vec4(colDiffuse.rgb * shade, colDiffuse.a); }\n";
+	"// tone.a: how much of the side's colour (1: the body; 0: metal, lights).\n"
+	"void main() { finalColor = vec4(mix(tone.rgb, colDiffuse.rgb * tone.rgb, tone.a) * shade, colDiffuse.a); }\n";
 
 static const Color FACTION_COLOR[FACTION_COUNT] = {{70, 140, 235, 255}, {225, 80, 60, 255}};
 
@@ -122,6 +127,208 @@ static void build_terrain(Renderer *r, const Terrain *t, Arena *program)
 	r->chunk_colors = PUSH(program, unsigned char, (TERRAIN_CHUNK + 1) * (TERRAIN_CHUNK + 1) * 4);
 }
 
+// Models: each type a few primitives merged into one mesh, so a type is
+// still one instanced draw. A model fills x, z in [-0.5, 0.5] and y in
+// [0, 1] (its base at y = 0, its front toward +z), and is scaled per
+// instance from the UnitDef. Each part's vertex colour is a tone: alpha 255
+// takes the side's colour times its grey (the body, darker trim), alpha 0
+// keeps its own colour (metal, tracks, lights): cheap depth.
+typedef enum { PART_BOX, PART_CYLINDER, PART_CONE, PART_SPHERE } Shape;
+typedef struct {
+	Shape shape;
+	int slices;          // round shapes' sides (0: 12)
+	float x, y, z;       // a box's or sphere's centre; a round shape's base centre
+	float sx, sy, sz;    // a box's size; a round shape's diameter (sx = sz) and length (sy)
+	float tilt;          // degrees from upright toward +z (90: lying along +z, a barrel)
+	Color tone;
+} Part;
+
+static const Color TONE_BODY = {255, 255, 255, 255};
+static const Color TONE_TRIM = {150, 150, 150, 255};
+static const Color TONE_METAL = {72, 74, 80, 0};
+static const Color TONE_DARK = {34, 34, 38, 0};
+static const Color TONE_PALE = {200, 200, 190, 0};
+static const Color TONE_GLOW = {255, 205, 100, 0};
+
+#define MODEL(...) ((const Part[]){__VA_ARGS__}), (int)(sizeof((const Part[]){__VA_ARGS__}) / sizeof(Part))
+#define TRACKS(w, h, l) {PART_BOX, 0, -0.5f + 0.5f * (w), 0.5f * (h), 0, w, h, l, 0, TONE_METAL}, {PART_BOX, 0, 0.5f - 0.5f * (w), 0.5f * (h), 0, w, h, l, 0, TONE_METAL}
+
+static Mesh model_mesh(const Part *parts, int n)
+{
+	// Unindexed triangles: raylib's round shapes come without indices.
+	Mesh gen[16];
+	ASSERT(n <= (int)countof(gen));
+	int total = 0;
+	for (int k = 0; k < n; k++) {
+		const Part *p = &parts[k];
+		int slices = p->slices ? p->slices : 12;
+		gen[k] = p->shape == PART_BOX        ? GenMeshCube(1.0f, 1.0f, 1.0f)
+		       : p->shape == PART_CYLINDER ? GenMeshCylinder(0.5f, 1.0f, slices)
+		       : p->shape == PART_CONE     ? GenMeshCone(0.5f, 1.0f, slices)
+		                              : GenMeshSphere(0.5f, 8, slices);
+		total += gen[k].indices ? gen[k].triangleCount * 3 : gen[k].vertexCount;
+	}
+	Mesh m = {0};
+	m.vertexCount = total;
+	m.triangleCount = total / 3;
+	m.vertices = MemAlloc((unsigned)(total * 3) * sizeof(float));
+	m.normals = MemAlloc((unsigned)(total * 3) * sizeof(float));
+	m.colors = MemAlloc((unsigned)(total * 4));
+	int v = 0;
+	for (int k = 0; k < n; k++) {
+		const Part *p = &parts[k];
+		const Mesh *g = &gen[k];
+		float a = p->tilt * (PI / 180.0f), ca = cosf(a), sa = sinf(a);
+		int count = g->indices ? g->triangleCount * 3 : g->vertexCount;
+		for (int q = 0; q < count; q++, v++) {
+			int s = g->indices ? g->indices[q] : q;
+			float x = g->vertices[s * 3] * p->sx, y = g->vertices[s * 3 + 1] * p->sy, z = g->vertices[s * 3 + 2] * p->sz;
+			// Normals under a non-uniform scale: divide by it, then renormalise.
+			float nx = g->normals[s * 3] / p->sx, ny = g->normals[s * 3 + 1] / p->sy, nz = g->normals[s * 3 + 2] / p->sz;
+			float nl = sqrtf(nx * nx + ny * ny + nz * nz);
+			nx /= nl, ny /= nl, nz /= nl;
+			// Tilt about x, from +y toward +z.
+			float ty = y * ca - z * sa, tz = y * sa + z * ca;
+			float tny = ny * ca - nz * sa, tnz = ny * sa + nz * ca;
+			m.vertices[v * 3] = p->x + x;
+			m.vertices[v * 3 + 1] = p->y + ty;
+			m.vertices[v * 3 + 2] = p->z + tz;
+			m.normals[v * 3] = nx;
+			m.normals[v * 3 + 1] = tny;
+			m.normals[v * 3 + 2] = tnz;
+			m.colors[v * 4] = p->tone.r;
+			m.colors[v * 4 + 1] = p->tone.g;
+			m.colors[v * 4 + 2] = p->tone.b;
+			m.colors[v * 4 + 3] = p->tone.a;
+		}
+		UnloadMesh(gen[k]);
+	}
+	UploadMesh(&m, false);
+	return m;
+}
+
+static void build_models(Renderer *r)
+{
+	Mesh *mesh = r->unit_mesh;
+	mesh[UNIT_RAIDER] = model_mesh(MODEL(TRACKS(0.18f, 0.3f, 0.95f),
+		{PART_BOX, 0, 0, 0.3f, -0.05f, 0.64f, 0.38f, 0.85f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.22f, 0.42f, 0.5f, 0.22f, 0.16f, 0, TONE_TRIM},
+		{PART_CYLINDER, 8, 0, 0.55f, 0.0f, 0.12f, 0.5f, 0.12f, 90, TONE_METAL}));
+	mesh[UNIT_TANK] = model_mesh(MODEL(TRACKS(0.24f, 0.36f, 1.0f),
+		{PART_BOX, 0, 0, 0.38f, 0, 0.56f, 0.36f, 0.85f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.7f, -0.08f, 0.44f, 0.3f, 0.44f, 0, TONE_TRIM},
+		{PART_CYLINDER, 8, 0, 0.72f, 0.12f, 0.13f, 0.6f, 0.13f, 90, TONE_METAL}));
+	mesh[UNIT_ARTILLERY] = model_mesh(MODEL(TRACKS(0.2f, 0.3f, 0.9f),
+		{PART_BOX, 0, 0, 0.32f, 0, 0.62f, 0.3f, 0.8f, 0, TONE_BODY},
+		{PART_CYLINDER, 10, 0, 0.45f, -0.05f, 0.5f, 0.15f, 0.5f, 0, TONE_METAL},
+		{PART_CYLINDER, 8, 0, 0.55f, -0.1f, 0.16f, 0.85f, 0.16f, 50, TONE_TRIM}));
+	mesh[UNIT_SIEGE] = model_mesh(MODEL(TRACKS(0.22f, 0.32f, 1.0f),
+		{PART_BOX, 0, 0, 0.34f, 0, 0.58f, 0.34f, 0.9f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.6f, -0.32f, 0.5f, 0.24f, 0.26f, 0, TONE_METAL},
+		{PART_CYLINDER, 8, 0, 0.55f, -0.15f, 0.2f, 1.15f, 0.2f, 62, TONE_TRIM},
+		{PART_CYLINDER, 8, 0, 0.55f, -0.15f, 0.32f, 0.12f, 0.32f, 62, TONE_DARK}));
+	mesh[UNIT_HEAVY_TANK] = model_mesh(MODEL(TRACKS(0.26f, 0.4f, 1.0f),
+		{PART_BOX, 0, 0, 0.38f, 0, 0.5f, 0.4f, 0.9f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.72f, -0.1f, 0.56f, 0.32f, 0.56f, 0, TONE_TRIM},
+		{PART_CYLINDER, 8, -0.1f, 0.74f, 0.15f, 0.11f, 0.6f, 0.11f, 90, TONE_METAL},
+		{PART_CYLINDER, 8, 0.1f, 0.74f, 0.15f, 0.11f, 0.6f, 0.11f, 90, TONE_METAL}));
+	mesh[UNIT_HOWITZER] = model_mesh(MODEL(TRACKS(0.22f, 0.32f, 1.0f),
+		{PART_BOX, 0, 0, 0.34f, 0, 0.56f, 0.34f, 0.9f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.62f, -0.05f, 0.44f, 0.24f, 0.5f, 0, TONE_TRIM},
+		{PART_CYLINDER, 8, 0, 0.62f, 0.0f, 0.2f, 0.85f, 0.2f, 55, TONE_METAL}));
+	mesh[UNIT_ENGINEER] = model_mesh(MODEL(TRACKS(0.16f, 0.25f, 0.9f),
+		{PART_BOX, 0, 0, 0.32f, -0.05f, 0.66f, 0.4f, 0.75f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.62f, 0.22f, 0.42f, 0.22f, 0.3f, 0, TONE_TRIM},
+		{PART_CYLINDER, 6, 0.15f, 0.52f, -0.25f, 0.1f, 0.75f, 0.1f, 60, TONE_PALE},
+		{PART_BOX, 0, -0.18f, 0.6f, -0.2f, 0.12f, 0.12f, 0.12f, 0, TONE_GLOW}));
+	mesh[UNIT_ADVANCED_ENGINEER] = model_mesh(MODEL(TRACKS(0.18f, 0.28f, 0.95f),
+		{PART_BOX, 0, 0, 0.34f, -0.05f, 0.64f, 0.42f, 0.8f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.66f, 0.22f, 0.42f, 0.24f, 0.3f, 0, TONE_TRIM},
+		{PART_CYLINDER, 6, 0.18f, 0.55f, -0.25f, 0.1f, 0.75f, 0.1f, 60, TONE_PALE},
+		{PART_CYLINDER, 6, -0.18f, 0.55f, -0.25f, 0.1f, 0.75f, 0.1f, 60, TONE_PALE},
+		{PART_BOX, 0, 0, 0.78f, 0.22f, 0.14f, 0.1f, 0.14f, 0, TONE_GLOW}));
+	mesh[UNIT_SAPPER] = model_mesh(MODEL(TRACKS(0.18f, 0.28f, 0.85f),
+		{PART_BOX, 0, 0, 0.34f, -0.08f, 0.62f, 0.42f, 0.7f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.62f, -0.15f, 0.36f, 0.18f, 0.34f, 0, TONE_TRIM},
+		{PART_BOX, 0, 0, 0.22f, 0.44f, 0.95f, 0.36f, 0.1f, 0, TONE_METAL}));
+	mesh[UNIT_SCOUT] = model_mesh(MODEL(
+		{PART_SPHERE, 10, 0, 0.45f, 0, 0.8f, 0.7f, 0.8f, 0, TONE_BODY},
+		{PART_CYLINDER, 10, 0, 0.0f, 0, 0.5f, 0.16f, 0.5f, 0, TONE_METAL},
+		{PART_CYLINDER, 4, 0.12f, 0.7f, -0.1f, 0.05f, 0.4f, 0.05f, 0, TONE_PALE},
+		{PART_SPHERE, 6, 0, 0.5f, 0.36f, 0.22f, 0.22f, 0.12f, 0, TONE_GLOW}));
+	mesh[UNIT_COMMANDER] = model_mesh(MODEL(
+		{PART_CYLINDER, 5, 0, 0, 0, 0.95f, 0.7f, 0.95f, 0, TONE_BODY},
+		{PART_CYLINDER, 5, 0, 0.7f, 0, 0.6f, 0.16f, 0.6f, 0, TONE_TRIM},
+		{PART_CYLINDER, 10, 0, 0, 0, 1.0f, 0.1f, 1.0f, 0, TONE_METAL},
+		{PART_SPHERE, 8, 0, 0.92f, 0, 0.22f, 0.22f, 0.22f, 0, TONE_GLOW}));
+	mesh[UNIT_METAL_TRUCK] = model_mesh(MODEL(TRACKS(0.12f, 0.2f, 0.95f),
+		{PART_BOX, 0, 0, 0.32f, 0.33f, 0.72f, 0.5f, 0.3f, 0, TONE_TRIM},
+		{PART_BOX, 0, 0, 0.25f, -0.15f, 0.78f, 0.3f, 0.66f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.5f, -0.15f, 0.6f, 0.22f, 0.5f, 0, TONE_PALE}));
+	mesh[UNIT_ENERGY_TRUCK] = model_mesh(MODEL(TRACKS(0.12f, 0.2f, 0.95f),
+		{PART_BOX, 0, 0, 0.32f, 0.33f, 0.72f, 0.5f, 0.3f, 0, TONE_TRIM},
+		{PART_CYLINDER, 12, 0, 0.45f, -0.48f, 0.7f, 0.66f, 0.7f, 90, TONE_BODY},
+		{PART_CYLINDER, 12, 0, 0.45f, -0.2f, 0.74f, 0.06f, 0.74f, 90, TONE_GLOW}));
+	mesh[UNIT_EXTRACTOR] = model_mesh(MODEL(
+		{PART_CYLINDER, 10, 0, 0, 0, 1.0f, 0.25f, 1.0f, 0, TONE_METAL},
+		{PART_CYLINDER, 10, 0, 0.25f, 0, 0.7f, 0.55f, 0.7f, 0, TONE_BODY},
+		{PART_CYLINDER, 10, 0, 0.8f, 0, 0.84f, 0.12f, 0.84f, 0, TONE_TRIM},
+		{PART_CYLINDER, 6, 0, 0.92f, 0, 0.2f, 0.08f, 0.2f, 0, TONE_GLOW}));
+	mesh[UNIT_ADVANCED_EXTRACTOR] = model_mesh(MODEL(
+		{PART_CYLINDER, 5, 0, 0, 0, 1.0f, 0.2f, 1.0f, 0, TONE_METAL},
+		{PART_CYLINDER, 5, 0, 0.2f, 0, 0.75f, 0.6f, 0.75f, 0, TONE_BODY},
+		{PART_CYLINDER, 5, 0, 0.8f, 0, 0.9f, 0.1f, 0.9f, 0, TONE_TRIM},
+		{PART_CYLINDER, 8, 0, 0.9f, 0, 0.35f, 0.1f, 0.35f, 0, TONE_GLOW}));
+	mesh[UNIT_GENERATOR] = model_mesh(MODEL(
+		{PART_BOX, 0, 0, 0.07f, 0, 0.9f, 0.14f, 0.9f, 0, TONE_METAL},
+		{PART_CYLINDER, 6, 0, 0.14f, 0, 0.3f, 0.68f, 0.3f, 0, TONE_BODY},
+		{PART_CYLINDER, 12, 0, 0.8f, 0, 0.9f, 0.06f, 0.9f, 0, TONE_TRIM},
+		{PART_SPHERE, 8, 0, 0.92f, 0, 0.2f, 0.16f, 0.2f, 0, TONE_GLOW}));
+	mesh[UNIT_FACTORY] = model_mesh(MODEL(
+		{PART_BOX, 0, 0, 0.34f, -0.04f, 1.0f, 0.68f, 0.92f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.71f, -0.04f, 1.02f, 0.06f, 0.94f, 0, TONE_TRIM},
+		{PART_BOX, 0, 0, 0.22f, 0.45f, 0.5f, 0.44f, 0.06f, 0, TONE_DARK},
+		{PART_BOX, 0, 0.33f, 0.48f, 0.45f, 0.08f, 0.08f, 0.04f, 0, TONE_GLOW},
+		{PART_CYLINDER, 8, 0.3f, 0.7f, -0.25f, 0.14f, 0.3f, 0.14f, 0, TONE_METAL}));
+	mesh[UNIT_ADVANCED_FACTORY] = model_mesh(MODEL(
+		{PART_BOX, 0, 0, 0.36f, -0.04f, 1.0f, 0.72f, 0.92f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.75f, -0.04f, 1.02f, 0.06f, 0.94f, 0, TONE_TRIM},
+		{PART_BOX, 0, 0, 0.25f, 0.45f, 0.6f, 0.5f, 0.06f, 0, TONE_DARK},
+		{PART_BOX, 0, 0.36f, 0.55f, 0.45f, 0.08f, 0.08f, 0.04f, 0, TONE_GLOW},
+		{PART_BOX, 0, -0.36f, 0.55f, 0.45f, 0.08f, 0.08f, 0.04f, 0, TONE_GLOW},
+		{PART_CYLINDER, 8, 0.3f, 0.75f, -0.25f, 0.14f, 0.25f, 0.14f, 0, TONE_METAL},
+		{PART_CYLINDER, 8, -0.3f, 0.75f, -0.25f, 0.14f, 0.25f, 0.14f, 0, TONE_METAL}));
+	mesh[UNIT_TRANSPORTER] = model_mesh(MODEL(
+		{PART_CYLINDER, 20, 0, 0, 0, 1.0f, 0.06f, 1.0f, 0, TONE_METAL},
+		{PART_CYLINDER, 20, 0, 0.06f, 0, 0.76f, 0.04f, 0.76f, 0, TONE_BODY},
+		{PART_CYLINDER, 20, 0, 0.1f, 0, 0.5f, 0.03f, 0.5f, 0, TONE_GLOW},
+		{PART_BOX, 0, 0.36f, 0.25f, 0.36f, 0.08f, 0.5f, 0.08f, 0, TONE_TRIM},
+		{PART_BOX, 0, -0.36f, 0.25f, 0.36f, 0.08f, 0.5f, 0.08f, 0, TONE_TRIM},
+		{PART_BOX, 0, 0.36f, 0.25f, -0.36f, 0.08f, 0.5f, 0.08f, 0, TONE_TRIM},
+		{PART_BOX, 0, -0.36f, 0.25f, -0.36f, 0.08f, 0.5f, 0.08f, 0, TONE_TRIM}));
+	mesh[UNIT_TURRET] = model_mesh(MODEL(
+		{PART_CYLINDER, 8, 0, 0, 0, 1.0f, 0.3f, 1.0f, 0, TONE_METAL},
+		{PART_CYLINDER, 8, 0, 0.3f, 0, 0.7f, 0.35f, 0.7f, 0, TONE_BODY},
+		{PART_CYLINDER, 8, 0, 0.5f, 0.1f, 0.16f, 0.55f, 0.16f, 90, TONE_TRIM}));
+	mesh[UNIT_METAL_VAULT] = model_mesh(MODEL(
+		{PART_BOX, 0, 0, 0.42f, 0, 0.9f, 0.84f, 0.9f, 0, TONE_BODY},
+		{PART_BOX, 0, 0, 0.1f, 0, 0.96f, 0.12f, 0.96f, 0, TONE_METAL},
+		{PART_BOX, 0, 0, 0.88f, 0, 0.96f, 0.12f, 0.96f, 0, TONE_METAL},
+		{PART_BOX, 0, 0, 0.45f, 0.46f, 0.4f, 0.5f, 0.04f, 0, TONE_PALE}));
+	mesh[UNIT_ENERGY_VAULT] = model_mesh(MODEL(
+		{PART_CYLINDER, 12, 0, 0, 0, 0.9f, 1.0f, 0.9f, 0, TONE_BODY},
+		{PART_CYLINDER, 12, 0, 0, 0, 0.96f, 0.12f, 0.96f, 0, TONE_METAL},
+		{PART_CYLINDER, 12, 0, 0.88f, 0, 0.96f, 0.12f, 0.96f, 0, TONE_METAL},
+		{PART_CYLINDER, 12, 0, 0.46f, 0, 0.94f, 0.08f, 0.94f, 0, TONE_GLOW}));
+	mesh[UNIT_HEADQUARTERS] = model_mesh(MODEL(
+		{PART_CYLINDER, 6, 0, 0, 0, 1.0f, 0.55f, 1.0f, 0, TONE_BODY},
+		{PART_CYLINDER, 6, 0, 0.55f, 0, 0.66f, 0.25f, 0.66f, 0, TONE_TRIM},
+		{PART_CYLINDER, 6, 0, 0, 0, 1.06f, 0.08f, 1.06f, 0, TONE_METAL},
+		{PART_CYLINDER, 4, 0, 0.8f, 0, 0.08f, 0.2f, 0.08f, 0, TONE_METAL},
+		{PART_SPHERE, 8, 0, 0.92f, 0, 0.16f, 0.16f, 0.16f, 0, TONE_GLOW}));
+	for (int k = 0; k < UNIT_TYPE_COUNT; k++) ASSERT(mesh[k].vertexCount > 0); // a model for every type
+}
+
 Camera3D render_camera(const Terrain *t, V2 focus, float distance)
 {
 	Vector3 target = {focus.x, terrain_height(t, focus.x, focus.z), focus.z};
@@ -145,31 +352,7 @@ void renderer_init(Renderer *r, const Terrain *terrain, ptrdiff_t max_units, Are
 	r->material = LoadMaterialDefault();
 	r->material.shader = r->shader;
 
-	// Unit meshes are unit-sized and scaled per instance from the UnitDef.
-	r->unit_mesh[UNIT_RAIDER] = GenMeshCube(1.0f, 1.0f, 1.4f);
-	r->unit_mesh[UNIT_TANK] = GenMeshCube(1.0f, 1.0f, 1.0f);
-	r->unit_mesh[UNIT_ARTILLERY] = GenMeshCone(0.5f, 1.0f, 8);
-	r->unit_mesh[UNIT_SIEGE] = GenMeshCone(0.5f, 1.0f, 4);
-	r->unit_mesh[UNIT_HEAVY_TANK] = GenMeshCube(1.0f, 1.0f, 1.3f);
-	r->unit_mesh[UNIT_HOWITZER] = GenMeshCone(0.5f, 1.0f, 5);
-	r->unit_mesh[UNIT_ADVANCED_ENGINEER] = GenMeshCube(1.0f, 1.0f, 1.2f);
-	r->unit_mesh[UNIT_ENGINEER] = GenMeshCube(1.0f, 1.0f, 1.0f);
-	r->unit_mesh[UNIT_SAPPER] = GenMeshCube(1.0f, 1.0f, 1.0f);
-	r->unit_mesh[UNIT_SCOUT] = GenMeshSphere(0.5f, 6, 8);
-	r->unit_mesh[UNIT_COMMANDER] = GenMeshCylinder(0.5f, 1.0f, 5);   // a pentagonal tower
-	r->unit_mesh[UNIT_METAL_TRUCK] = GenMeshCube(1.0f, 1.0f, 1.6f);
-	r->unit_mesh[UNIT_ENERGY_TRUCK] = GenMeshCylinder(0.5f, 1.0f, 8); // a tanker
-	r->unit_mesh[UNIT_EXTRACTOR] = GenMeshCylinder(0.5f, 1.0f, 10);
-	r->unit_mesh[UNIT_ADVANCED_EXTRACTOR] = GenMeshCylinder(0.5f, 1.0f, 5);
-	r->unit_mesh[UNIT_GENERATOR] = GenMeshCylinder(0.3f, 1.0f, 6);
-	r->unit_mesh[UNIT_FACTORY] = GenMeshCube(1.0f, 1.0f, 1.0f);
-	r->unit_mesh[UNIT_ADVANCED_FACTORY] = GenMeshCube(1.0f, 1.0f, 1.4f);
-	r->unit_mesh[UNIT_TRANSPORTER] = GenMeshCylinder(0.5f, 1.0f, 20);
-	r->unit_mesh[UNIT_TURRET] = GenMeshCone(0.5f, 1.0f, 6);
-	r->unit_mesh[UNIT_METAL_VAULT] = GenMeshCube(1.0f, 1.0f, 1.0f);
-	r->unit_mesh[UNIT_ENERGY_VAULT] = GenMeshCylinder(0.5f, 1.0f, 12);
-	r->unit_mesh[UNIT_HEADQUARTERS] = GenMeshCylinder(0.5f, 1.0f, 6);
-	for (int k = 0; k < UNIT_TYPE_COUNT; k++) ASSERT(r->unit_mesh[k].vertexCount > 0); // a mesh for every type
+	build_models(r);
 	r->shell_mesh = GenMeshSphere(1.0f, 6, 8);
 	build_terrain(r, terrain, program);
 	// Far enough to see a whole zone from above it (a standard zone keeps
@@ -278,11 +461,7 @@ void renderer_draw_scene(Renderer *r, const Scene *scene, float alpha, Arena *fr
 				float w = u->work[i];
 				h *= unit_digs_in(u->type[i]) ? 1.0f - 0.6f * w : 0.4f + 0.6f * w;
 			}
-			bool from_base = t == UNIT_ARTILLERY || t == UNIT_SIEGE || t == UNIT_HOWITZER || t == UNIT_EXTRACTOR
-			              || t == UNIT_ADVANCED_EXTRACTOR || t == UNIT_GENERATOR || t == UNIT_TRANSPORTER
-			              || t == UNIT_TURRET || t == UNIT_METAL_VAULT || t == UNIT_ENERGY_VAULT || t == UNIT_ENERGY_TRUCK
-			              || t == UNIT_COMMANDER || t == UNIT_HEADQUARTERS;
-			float y = u->py[i] + (from_base ? 0.0f : 0.5f * h);
+			float y = u->py[i]; // models sit on their base
 			float yaw = unit_is_structure(u->type[i]) ? 0.0f : heading[slot];
 			if (t == UNIT_ENGINEER || t == UNIT_ADVANCED_ENGINEER || t == UNIT_SAPPER) h *= 0.7f;
 			bucket[t][s][count[t][s]++] = transform(x, y, z, d, h, d, yaw);

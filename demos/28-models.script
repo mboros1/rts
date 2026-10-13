@@ -1,0 +1,39 @@
+title Spike 22b: models
+about Every T1 type built from a few primitives, with trim and accent colours (metal, tracks, lights) over the side's colour. Front row: raider, tank, artillery, siege, engineer, sapper, scout, metal and energy trucks; back row: extractor, generator, factory, transporter, turret, vaults. Then the units drive off.
+
+scenario economy
+bases none
+bot blue off
+bot red off
+clip 0..600
+camera 152,256 60
+
+at 0 spawn blue raider 1 at 118,260
+at 0 spawn blue tank 1 at 126,260
+at 0 spawn blue artillery 1 at 134,260
+at 0 spawn blue siege 1 at 142,260
+at 0 spawn blue engineer 1 at 150,260
+at 0 spawn blue sapper 1 at 158,260
+at 0 spawn blue scout 1 at 166,260
+at 0 spawn blue metal-truck 1 at 174,260
+at 0 spawn blue energy-truck 1 at 182,260
+at 0 spawn blue extractor 1 at 116,238
+at 0 spawn blue generator 1 at 126,238
+at 0 spawn blue factory 1 at 140,236
+at 0 spawn blue transporter 1 at 158,236
+at 0 spawn blue turret 1 at 172,238
+at 0 spawn blue metal-vault 1 at 180,238
+at 0 spawn blue energy-vault 1 at 187,238
+
+at 300 select blue raider within 80 of 150,260 as a
+at 300 select blue tank within 80 of 150,260 as b
+at 300 select blue artillery within 80 of 150,260 as c
+at 300 select blue siege within 80 of 150,260 as d
+at 302 move a 125,254
+at 302 move b 138,254
+at 302 move c 151,254
+at 302 move d 164,254
+
+at 600 expect blue tanks == 1
+at 600 expect blue factories == 1
+at 600 expect blue transporters == 1
