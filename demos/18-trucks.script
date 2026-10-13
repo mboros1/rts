@@ -7,6 +7,7 @@ clip 0..7200
 speed 8
 camera 150,256 220
 bot blue.0 off                       # blue.0 is a person: the script plays it
+bot red off                          # not about red: its raiders would catch the trucks
 
 at 0 spawn blue.0 generator 8 at 40,200 radius 14
 

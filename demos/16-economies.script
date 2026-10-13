@@ -21,11 +21,11 @@ at 6300 give blue.0 metal 400 to 1
 at 6900 give blue.0 metal 400 to 1
 
 # Observed: at 900, 400 metal moves (blue.0 406 -> 7, blue.1 430 -> 830); at
-# 3600 blue.0 has only 20, and only that moves. By 7200 blue.1 has 46 units to
+# 3600 blue.0 has only 20 to 45, and only that moves. By 7200 blue.1 has 46 units to
 # blue.0's 30; red, stalled on metal, is down to 9 and has lost 93.
 at 901 expect blue.0 metal < 50
 at 901 expect blue.1 metal >= 800
-at 3601 expect blue.0 metal < 30
+at 3601 expect blue.0 metal < 50
 at 7200 expect blue.1 units >= 30
 at 7200 expect blue.0 units >= 15
 at 7200 expect red units <= 25

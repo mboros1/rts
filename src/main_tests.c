@@ -1703,6 +1703,36 @@ static void test_map(void)
 	sim_destroy(&big);
 }
 
+// A commander-only start builds on either side: red's sites mirror blue's
+// (red's commander once walked into its headquarters toward a site behind
+// it, and stood there for the rest of the game).
+static void test_bot_commander_start(void)
+{
+	for (int side = 0; side < FACTION_COUNT; side++) {
+		SimConfig c = sim_config_default();
+		c.economy = true;
+		c.commanders = true;
+		c.bases = (uint8_t)(1 << side);
+		Sim sim;
+		sim_init(&sim, c);
+		Bot bot = bot_create((FactionId){(uint32_t)side}, 1);
+		Arena cmd_arena = arena_create("cmds", 1 << 20);
+		Command cmds[64];
+		for (int t = 0; t < 3000; t++) {
+			arena_reset(&cmd_arena);
+			ptrdiff_t n = 0;
+			bot_think(&bot, &sim, &cmd_arena, cmds, &n, countof(cmds));
+			sim_step(&sim, cmds, n);
+		}
+		const Units *u = &sim.factions[side].units;
+		int factories = 0;
+		for (ptrdiff_t i = 0; i < u->count; i++) factories += u->type[i] == UNIT_FACTORY && u->progress[i] >= 1.0f;
+		CHECK(factories >= 1);
+		arena_destroy(&cmd_arena);
+		sim_destroy(&sim);
+	}
+}
+
 // T2 turned off (the default, tier 1): no advanced factory goes up, and one
 // that's there anyway makes nothing; T1 goes on as before.
 static void test_tier_off(void)
@@ -1974,6 +2004,7 @@ static const Test tests[] = {
 	{"context", test_context},
 	{"t2", test_t2},
 	{"tier-off", test_tier_off},
+	{"bot-commander-start", test_bot_commander_start},
 	{"map", test_map},
 };
 

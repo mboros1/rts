@@ -150,9 +150,13 @@ static bool site_near_base(const Sim *sim, const Bot *bot, UnitType type, const 
 {
 	FactionId f = bot->faction;
 	V2 base = sim_player_base(sim, f, bot->player);
+	// Mirrored for red, so both sides try the middle's side first: the other
+	// way, red's commander walked into its headquarters and stuck there.
+	float face = f.v == 0 ? 1.0f : -1.0f;
 	for (int i = 0; i < 64; i++) {
 		float r = 16.0f + 7.0f * (float)(i / 8);
-		V2 at = v2_add(base, v2_scale(ring[(i + 3 * (i / 8)) % 8], r));
+		V2 dir = ring[(i + 3 * (i / 8)) % 8];
+		V2 at = v2_add(base, v2_scale(v2(dir.x * face, dir.z), r));
 		if (placement_ok(sim, f, type, at) && clear_of_promises(promised, type, at)) {
 			*out = at;
 			return true;
