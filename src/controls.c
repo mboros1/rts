@@ -133,6 +133,30 @@ static void select_units(Controls *c, const Sim *sim, const View *view, Rectangl
 	if (click && best >= 0) c->selection[c->selection_count++] = units_handle(u, best);
 }
 
+// Your side's unfinished structure under the mouse that a selected builder
+// can finish, or -1. A right-click on one resumes building it, as in BAR.
+static ptrdiff_t unfinished_at(const Controls *c, const Sim *sim, const View *view, Vector2 mouse)
+{
+	const Units *u = own_units(c, sim);
+	ptrdiff_t best = -1;
+	float best_d2 = 14.0f * 14.0f;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (!unit_is_structure(u->type[i]) || u->progress[i] >= 1.0f) continue;
+		Vector2 s = GetWorldToScreen((Vector3){u->px[i], u->py[i] + 0.5f, u->pz[i]}, view->camera);
+		float dx = s.x - mouse.x, dy = s.y - mouse.y;
+		if (dx * dx + dy * dy < best_d2) {
+			best = i;
+			best_d2 = dx * dx + dy * dy;
+		}
+	}
+	if (best < 0) return -1;
+	for (ptrdiff_t k = 0; k < c->selection_count; k++) {
+		ptrdiff_t d = units_find(u, c->selection[k]);
+		if (d >= 0 && builder_builds(u->type[d], u->type[best])) return best;
+	}
+	return -1;
+}
+
 // Keep only the selected units of `type` (or, `drop`, all but them).
 static void narrow_selection(Controls *c, const Sim *sim, UnitType type, bool drop)
 {
@@ -401,7 +425,11 @@ ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const Vie
 		select_units(c, sim, view, box, shift, click);
 	}
 	V2 at;
-	if (in->click[1] && !over_panels(&L, mouse) && pick_ground(view, &sim->terrain, mouse, &at)) {
+	ptrdiff_t site = in->click[1] && !over_panels(&L, mouse) ? unfinished_at(c, sim, view, mouse) : -1;
+	if (site >= 0) {
+		const Units *u = own_units(c, sim);
+		order(c, frame, out, cap, &n, (Order){.kind = COMMAND_BUILD, .target = v2(u->px[site], u->pz[site]), .type = u->type[site]});
+	} else if (in->click[1] && !over_panels(&L, mouse) && pick_ground(view, &sim->terrain, mouse, &at)) {
 		bool move = input_ctrl(in);
 		order(c, frame, out, cap, &n, (Order){.kind = move ? COMMAND_MOVE : COMMAND_ATTACK_MOVE, .target = at});
 	}

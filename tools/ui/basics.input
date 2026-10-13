@@ -44,5 +44,15 @@ at 5.4 drag 450,200 1150,700             # builders again: their own tab, not th
 at 5.45 key Q                            # economy's first item, still
 at 5.47 expect busy == 1
 at 5.48 key Escape
-at 5.5 key Escape                       # nothing in progress: leaves (here, quits)
-at 6.5 expect sent any == 6             # never reached if Escape left
+# A factory started, then stopped: a right-click on the unfinished site resumes it.
+at 5.5 key V
+at 5.55 key Q
+at 5.6 click 770,560
+at 5.7 expect sent build == 2
+at 11.0 key Space
+at 11.1 shot unfinished
+at 11.2 click 770,560 right
+at 11.4 expect sent build == 3
+at 11.5 expect sent fight == 0           # not a fight order on the ground
+at 11.6 key Escape                       # nothing in progress: leaves (here, quits)
+at 12.6 expect sent any == 9            # never reached if Escape left

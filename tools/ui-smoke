@@ -17,5 +17,5 @@ cat "$out/client.out" | grep -E '^  (ok|FAIL)|expectations held' || true
 # The last step leaves before its expectation: Escape with nothing to cancel quits.
 grep -q 'FAIL' "$out/client.out" && { echo "ui-smoke: an expectation failed"; exit 1; }
 [ "$status" = 0 ] || { echo "ui-smoke: the client exited $status"; tail -5 "$out/client.out"; exit 1; }
-for s in start base placing factory logistics; do [ -s "$out/$s.png" ] || { echo "ui-smoke: no $s.png"; exit 1; }; done
+for s in start base placing factory logistics unfinished; do [ -s "$out/$s.png" ] || { echo "ui-smoke: no $s.png"; exit 1; }; done
 echo "ui-smoke: ok"
