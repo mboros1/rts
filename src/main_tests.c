@@ -1703,6 +1703,98 @@ static void test_map(void)
 	sim_destroy(&big);
 }
 
+// Orders for later (shift): queued moves run in order; a plain order
+// replaces the list; a queued build list is built in turn; lists survive a
+// snapshot (same hash), and a dead unit's nodes go back to the pool.
+static void test_later_orders(void)
+{
+	SimConfig c = sim_config_default();
+	c.economy = true;
+	c.bases = 1;
+	Sim sim;
+	sim_init(&sim, c);
+	Faction *f = &sim.factions[0];
+	Units *u = &f->units;
+	f->economy[0].metal = f->economy[0].metal_cap = 1e6f;
+	f->economy[0].energy = f->economy[0].energy_cap = 1e7f;
+	Command spawn = {.faction = {0}, .kind = COMMAND_SPAWN, .unit_type = UNIT_TANK, .amount = 1, .target = v2(100.0f, 200.0f)};
+	sim_step(&sim, &spawn, 1);
+	UnitHandle tank = NO_UNIT, eng = NO_UNIT;
+	for (ptrdiff_t i = 0; i < u->count; i++) {
+		if (u->type[i] == UNIT_TANK) tank = units_handle(u, i);
+		if (u->type[i] == UNIT_ENGINEER && unit_handle_eq(eng, NO_UNIT)) eng = units_handle(u, i);
+	}
+	ptrdiff_t free0 = u->later_free_count;
+	Command moves[] = {
+		{.faction = {0}, .kind = COMMAND_MOVE, .target = v2(120.0f, 200.0f), .count = 1, .units = &tank},
+		{.faction = {0}, .kind = COMMAND_MOVE, .target = v2(120.0f, 230.0f), .count = 1, .units = &tank, .flags = COMMAND_QUEUED},
+		{.faction = {0}, .kind = COMMAND_MOVE, .target = v2(100.0f, 230.0f), .count = 1, .units = &tank, .flags = COMMAND_QUEUED},
+	};
+	sim_step(&sim, moves, countof(moves));
+	ptrdiff_t d = units_find(u, tank);
+	CHECK(u->order[d] == ORDER_MOVE && u->later_len[d] == 2 && u->later_free_count == free0 - 2);
+
+	// The lists survive a snapshot: same hash, same list.
+	Arena a = arena_create("later", 16 << 20);
+	ByteBuf buf = bytebuf_make(&a, 8 << 20);
+	faction_write(f, &buf);
+	Sim copy;
+	sim_init(&copy, c);
+	ByteReader r = byte_reader(buf.data, buf.len);
+	CHECK(faction_read(&copy.factions[0], &r));
+	CHECK(faction_hash(&copy.factions[0]).v == faction_hash(f).v);
+	CHECK(copy.factions[0].units.later_len[units_find(&copy.factions[0].units, tank)] == 2);
+	sim_destroy(&copy);
+
+	// Corner by corner: it passes the second corner, then ends at the third.
+	bool passed = false;
+	for (int t = 0; t < 1200; t++) {
+		sim_step(&sim, nullptr, 0);
+		d = units_find(u, tank);
+		passed = passed || v2_len(v2_sub(v2(u->px[d], u->pz[d]), v2(120.0f, 230.0f))) < 4.0f;
+	}
+	CHECK(passed && v2_len(v2_sub(v2(u->px[d], u->pz[d]), v2(100.0f, 230.0f))) < 4.0f && u->later_len[d] == 0);
+	CHECK(u->later_free_count == free0);
+
+	// A plain order replaces the list.
+	Command again[] = {
+		{.faction = {0}, .kind = COMMAND_MOVE, .target = v2(140.0f, 200.0f), .count = 1, .units = &tank},
+		{.faction = {0}, .kind = COMMAND_MOVE, .target = v2(140.0f, 240.0f), .count = 1, .units = &tank, .flags = COMMAND_QUEUED},
+	};
+	sim_step(&sim, again, countof(again));
+	Command plain = {.faction = {0}, .kind = COMMAND_MOVE, .target = v2(90.0f, 200.0f), .count = 1, .units = &tank};
+	sim_step(&sim, &plain, 1);
+	d = units_find(u, tank);
+	CHECK(u->later_len[d] == 0 && u->tx[d] == 90.0f && u->later_free_count == free0);
+
+	// Queued builds: an engineer puts up two generators, one after the other.
+	int before = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) before += u->type[i] == UNIT_GENERATOR;
+	ptrdiff_t e = units_find(u, eng);
+	V2 at = v2(u->px[e], u->pz[e]);
+	Command builds[] = {
+		{.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_GENERATOR, .target = v2_add(at, v2(0.0f, 10.0f)), .count = 1, .units = &eng},
+		{.faction = {0}, .kind = COMMAND_BUILD, .unit_type = UNIT_GENERATOR, .target = v2_add(at, v2(10.0f, 10.0f)), .count = 1, .units = &eng, .flags = COMMAND_QUEUED},
+	};
+	sim_step(&sim, builds, countof(builds));
+	for (int t = 0; t < 3000; t++) sim_step(&sim, nullptr, 0);
+	int after = 0;
+	for (ptrdiff_t i = 0; i < u->count; i++) after += u->type[i] == UNIT_GENERATOR && u->progress[i] >= 1.0f;
+	CHECK(after == before + 2);
+
+	// A dead unit's list goes back to the pool.
+	Command more[] = {
+		{.faction = {0}, .kind = COMMAND_MOVE, .target = v2(140.0f, 200.0f), .count = 1, .units = &tank},
+		{.faction = {0}, .kind = COMMAND_MOVE, .target = v2(140.0f, 240.0f), .count = 1, .units = &tank, .flags = COMMAND_QUEUED},
+	};
+	sim_step(&sim, more, countof(more));
+	CHECK(u->later_free_count == free0 - 1);
+	units_kill(u, units_find(u, tank));
+	CHECK(u->later_free_count == free0);
+	arena_destroy(&a);
+	sim_destroy(&sim);
+}
+
 // A commander-only start builds on either side: red's sites mirror blue's
 // (red's commander once walked into its headquarters toward a site behind
 // it, and stood there for the rest of the game).
@@ -2005,6 +2097,7 @@ static const Test tests[] = {
 	{"t2", test_t2},
 	{"tier-off", test_tier_off},
 	{"bot-commander-start", test_bot_commander_start},
+	{"later-orders", test_later_orders},
 	{"map", test_map},
 };
 

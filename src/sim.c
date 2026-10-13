@@ -235,6 +235,54 @@ static void spots_generate(Spots *s, const Terrain *t, uint64_t seed, const V2 b
 
 // ---------------------------------------------------------------- units
 
+// Orders for later. The pool's layout never shows: lists are saved and
+// hashed by their contents, and a load rebuilds the pool (later_reset).
+static void later_reset(Units *u)
+{
+	for (ptrdiff_t n = 0; n < u->later_cap; n++) u->later_free[n] = (int32_t)(u->later_cap - 1 - n);
+	u->later_free_count = u->later_cap;
+}
+
+static void later_clear(Units *u, ptrdiff_t d)
+{
+	for (int32_t n = u->later_head[d]; n >= 0; n = u->later_next[n]) u->later_free[u->later_free_count++] = n;
+	u->later_head[d] = u->later_tail[d] = -1;
+	u->later_len[d] = 0;
+}
+
+// False if the unit's list or the pool is full: the order is dropped.
+static bool later_push(Units *u, ptrdiff_t d, OrderKind kind, V2 at, UnitType type)
+{
+	if (u->later_len[d] >= LATER_MAX || u->later_free_count == 0) return false;
+	int32_t n = u->later_free[--u->later_free_count];
+	u->later_next[n] = -1;
+	u->later_kind[n] = kind;
+	u->later_tx[n] = at.x;
+	u->later_tz[n] = at.z;
+	u->later_type[n] = type;
+	if (u->later_tail[d] >= 0) u->later_next[u->later_tail[d]] = n;
+	else u->later_head[d] = n;
+	u->later_tail[d] = n;
+	u->later_len[d]++;
+	return true;
+}
+
+// The next order for later becomes the unit's order.
+static void later_pop(Units *u, ptrdiff_t d)
+{
+	int32_t n = u->later_head[d];
+	ASSERT(n >= 0);
+	u->order[d] = u->later_kind[n];
+	u->tx[d] = u->later_tx[n];
+	u->tz[d] = u->later_tz[n];
+	u->building[d] = NO_UNIT;
+	if (u->later_kind[n] == ORDER_BUILD) u->build_type[d] = u->later_type[n];
+	u->later_head[d] = u->later_next[n];
+	if (u->later_head[d] < 0) u->later_tail[d] = -1;
+	u->later_len[d]--;
+	u->later_free[u->later_free_count++] = n;
+}
+
 static void units_init(Units *u, Arena *a, ptrdiff_t cap)
 {
 	*u = (Units){.cap = cap};
@@ -269,6 +317,17 @@ static void units_init(Units *u, Arena *a, ptrdiff_t cap)
 	u->warp_free = PUSH(a, uint8_t, cap);
 	u->owner = PUSH(a, PlayerSlot, cap);
 	u->output = PUSH(a, PlayerSlot, cap);
+	u->later_head = PUSH(a, int32_t, cap);
+	u->later_tail = PUSH(a, int32_t, cap);
+	u->later_len = PUSH(a, uint8_t, cap);
+	u->later_cap = cap * LATER_PER_UNIT;
+	u->later_free = PUSH(a, int32_t, u->later_cap);
+	u->later_next = PUSH(a, int32_t, u->later_cap);
+	u->later_kind = PUSH(a, OrderKind, u->later_cap);
+	u->later_tx = PUSH(a, float, u->later_cap);
+	u->later_tz = PUSH(a, float, u->later_cap);
+	u->later_type = PUSH(a, UnitType, u->later_cap);
+	later_reset(u);
 	// Free list pops from the end, so the first spawn gets slot 0.
 	for (ptrdiff_t s = 0; s < cap; s++) {
 		u->slot_dense[s] = -1;
@@ -334,6 +393,8 @@ static ptrdiff_t units_spawn(Units *u, UnitType type, PlayerSlot owner, float x,
 	u->warp_free[d] = 0;
 	u->owner[d] = owner;
 	u->output[d] = owner;
+	u->later_head[d] = u->later_tail[d] = -1;
+	u->later_len[d] = 0;
 	return d;
 }
 
@@ -342,6 +403,7 @@ static void units_kill(Units *u, ptrdiff_t d)
 {
 	ASSERT(d >= 0 && d < u->count);
 	int32_t dead_slot = u->dense_slot[d];
+	later_clear(u, d);
 	ptrdiff_t last = --u->count;
 	if (d != last) {
 #define MOVE(f) u->f[d] = u->f[last]
@@ -351,6 +413,7 @@ static void units_kill(Units *u, ptrdiff_t d)
 		MOVE(progress); MOVE(build_type); MOVE(building); MOVE(work);
 		MOVE(queue); MOVE(queue_len); MOVE(repeat); MOVE(dest); MOVE(route); MOVE(seeded);
 		MOVE(owner); MOVE(output); MOVE(recharge); MOVE(warp_free);
+		MOVE(later_head); MOVE(later_tail); MOVE(later_len);
 #undef MOVE
 		u->slot_dense[u->dense_slot[d]] = (int32_t)d;
 	}
@@ -649,6 +712,7 @@ static void apply_transform(Faction *f, const Command *c)
 		if (d < 0 || u->order[d] == ORDER_TRANSFORM) continue;
 		bool can = dig_in ? unit_digs_in(u->type[d]) : (u->type[d] == UNIT_TURRET || u->type[d] == UNIT_METAL_VAULT || u->type[d] == UNIT_ENERGY_VAULT) && u->seeded[d];
 		if (!can) continue;
+		later_clear(u, d);
 		u->order[d] = ORDER_TRANSFORM;
 		u->work[d] = 0.0f;
 		u->building[d] = NO_UNIT;
@@ -712,6 +776,7 @@ static void apply_send(Faction *f, const Sim *sim, const Command *c)
 	for (ptrdiff_t k = 0; k < c->count; k++) {
 		ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 		if (d < 0 || unit_is_structure(u->type[d]) || (unpaired && !unpaired_can_send(u->type[d]))) continue;
+		later_clear(u, d);
 		u->order[d] = ORDER_SEND;
 		u->output[d] = c->to;
 		u->tx[d] = u->px[g];
@@ -936,6 +1001,7 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		for (ptrdiff_t k = 0; k < c->count; k++) {
 			ptrdiff_t d = units_find_own(u, c->units[k], c->player);
 			if (d < 0 || u->type[d] != UNIT_COMMANDER || u->order[d] == ORDER_WARP || u->recharge[d] > 0) continue;
+			later_clear(u, d);
 			u->order[d] = ORDER_WARP;
 			u->work[d] = 0.0f;
 			u->warp_free[d] = (c->flags & COMMAND_FREE) != 0;
@@ -1002,6 +1068,14 @@ static void apply_command(Faction *f, const Sim *sim, const Command *c)
 		if (build && !builder_builds(u->type[d], c->unit_type)) continue;
 		V2 offset = v2_scale(v2_sub(v2(u->px[d], u->pz[d]), centre), squeeze);
 		V2 dest = build ? target : clamp_to_map(t, v2_add(target, offset), 1.0f);
+		// Shift: after what it's doing (now, if nothing); otherwise this
+		// replaces its orders, later ones too.
+		bool later = (c->flags & COMMAND_QUEUED) && c->kind != COMMAND_STOP;
+		if (later && u->order[d] != ORDER_IDLE) {
+			later_push(u, d, order_for_command[c->kind], dest, c->unit_type);
+			continue;
+		}
+		if (!later) later_clear(u, d);
 		u->order[d] = order_for_command[c->kind];
 		u->tx[d] = dest.x;
 		u->tz[d] = dest.z;
@@ -1884,6 +1958,10 @@ static void faction_phase(Sim *sim, Faction *f, const FactionEffects *fx, const 
 	build_view(f, &sim->terrain, sim->tick);
 	for (ptrdiff_t k = 0; k < count; k++)
 		if (commands[k].faction.v == f->id.v) apply_command(f, sim, &commands[k]);
+	// Idle with orders for later: the next one (an order done last tick, or
+	// one that couldn't be carried out, moves the list on).
+	for (ptrdiff_t i = 0; i < f->units.count; i++)
+		if (f->units.order[i] == ORDER_IDLE && f->units.later_len[i] > 0) later_pop(&f->units, i);
 	spawn(f, sim);
 	move_units(f, &sim->terrain);
 	run_commanders(f, sim);
@@ -2069,6 +2147,12 @@ static Hash hash_units(Hash h, const Units *u)
 		h = hash_u32(h, (uint32_t)u->owner[i].v << 8 | u->output[i].v);
 		h = hash_u32(h, (uint32_t)u->recharge[i]);
 		h = hash_u32(h, u->warp_free[i]);
+		h = hash_u32(h, u->later_len[i]);
+		for (int32_t n = u->later_head[i]; n >= 0; n = u->later_next[n]) {
+			h = hash_u32(h, (uint32_t)u->later_kind[n] << 8 | u->later_type[n]);
+			h = hash_f32(h, u->later_tx[n]);
+			h = hash_f32(h, u->later_tz[n]);
+		}
 	}
 	return h;
 }
@@ -2196,6 +2280,13 @@ void faction_write(const Faction *f, ByteBuf *b)
 		put8(b, u->output[i].v);
 		put32(b, (uint32_t)u->recharge[i]);
 		put8(b, u->warp_free[i]);
+		put8(b, u->later_len[i]);
+		for (int32_t n = u->later_head[i]; n >= 0; n = u->later_next[n]) {
+			put8(b, u->later_kind[n]);
+			put8(b, u->later_type[n]);
+			putf(b, u->later_tx[n]);
+			putf(b, u->later_tz[n]);
+		}
 	}
 	const Projectiles *p = &f->incoming;
 	put32(b, (uint32_t)p->count);
@@ -2269,6 +2360,7 @@ bool faction_read(Faction *f, ByteReader *r)
 	if (r->bad || cap != (uint32_t)u->cap || count > cap || free_count != cap - count) return false;
 	u->count = count;
 	u->free_count = free_count;
+	later_reset(u);
 	for (ptrdiff_t s = 0; s < u->cap; s++) {
 		u->slot_gen[s] = get32(r);
 		u->slot_dense[s] = -1;
@@ -2311,6 +2403,17 @@ bool faction_read(Faction *f, ByteReader *r)
 		u->recharge[i] = (int32_t)get32(r);
 		u->warp_free[i] = get8(r);
 		if (u->recharge[i] < 0 || u->warp_free[i] > 1) return false;
+		u->later_head[i] = u->later_tail[i] = -1;
+		u->later_len[i] = 0;
+		uint8_t later = get8(r);
+		if (later > LATER_MAX) return false;
+		for (int q = 0; q < later; q++) {
+			uint8_t kind = get8(r), what = get8(r);
+			float x = getf(r), z = getf(r);
+			if (r->bad || !(kind == ORDER_MOVE || kind == ORDER_ATTACK_MOVE || kind == ORDER_BUILD) || what >= UNIT_TYPE_COUNT
+			    || !ok_float(x) || !ok_float(z) || !later_push(u, i, (OrderKind)kind, v2(x, z), (UnitType)what))
+				return false;
+		}
 		if (!player_ok(u->owner[i]) || !player_ok(u->output[i])) return false;
 		if (type >= UNIT_TYPE_COUNT || order >= ORDER_KIND_COUNT || u->engaged[i] > 1 || u->cooldown[i] < 0
 		    || build_type >= UNIT_TYPE_COUNT || u->queue_len[i] > FACTORY_QUEUE || u->repeat[i] > 1 || u->seeded[i] > 1

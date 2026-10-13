@@ -319,7 +319,7 @@ static void handle_command(Server *s, Client *c, ByteReader *r)
 	            || kind == COMMAND_WARP;
 	bool ok = !r->bad && c->faction < FACTION_COUNT && kind_ok && to.v < s->sim.config.players[c->faction] && unit_type < UNIT_TYPE_COUNT
 	       && amount >= 0 && amount <= (kind == COMMAND_PRODUCE ? FACTORY_QUEUE : ZONE_MAX)
-	       && flags <= COMMAND_REPEAT && route_ok(route)
+	       && (flags & ~(COMMAND_REPEAT | COMMAND_QUEUED)) == 0 && route_ok(route)
 	       && n <= (uint32_t)s->sim.config.max_units && (ptrdiff_t)n * 8 == r->len - r->pos
 	       && s->queued_count < MAX_COMMANDS;
 	if (!ok) {

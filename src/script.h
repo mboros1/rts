@@ -29,8 +29,9 @@
 //   at 0   spawn blue tank 20 at 120,256 radius 10
 //   at 1   select blue tank within 30 of 120,256 max 20 as column
 //   at 30  move column 256,90         # also: attack-move, stop
+//   at 31  move column 300,90 queued  # after its current orders (shift)
 //   at 40  build crew extractor at 92,226   # engineers; also generator, factory
-//   at 40  queue crew generator at 40,280   # build once the group is done building
+//   at 40  queue crew generator at 40,280   # a build after its current orders (shift)
 //   zones alpha beta                  # names for zone numbers, in order
 //   at 50  send army to gamma via beta at 60,300  # through our nearest transporter;
 //                                     #   via: the hops before; at: an unpaired landing
@@ -77,7 +78,6 @@
 typedef enum : uint8_t {
 	ACTION_SELECT,
 	ACTION_ORDER,
-	ACTION_QUEUE,           // a build that waits for the group to finish
 	ACTION_SPAWN,
 	ACTION_BOT,
 	ACTION_EXPECT,
@@ -174,8 +174,6 @@ typedef struct {
 	int32_t show_group;            // clips draw the controls as if it were selected; -1: none
 	int32_t show_tab;              // ... with this build tab open
 	// Queued builds per group, issued one at a time as the group goes idle.
-	const ScriptAction ***queued;
-	int32_t *queued_head, *queued_len;
 	int32_t expects;
 	int32_t failures;
 	FILE *log;                     // expect results go here; may be nullptr

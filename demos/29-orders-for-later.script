@@ -1,0 +1,31 @@
+title Spike 22c: orders for later
+about Shift queues orders. Four tanks are given a route of four waypoints at once and drive it corner by corner; an engineer is given three generators and an extractor at once and builds them in turn. Nobody gives a second order.
+
+scenario economy
+bases blue
+bot blue off
+bot red off
+clip 0..2400
+speed 3
+camera 100,282 165
+
+at 0 spawn blue tank 4 at 100,300 radius 4
+at 1 select blue tank within 20 of 100,300 as column
+at 1 select blue engineer max 1 as crew
+at 2 move column 160,300
+at 2 move column 160,340 queued
+at 2 move column 110,340 queued
+at 2 move column 110,300 queued
+at 2 build crew generator at 70,240
+at 2 queue crew generator at 70,230
+at 2 queue crew generator at 80,225
+at 2 queue crew extractor at 46,229
+
+at 600 select blue tank within 10 of 160,340 as corner
+at 601 expect corner alive >= 4          # at the far corner, on the way round
+# Observed: the column is back at its start after the loop; the engineer
+# put up all three generators and the extractor without another order.
+at 2399 select blue tank within 12 of 110,300 as home
+at 2400 expect home alive >= 4
+at 2400 expect blue generators >= 3
+at 2400 expect blue extractors >= 1

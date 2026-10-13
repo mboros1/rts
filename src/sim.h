@@ -266,6 +266,17 @@ typedef struct {
 	PlayerSlot *owner;     // the only player whose orders it takes
 	PlayerSlot *output;    // factories: who what they make belongs to;
 	                       // units on a send order: who they arrive owned by
+	// Orders for later (shift): each unit's a list, oldest first, through a
+	// pool of nodes shared by the faction. The unit takes the next when idle.
+	int32_t *later_head, *later_tail;  // per unit: first and last node, -1 if none
+	uint8_t *later_len;                // per unit: at most LATER_MAX
+	ptrdiff_t later_cap;               // nodes in the pool
+	ptrdiff_t later_free_count;
+	int32_t *later_free;               // free nodes, popped from the end
+	int32_t *later_next;               // per node: the next in its list, -1 at the end
+	OrderKind *later_kind;             // per node: MOVE, ATTACK_MOVE or BUILD
+	float *later_tx, *later_tz;        // per node: the target
+	UnitType *later_type;              // per node: BUILD's structure
 } Units;
 
 // Zones are numbered by the world's zone list, 0 to ZONE_MAX - 1.
@@ -320,6 +331,9 @@ typedef struct {
 } Departure;
 
 enum { FACTORY_QUEUE = 8 };
+// Orders for later: at most this many per unit, and the pool holds
+// LATER_PER_UNIT per unit of capacity (a full pool refuses more, like a long list).
+enum { LATER_MAX = 64, LATER_PER_UNIT = 4 };
 
 // Shells flying toward a faction, simulated by that faction.
 // Unordered; removal is swap-remove. 0 <= count <= cap.
@@ -556,6 +570,7 @@ enum : uint8_t {
 	COMMAND_FREE = 4,       // WARP: costs nothing
 	COMMAND_WARPED = 8,     // ARRIVE: commanders warping in (their warp recharging)
 	COMMAND_RESPAWN = 16,   // ARRIVE: a player's commander died elsewhere: respawn it here
+	COMMAND_QUEUED = 32,    // MOVE, ATTACK_MOVE, BUILD: after the units' current orders (shift)
 };
 
 // Commanders. Each player has one, in the world; it builds what engineers

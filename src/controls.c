@@ -367,7 +367,7 @@ ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const Vie
 		if (action_pressed(c, in, BIND_CANCEL) || in->click[1]) c->aiming = -1;
 		else if (in->click[0] && !over_panels(&L, mouse)
 		         && pick_ground(view, &sim->terrain, mouse, &at)) {
-			order(c, frame, out, cap, &n, (Order){.kind = (CommandKind)c->aiming, .target = at});
+			order(c, frame, out, cap, &n, (Order){.kind = (CommandKind)c->aiming, .target = at, .flags = shift ? COMMAND_QUEUED : 0});
 			if (!shift) c->aiming = -1;
 		}
 		return n;
@@ -382,7 +382,8 @@ ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const Vie
 		}
 		if (in->click[0] && !over_panels(&L, mouse) && pick_ground(view, &sim->terrain, mouse, &at)) {
 			UnitType type = (UnitType)c->placing;
-			order(c, frame, out, cap, &n, (Order){.kind = COMMAND_BUILD, .target = placement_site(sim, type, at), .type = type});
+			order(c, frame, out, cap, &n, (Order){.kind = COMMAND_BUILD, .target = placement_site(sim, type, at), .type = type,
+			                                     .flags = shift ? COMMAND_QUEUED : 0});
 			if (!shift) c->placing = -1;
 			return n;
 		}
@@ -428,10 +429,12 @@ ptrdiff_t controls_input(Controls *c, const Input *in, const Sim *sim, const Vie
 	ptrdiff_t site = in->click[1] && !over_panels(&L, mouse) ? unfinished_at(c, sim, view, mouse) : -1;
 	if (site >= 0) {
 		const Units *u = own_units(c, sim);
-		order(c, frame, out, cap, &n, (Order){.kind = COMMAND_BUILD, .target = v2(u->px[site], u->pz[site]), .type = u->type[site]});
+		order(c, frame, out, cap, &n, (Order){.kind = COMMAND_BUILD, .target = v2(u->px[site], u->pz[site]), .type = u->type[site],
+		                                     .flags = shift ? COMMAND_QUEUED : 0});
 	} else if (in->click[1] && !over_panels(&L, mouse) && pick_ground(view, &sim->terrain, mouse, &at)) {
 		bool move = input_ctrl(in);
-		order(c, frame, out, cap, &n, (Order){.kind = move ? COMMAND_MOVE : COMMAND_ATTACK_MOVE, .target = at});
+		order(c, frame, out, cap, &n, (Order){.kind = move ? COMMAND_MOVE : COMMAND_ATTACK_MOVE, .target = at,
+		                                     .flags = shift ? COMMAND_QUEUED : 0});
 	}
 	return n;
 }
@@ -668,9 +671,9 @@ static void draw_prompt(const Controls *c, const Layout *L)
 	char line[320] = "";
 	int used = 0;
 	if (c->placing >= 0)
-		snprintf(line, sizeof line, "placing a %s: click to build (shift: more), right-click or esc cancels", unit_defs[c->placing].name);
+		snprintf(line, sizeof line, "placing a %s: click to build (shift: queue more), right-click or esc cancels", unit_defs[c->placing].name);
 	else if (c->aiming >= 0)
-		snprintf(line, sizeof line, "%s: click where (shift: more), right-click or esc cancels", c->aiming == COMMAND_MOVE ? "move" : "fight");
+		snprintf(line, sizeof line, "%s: click where (shift: queue more), right-click or esc cancels", c->aiming == COMMAND_MOVE ? "move" : "fight");
 	else if (c->sending) {
 		used = snprintf(line, sizeof line, "send to:");
 		for (int k = 0; k < z->count && k < 9 && used < (int)sizeof line; k++)

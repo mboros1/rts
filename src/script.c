@@ -183,18 +183,20 @@ static bool parse_action(Parser *p, int64_t tick, char **tok, int n, const char 
 	}
 	if (!strcmp(verb, "move") || !strcmp(verb, "attack-move") || !strcmp(verb, "stop")) {
 		bool stop = !strcmp(verb, "stop");
-		if (n != (stop ? 2 : 3)) return bad(p, stop ? "stop NAME" : "move|attack-move NAME X,Z", nullptr);
+		bool queued = !stop && n == 4 && !strcmp(tok[3], "queued");
+		if (n != (stop ? 2 : queued ? 4 : 3)) return bad(p, stop ? "stop NAME" : "move|attack-move NAME X,Z [queued]", nullptr);
 		if (!(a = new_action(p, tick, ACTION_ORDER, text))) return bad(p, "too many actions", nullptr);
 		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
 		a->command = stop ? COMMAND_STOP : !strcmp(verb, "move") ? COMMAND_MOVE : COMMAND_ATTACK_MOVE;
+		if (queued) a->flags = COMMAND_QUEUED; // after the group's current orders (shift)
 		if (!stop && !parse_point(tok[2], &a->at)) return bad(p, "target is X,Z", tok[2]);
 		return true;
 	}
 	if (!strcmp(verb, "build") || !strcmp(verb, "queue")) {
 		// build|queue GROUP TYPE at X,Z
 		if (n != 5 || strcmp(tok[3], "at")) return bad(p, "build|queue GROUP TYPE at X,Z", nullptr);
-		ActionKind kind = !strcmp(verb, "queue") ? ACTION_QUEUE : ACTION_ORDER;
-		if (!(a = new_action(p, tick, kind, text))) return bad(p, "too many actions", nullptr);
+		if (!(a = new_action(p, tick, ACTION_ORDER, text))) return bad(p, "too many actions", nullptr);
+		if (!strcmp(verb, "queue")) a->flags = COMMAND_QUEUED; // the sim's orders for later, as shift is
 		if ((a->group = group_index(p, tok[1], false)) < 0) return bad(p, "no group selected as", tok[1]);
 		if (!parse_type(tok[2], &a->type, false) || !unit_is_structure((UnitType)a->type))
 			return bad(p, "not a structure", tok[2]);
@@ -661,39 +663,7 @@ void script_run_init(ScriptRun *r, const Script *s, Arena *arena, FILE *log)
 	r->group_len = PUSH(arena, ptrdiff_t, s->group_count);
 	r->group_side = PUSH(arena, FactionId, s->group_count);
 	r->group_player = PUSH(arena, PlayerSlot, s->group_count);
-	r->queued = PUSH(arena, const ScriptAction **, s->group_count);
-	r->queued_head = PUSH(arena, int32_t, s->group_count);
-	r->queued_len = PUSH(arena, int32_t, s->group_count);
-	for (ptrdiff_t g = 0; g < s->group_count; g++) {
-		r->group_units[g] = PUSH(arena, UnitHandle, s->config.max_units);
-		r->queued[g] = PUSH(arena, const ScriptAction *, s->action_count > 0 ? s->action_count : 1);
-	}
-}
-
-static Command build_command(const ScriptRun *r, const ScriptAction *a, Arena *tick_arena)
-{
-	return (Command){
-		.faction = r->group_side[a->group],
-		.player = r->group_player[a->group],
-		.to = r->group_player[a->group],
-		.kind = COMMAND_BUILD,
-		.unit_type = (UnitType)a->type,
-		.target = a->at,
-		.count = r->group_len[a->group],
-		.units = arena_copy(tick_arena, r->group_units[a->group],
-		                    r->group_len[a->group] * (ptrdiff_t)sizeof(UnitHandle), alignof(UnitHandle)),
-	};
-}
-
-// A group is busy while any living engineer in it is still on a build.
-static bool group_building(const ScriptRun *r, int32_t g, const Sim *sim)
-{
-	const Units *u = &sim->factions[r->group_side[g].v].units;
-	for (ptrdiff_t i = 0; i < r->group_len[g]; i++) {
-		ptrdiff_t d = units_find(u, r->group_units[g][i]);
-		if (d >= 0 && u->order[d] == ORDER_BUILD) return true;
-	}
-	return false;
+	for (ptrdiff_t g = 0; g < s->group_count; g++) r->group_units[g] = PUSH(arena, UnitHandle, s->config.max_units);
 }
 
 typedef struct {
@@ -853,9 +823,6 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			out[n++] = (Command){.faction = a->side, .player = a->player, .kind = COMMAND_SPAWN, .target = a->at,
 			                     .unit_type = (UnitType)a->type, .amount = a->limit, .radius = a->radius};
 			break;
-		case ACTION_QUEUE:
-			r->queued[a->group][r->queued_head[a->group] + r->queued_len[a->group]++] = a;
-			break;
 		case ACTION_BOT:
 			for (int p = 0; p < MAX_PLAYERS; p++)
 				if (!a->player_given || p == a->player.v) r->bots[a->side.v][p].enabled = a->on;
@@ -874,13 +841,6 @@ ptrdiff_t script_tick(ScriptRun *r, const Sim *sim, Arena *tick_arena, Command *
 			if (n < cap) out[n++] = (Command){.faction = a->side, .player = a->player, .to = a->player, .kind = COMMAND_TAKE};
 			break;
 		}
-	}
-	// Groups that finished their last build start the next queued one.
-	for (ptrdiff_t g = 0; g < s->group_count; g++) {
-		if (r->queued_len[g] == 0 || n == cap || r->group_len[g] == 0 || group_building(r, (int32_t)g, sim)) continue;
-		out[n++] = build_command(r, r->queued[g][r->queued_head[g]], tick_arena);
-		r->queued_head[g]++;
-		r->queued_len[g]--;
 	}
 	for (int k = 0; k < FACTION_COUNT; k++)
 		for (int p = 0; p < sim->config.players[k]; p++) bot_think(&r->bots[k][p], sim, tick_arena, out, &n, cap);
